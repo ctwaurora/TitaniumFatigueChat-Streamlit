@@ -1,0 +1,21 @@
+field_name,description,required,data_type,example,source
+paper_id,文献唯一标识符,required,string,P01,literature_database.csv
+material,材料名称,required,string,Ti-6Al-4V (TC4),literature_database.csv
+manufacturing_process,制备工艺,required,string,L-PBF,literature_database.csv
+surface_state,表面状态,optional,string,as-built / machined / shot-peened,literature_database.csv
+heat_treatment,热处理制度,required,string,800°C/2h/FC + 600°C/4h/AC,literature_database.csv
+pore_size,孔隙尺寸/缺陷尺寸,required,float,50.0 (μm),PDF extraction / micro-CT
+pore_location,孔隙/缺陷位置,required,categorical,subsurface / internal / surface,SEM fractography
+pore_aspect_ratio,孔隙长宽比/形态因子,optional,float,1.5,SEM / micro-CT
+porosity,孔隙率,required,float,0.5 (%),micro-CT / Archimedes
+stress_ratio_R,应力比 R,required,float,0.1,literature_database.csv
+fatigue_type,疲劳类型 (LCF/HCF/VHCF/FCGR),required,categorical,HCF,literature_database.csv
+Nf,疲劳寿命 (cycles),required,integer,1.2e6,PDF extraction / S-N data
+S_N_data_available,是否存在 S-N 曲线数据,required,boolean,TRUE,PDF extraction
+da_dN,裂纹扩展速率 da/dN (m/cycle),optional,float,1.5e-9,PDF extraction / FCGR curve
+Delta_K,应力强度因子范围 ΔK (MPa·√m),optional,float,15.0,PDF extraction / FCGR curve
+Paris_C,Paris 参数 C,optional,float,2.1e-11,PDF extraction / curve fitting
+Paris_m,Paris 参数 m,optional,float,3.8,PDF extraction / curve fitting
+crack_initiation_site,裂纹起裂位置,required,categorical,pore / surface roughness / inclusion,SEM fractography
+characterization_method,表征方法,required,categorical,SEM / EBSD / micro-CT,literature_database.csv
+evidence_level,证据等级 (direct/indirect/inferred),required,categorical,direct,quality assessment

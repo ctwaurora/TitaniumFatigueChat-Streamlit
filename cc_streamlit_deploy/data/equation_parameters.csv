@@ -1,0 +1,23 @@
+﻿paper_id,author_year,equation_type,equation_text,parameters,related_variables,related_indicators,material_condition,source_section,extraction_confidence,source_status
+,"Agius et al., 2018",fatigue_limit,σ_w (fatigue limit at N cycles),σ_w,defect; microstructure,σ_w,Ti-6Al-4V,key_findings,keyword_matched,10.3390/met8010075
+,"CAO et al., 2018",kitagawa_takahashi,"ΔKth = f(defect_size, σ_w)",ΔKth; defect_size,porosity; roughness; defect; microstructure,ΔKth,Ti-6Al-4V,key_findings,keyword_matched,https://doi.org/10.1007/s11837-017-2728-5
+,"CAO et al., 2018",fatigue_limit,σ_w (fatigue limit at N cycles),σ_w,porosity; roughness; defect; microstructure,σ_w,Ti-6Al-4V,key_findings,keyword_matched,https://doi.org/10.1007/s11837-017-2728-5
+,"B et al., 2024",basquin_equation,σ_a = σ_f'(2Nf)^b,σ_f'; b,pore; porosity; roughness; defect,σ_f',Ti-6Al-4V (Ti-6Al-4V),key_findings,keyword_matched,10.3390/ma17184548
+,"B et al., 2024",s_n_fitting,S^m * N = C (power law S-N),m; C,pore; porosity; roughness; defect,m,Ti-6Al-4V (Ti-6Al-4V),key_findings,keyword_matched,10.3390/ma17184548
+,"a,b et al., 2017",life_prediction_model,various fatigue life prediction models,various,,various,Ti-6Al-4V,key_findings,keyword_matched,http://dx.doi.org/10.1016/j.ijfatigue.2017.06.023
+,"Kahlin et al., 2017",life_prediction_model,various fatigue life prediction models,various,,various,Ti-6Al-4V,key_findings,keyword_matched,https://doi.org/10.1016/j.ijfatigue.2017.06.023
+,"Zhai et al., 2016",fatigue_limit,σ_w (fatigue limit at N cycles),σ_w,porosity; heat treatment; stress ratio,σ_w,Ti-6Al-4V,key_findings,keyword_matched,http://dx.doi.org/10.1016/j.ijfatigue.2016.08.009
+,"Hasib et al., 2021",paris_law,da/dN = C(ΔK)^m,C; m,orientation; heat treatment,C,Ti-6Al-4V (Ti-6Al-4V),key_findings,keyword_matched,https://doi.org/10.1016/j.ijfatigue.2020.105955
+,"Hasib et al., 2021",delta_kth,ΔKth (threshold stress intensity factor),ΔKth,orientation; heat treatment,ΔKth,Ti-6Al-4V (Ti-6Al-4V),key_findings,keyword_matched,https://doi.org/10.1016/j.ijfatigue.2020.105955
+,"Paul et al., 2025",delta_kth,ΔKth (threshold stress intensity factor),ΔKth,roughness; defect; orientation; microstructure; stress ratio,ΔKth,Ti-6Al-4V (Ti-6Al-4V),key_findings,keyword_matched,nan
+,"Jesus et al., 2021",fatigue_limit,σ_w (fatigue limit at N cycles),σ_w,roughness; defect,σ_w,Ti-6Al-4V (Ti-6Al-4V),key_findings,keyword_matched,10.3390/ma14040737
+,"Jesus et al., 2021",life_prediction_model,various fatigue life prediction models,various,roughness; defect,various,Ti-6Al-4V (Ti-6Al-4V),key_findings,keyword_matched,10.3390/ma14040737
+,"Wycisk et al., 2015",fatigue_limit,σ_w (fatigue limit at N cycles),σ_w,,σ_w,Ti–6Al–4V (Ti-6Al-4V),key_findings,keyword_matched,10.3389/fmats.2015.00072
+,"Naab et al., 2024",s_n_fitting,S^m * N = C (power law S-N),m; C,defect; orientation; heat treatment,m,Ti-6Al-4V,key_findings,keyword_matched,https://doi.org/10.1016/j.msea.2024.146658
+,"Naab et al., 2024",fatigue_limit,σ_w (fatigue limit at N cycles),σ_w,defect; orientation; heat treatment,σ_w,Ti-6Al-4V,key_findings,keyword_matched,https://doi.org/10.1016/j.msea.2024.146658
+,"Naab et al., 2024",delta_kth,ΔKth (threshold stress intensity factor),ΔKth,defect; orientation; heat treatment,ΔKth,Ti-6Al-4V,key_findings,keyword_matched,https://doi.org/10.1016/j.msea.2024.146658
+,"Naab et al., 2024",life_prediction_model,various fatigue life prediction models,various,defect; orientation; heat treatment,various,Ti-6Al-4V,key_findings,keyword_matched,https://doi.org/10.1016/j.msea.2024.146658
+,"Leuders et al., 2013",fatigue_limit,σ_w (fatigue limit at N cycles),σ_w,pore; defect; microstructure,σ_w,TiAl6V4 (Ti-6Al-4V),key_findings,keyword_matched,10.1016/j.ijfatigue.2012.11.011
+,"袁珂 et al., 2025",fatigue_limit,σ_w (fatigue limit at N cycles),σ_w,roughness,σ_w,7085铝合金,key_findings,keyword_matched,10. 16579/j. issn. 1001. 9669. 2025. 07. 010
+,"赵鹏程 et al., 2025",life_prediction_model,various fatigue life prediction models,various,,various,Ti-6Al-4V,key_findings,keyword_matched,nan
+P05,"M. Kahlin et al., 2017",life_prediction_model,various fatigue life prediction models,various,surface_roughness,Nf/S-N,,key_findings,snippet_matched,evidence_snippets.csv

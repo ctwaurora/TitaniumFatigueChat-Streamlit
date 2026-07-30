@@ -1,0 +1,21 @@
+canonical_term,term_type,synonyms,common_typos,english_terms,related_variables,description
+孔隙尺寸,variable,"孔尺寸;孔洞尺寸;缺陷尺寸;孔径;孔隙大小;孔洞大小;孔隙尺度","孔边尺寸;孔壁尺寸;孔便尺寸;空隙尺寸;孔希尺寸;孔边长","pore size;defect size;sqrt area;sqrt_area",pore_size;sqrt_area;defect_size,表征孔隙或缺陷的尺寸变量常用于分析疲劳寿命和裂纹起裂
+疲劳寿命,fatigue_indicator,"寿命;循环寿命;失效寿命;疲劳循环次数;断裂寿命;疲劳次数","寿名;受命;疲劳受命;寿面","fatigue life;Nf;cycles to failure;lifetime",Nf;fatigue_life,疲劳加载下材料失效前的循环次数
+裂纹扩展速率,fatigue_indicator,"裂纹增长速率;裂纹传播速率;裂纹扩展;扩展速率;裂纹成长速度","裂文扩展;裂纹括展;裂文括展;裂纹生长速度","da/dN;crack growth rate;FCGR;crack propagation rate",da_dN,疲劳裂纹每个循环扩展的长度
+应力强度因子范围,parameter,"应力强度范围;应力强度因子;K范围;ΔK;DK;delta K","应力强度银子;应力强度引子;应立强度;delta k","Delta K;ΔK;stress intensity factor range;SIF range",Delta_K,疲劳裂纹扩展中常用驱动力参数
+表面粗糙度,variable,"粗糙度;表面状态;表面缺陷;表面质量;粗糙","表面粗操度;表明粗糙度;粗造度;表面粗超","surface roughness;Ra;Rz;surface state",surface_roughness;Ra;Rz;surface_state,表征材料表面微观起伏和缺口效应的变量
+孔隙位置,variable,"孔位置;缺陷位置;距表面距离;孔隙距表面距离;近表面孔隙;内部孔隙;深度","孔惜位置;孔边位置;深度位置;孔位子","pore location;distance to surface;near-surface pore;internal pore;defect location",pore_location;distance_to_surface,孔隙相对于自由表面或样品内部的位置
+疲劳极限,fatigue_indicator,"疲劳强度;极限强度;持久极限;疲劳门槛","疲劳急限;疲芳极限;门槛值","fatigue limit;fatigue strength;σw;sigma_w;endurance limit",fatigue_limit;sigma_w,材料在给定循环次数下不发生疲劳断裂的最大应力
+应力幅,parameter,"应力振幅;交变应力幅;循环应力幅;σa","应力副;应力福;应力扶","stress amplitude;σa;sigma_a;stress range",stress_amplitude;sigma_a,疲劳循环中的应力变化幅度
+应力比,parameter,"载荷比;R比;加载比;循环比","应力比;载荷笔;R值","stress ratio;R ratio;load ratio",stress_ratio_R,最小应力与最大应力的比值
+热处理,variable,"热等静压;HIP;退火;固溶;时效;去应力退火;固溶时效","热出理;热处里;处里","heat treatment;HIP;hot isostatic pressing;annealing;solution treatment;aging",heat_treatment;HIP,通过加热和冷却改变材料组织和性能的工艺
+微观组织,variable,"显微组织;组织;α片层;β相;晶粒尺寸;马氏体","微管组织;为观组织;组只","microstructure;alpha lath;β phase;grain size;martensite;α′;alpha prime",microstructure;alpha_lath;beta_phase;grain_orientation,材料的微观结构特征包括α/β相和晶粒等
+残余应力,variable,"残余应力;内应力;热应力","残于应力;残油应力;残余应立","residual stress;internal stress;thermal stress",residual_stress,材料内部存在的固有应力
+孔隙率,variable,"致密度;孔隙度;孔隙体积分数;密度比","孔细率;孔习率;孔系率","porosity;void fraction;density;relative density",porosity,孔隙体积占总材料体积的比例
+Paris参数,parameter,"Paris C m;C和m;Paris常数;C m",,"Paris parameters;Paris C;Paris m;Paris coefficient;Paris exponent",Paris_C;Paris_m;paris_c_m,Paris公式da/dN=C(ΔK)^m中的C和m参数
+裂纹起裂位置,fatigue_indicator,"起裂源;裂纹源;裂纹起始位置;裂纹起点","起裂围置;起列位置","crack initiation site;crack initiation location;fracture origin",crack_initiation_site,疲劳裂纹最初萌生的位置
+S-N曲线,fatigue_indicator,"应力寿命曲线;Wöhler曲线;σ-N曲线","S-N 取线;应立寿命","S-N curve;stress-life curve;Wöhler curve",Nf;fatigue_life;S_N_curve,材料疲劳寿命与应力幅的关系曲线
+疲劳实验,fatigue_indicator,"疲劳试验;HCF;高周疲劳;VHCF;超高周疲劳;FCGR;裂纹扩展实验","疲老实验;疲劳时验","fatigue test;HCF;high cycle fatigue;VHCF;FCGR;crack growth test",Nf;fatigue_life;da_dN,用于测定材料疲劳性能的实验
+缺陷形貌,variable,"孔隙形态;孔隙形状;缺陷形状;孔形态","缺显形貌;缺陷型貌","defect morphology;pore morphology;pore shape;pore aspect ratio",pore_aspect_ratio;defect_aspect_ratio,孔隙或缺陷的三维几何特征
+实验设计,task,"做实验;测试方案;验证方案;实验方案","时验设计;设什","experiment design;test plan;validation plan",,设计实验验证变量关系的方案
+综述,paper_type,"回顾;总述;评述;文献总结;系统性综述","宗述;纵述","review;systematic review;overview;survey;literature review",,对某领域研究现状的全面总结

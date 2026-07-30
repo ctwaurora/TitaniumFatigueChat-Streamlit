@@ -1,0 +1,38 @@
+# =============================================================================
+# TitaniumFatigueChat — 任务配置：AI Scientist 可验证科学假设生成
+# 对齐"揭榜挂帅专项赛/AI Scientist 类榜题"出题意图
+# =============================================================================
+task_name: "AI Scientist 可验证科学假设生成"
+domain: titanium_alloy_fatigue
+required_model: qwen
+core_goal: "从钛合金疲劳文献中生成可验证科学假设"
+
+required_outputs:
+  - problem_statement
+  - rationale
+  - hypothesis
+  - evidence
+  - missing_evidence
+  - technical_details
+  - source_dataset
+  - target_dataset
+  - methods
+  - experiments
+  - expected_results
+  - references
+  - feasibility
+  - falsification_condition
+
+evaluation_focus:
+  scientific_value:
+    - "是否有明确科学问题"
+    - "是否由文献证据支持"
+    - "是否具有机制解释价值"
+  technical_depth:
+    - "是否使用 Qwen/Skill/多智能体/证据检索"
+    - "是否有结构化知识抽取"
+    - "是否有质量验证闭环"
+  application_potential:
+    - "是否可用于真实科研选题"
+    - "是否有最低成本验证方案"
+    - "是否能导出答辩材料和复现包"

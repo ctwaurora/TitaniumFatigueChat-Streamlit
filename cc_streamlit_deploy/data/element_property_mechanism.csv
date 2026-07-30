@@ -1,0 +1,2 @@
+﻿alloy_system,element,content_range,microstructure_effect,property_effect,fatigue_effect,mechanism,evidence,limitation,future_candidate
+TC4/Ti-6Al-4V,O,文献未提及具体含量范围,文献未提及,LCF下寿命先增后减，HCF下寿命提升,高周疲劳下氧含量增加显著提升疲劳寿命，低周疲劳下存在最优含量,文献未提及,赵鹏程2025: '对于应变控的低周疲劳，TC4 钛合金的疲劳寿命随着O 元素含量的增加先增加后降低；对于应力控的高周疲劳（σmax≤700 MPa），TC4 钛合金的疲劳寿命随着O 元素含量的增加而显著提升',元素含量范围有限（见表1）；缺乏微观组织表征,是 - 建议研究O含量≥0.18 wt%时Ti3O析出临界行为及其对LCF/HCF寿命的差异化影响

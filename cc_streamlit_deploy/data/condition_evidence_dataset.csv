@@ -1,0 +1,1 @@
+evidence_id,paper_id,title,condition_id,condition_description,material,process,heat_treatment,surface_state,surface_roughness_Ra,surface_roughness_Rz,stress_ratio_R,fatigue_type,temperature,environment,defect_type,pore_size,sqrt_area,distance_to_surface,pore_location,porosity,claim,mechanism,fatigue_indicator,evidence_strength,source_sentence
