@@ -231,6 +231,7 @@ def stage_save_pdf(record: Dict[str, Any], pdf_content: bytes) -> Dict[str, Any]
             original_filename,
             source_path=safe_get(record, "source_path", original_filename),
             source_type="USER_UPLOAD",
+            metadata_override=dict(record.get("_metadata_override") or {}),
             base_dir=Path(safe_get(record, "_base_dir", BASE_DIR)),
         )
         if not registered.get("pdf_valid"):
@@ -1218,6 +1219,7 @@ def process_uploaded_pdf(
     original_filename: Optional[str] = None,
     *,
     base_dir: Path = BASE_DIR,
+    metadata_override: Optional[Dict[str, str]] = None,
 ) -> Dict[str, Any]:
     """处理上传 PDF 的 10 阶段流水线。
 
@@ -1237,6 +1239,7 @@ def process_uploaded_pdf(
     """
     record = make_record()
     record["_base_dir"] = str(Path(base_dir).resolve())
+    record["_metadata_override"] = dict(metadata_override or {})
     if isinstance(pdf_content, (str, Path)):
         source_path = Path(pdf_content)
         try:
@@ -1318,6 +1321,7 @@ def process_uploaded_pdf(
         record["evidence_extraction_status"] = record["deep_read_status"]
         record["error_message"] = ""
         record.pop("_base_dir", None)
+        record.pop("_metadata_override", None)
         return record
 
     # Stage 6/7: keep legacy metadata outputs for compatibility, but exact
@@ -1352,6 +1356,7 @@ def process_uploaded_pdf(
             real_errors.append(f"[{stage_name}] {err_msg}")
     record["error_message"] = "; ".join(real_errors)
     record.pop("_base_dir", None)
+    record.pop("_metadata_override", None)
 
     return record
 

@@ -204,8 +204,6 @@ def extract_basic_pdf_metadata(content: bytes, filename: str = "") -> Dict[str, 
                         break
     except Exception:
         pass
-    if not result["title"]:
-        result["title"] = Path(filename).stem
     return result
 
 

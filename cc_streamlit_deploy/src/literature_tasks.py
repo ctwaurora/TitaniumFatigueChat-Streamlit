@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,9 +17,13 @@ from src.stage1_store import BASE_DIR
 
 TASK_STATUSES = {
     "PENDING",
+    "RUNNING",
     "SEARCHING",
     "DOWNLOADING",
     "DEEP_READING",
+    "REINDEXING",
+    "NOT_REQUIRED",
+    # Legacy values remain readable so interrupted Stage-3 tasks can resume.
     "INDEXING",
     "COMPLETED",
     "PARTIAL",
@@ -29,6 +35,7 @@ TERMINAL_STATUSES = {
     "PARTIAL",
     "FAILED",
     "MANUAL_ACTION_REQUIRED",
+    "NOT_REQUIRED",
 }
 
 
@@ -66,47 +73,139 @@ def _write_tasks(rows: List[Dict[str, Any]], base_dir: Path = BASE_DIR) -> None:
     temp.replace(path)
 
 
-def stable_task_id(query: str) -> str:
-    digest = hashlib.sha256(" ".join(query.lower().split()).encode()).hexdigest()
+def normalize_query(query: str) -> str:
+    return re.sub(r"\s+", " ", str(query or "").strip().lower())
+
+
+def stable_task_id(query: str, task_type: str = "automatic_topup") -> str:
+    payload = f"{task_type}|{normalize_query(query)}"
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
     return f"LIT_{digest[:20].upper()}"
 
 
 def create_literature_task(
     query: str,
     *,
-    batch_size: int = 3,
+    task_type: str = "automatic_topup",
+    source: str = "stage3",
+    max_papers: Optional[int] = None,
+    manual_override: bool = False,
+    evidence_status_before: str = "",
+    batch_size: Optional[int] = None,
     base_dir: Path = BASE_DIR,
 ) -> Dict[str, Any]:
-    if not 3 <= int(batch_size) <= 5:
-        raise ValueError("batch_size must be between 3 and 5")
-    task_id = stable_task_id(query)
+    if task_type not in {"automatic_topup", "manual_topup"}:
+        raise ValueError("task_type must be automatic_topup or manual_topup")
+    if task_type == "manual_topup":
+        manual_override = True
+    if max_papers is None:
+        max_papers = int(batch_size) if batch_size is not None else 1
+    max_papers = int(max_papers)
+    if max_papers < 1 or max_papers > 5:
+        raise ValueError("max_papers must be between 1 and 5")
+    if batch_size is not None and not 1 <= int(batch_size) <= 5:
+        raise ValueError("batch_size must be between 1 and 5")
+    normalized = normalize_query(query)
+    if not normalized:
+        raise ValueError("query must not be empty")
+    task_id = stable_task_id(query, task_type)
     rows = _read_tasks(base_dir)
     for row in rows:
         if row.get("task_id") == task_id:
             return row
     task = {
         "task_id": task_id,
+        "task_type": task_type,
         "query": query,
+        "normalized_query": normalized,
+        "source": source,
         "status": "PENDING",
         "created_at": _now(),
         "started_at": "",
         "completed_at": "",
         "candidate_count": 0,
+        "oa_candidate_count": 0,
         "downloaded_count": 0,
+        "duplicate_rejected_count": 0,
+        "paywall_rejected_count": 0,
         "deep_read_count": 0,
         "indexed_count": 0,
+        "max_papers": max_papers,
+        "manual_override": bool(manual_override),
+        "evidence_status_before": evidence_status_before,
+        "attempt_count": 0,
+        "last_error": "",
         "error": "",
         "retry_count": 0,
-        "batch_size": int(batch_size),
+        # Kept for compatibility with existing Stage-3 callers.
+        "batch_size": max_papers,
         "checkpoint": {
             "last_completed_phase": "",
             "downloaded_paper_ids": [],
-            "topup_result": {},
+            "result_summary": {},
         },
     }
     rows.append(task)
     _write_tasks(rows, base_dir)
     return task
+
+
+def list_literature_tasks(
+    base_dir: Path = BASE_DIR,
+    *,
+    newest_first: bool = True,
+) -> List[Dict[str, Any]]:
+    rows = _read_tasks(base_dir)
+    return list(reversed(rows)) if newest_first else rows
+
+
+def compact_task_result(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep task JSON small: no full PDF text, retrieval rows, or deep-read payloads."""
+    downloads = list(result.get("downloaded") or [])
+    return {
+        "status": result.get("status") or "",
+        "message": result.get("message") or "",
+        "candidate_count": int(result.get("candidate_count") or 0),
+        "oa_candidate_count": int(result.get("oa_candidate_count") or 0),
+        "downloaded_count": sum(
+            row.get("status") in {"DEEP_READ_COMPLETE", "DEEP_READ_PARTIAL"}
+            for row in downloads
+        ),
+        "duplicate_rejected_count": int(
+            result.get("duplicate_rejected_count") or 0
+        ),
+        "paywall_rejected_count": int(result.get("paywall_rejected_count") or 0),
+        "new_paper_ids": list(result.get("new_paper_ids") or []),
+        "source_results": list(result.get("source_results") or []),
+        "errors": [str(value)[:500] for value in result.get("errors") or []],
+        "cache_invalidated": bool(result.get("cache_invalidated")),
+    }
+
+
+def create_topup_task_from_evidence(
+    query: str,
+    evidence: Dict[str, Any],
+    *,
+    manual: bool = False,
+    source: str = "streamlit_ui",
+    base_dir: Path = BASE_DIR,
+) -> Optional[Dict[str, Any]]:
+    status = str(
+        evidence.get("evidence_status")
+        or (evidence.get("evidence_sufficiency") or {}).get("status")
+        or ""
+    )
+    if not manual and status not in {"INSUFFICIENT", "PARTIALLY_SUFFICIENT"}:
+        return None
+    return create_literature_task(
+        query,
+        task_type="manual_topup" if manual else "automatic_topup",
+        source=source,
+        max_papers=1,
+        manual_override=manual,
+        evidence_status_before=status,
+        base_dir=base_dir,
+    )
 
 
 def get_task(task_id: str, base_dir: Path = BASE_DIR) -> Optional[Dict[str, Any]]:
@@ -176,48 +275,120 @@ def process_literature_task(
     task = get_task(task_id, base_dir)
     if task is None:
         raise KeyError(task_id)
-    if task.get("status") == "COMPLETED":
+    if task.get("status") in {"COMPLETED", "NOT_REQUIRED"}:
         return task
     checkpoint = dict(task.get("checkpoint") or {})
-    if checkpoint.get("last_completed_phase") == "INDEXING":
+    if checkpoint.get("last_completed_phase") in {"INDEXING", "REINDEXING"}:
         return update_task(
             task_id,
             base_dir=base_dir,
             status="COMPLETED",
             completed_at=task.get("completed_at") or _now(),
         )
-    if not task.get("started_at"):
+    task = update_task(
+        task_id,
+        base_dir=base_dir,
+        status="RUNNING",
+        started_at=task.get("started_at") or _now(),
+        attempt_count=int(task.get("attempt_count") or 0) + 1,
+        last_error="",
+        error="",
+        checkpoint={
+            **checkpoint,
+            "current_phase": "RUNNING",
+        },
+    )
+
+    def progress(phase: str, payload: Optional[Dict[str, Any]] = None) -> None:
+        nonlocal task
+        phase = str(phase or "").upper()
+        if phase == "INDEXING":
+            phase = "REINDEXING"
+        if phase not in {
+            "SEARCHING",
+            "DOWNLOADING",
+            "DEEP_READING",
+            "REINDEXING",
+        }:
+            return
+        payload = dict(payload or {})
+        downloaded_ids = list(
+            payload.get("downloaded_paper_ids")
+            or (task.get("checkpoint") or {}).get("downloaded_paper_ids")
+            or []
+        )
         task = update_task(
             task_id,
             base_dir=base_dir,
-            status="SEARCHING",
-            started_at=_now(),
-            error="",
-        )
-    else:
-        task = update_task(
-            task_id, base_dir=base_dir, status="SEARCHING", error=""
+            status=phase,
+            candidate_count=int(
+                payload.get("candidate_count", task.get("candidate_count") or 0)
+            ),
+            oa_candidate_count=int(
+                payload.get(
+                    "oa_candidate_count", task.get("oa_candidate_count") or 0
+                )
+            ),
+            downloaded_count=int(
+                payload.get(
+                    "downloaded_count", task.get("downloaded_count") or 0
+                )
+            ),
+            deep_read_count=int(
+                payload.get(
+                    "deep_read_count", task.get("deep_read_count") or 0
+                )
+            ),
+            checkpoint={
+                **(task.get("checkpoint") or {}),
+                "current_phase": phase,
+                "last_completed_phase": str(
+                    payload.get("last_completed_phase")
+                    or (task.get("checkpoint") or {}).get(
+                        "last_completed_phase", ""
+                    )
+                ),
+                "downloaded_paper_ids": downloaded_ids,
+            },
         )
 
     try:
+        parameters = inspect.signature(topup).parameters
+        supports_kwargs = any(
+            value.kind == inspect.Parameter.VAR_KEYWORD
+            for value in parameters.values()
+        )
+        topup_kwargs: Dict[str, Any] = {
+            "max_downloads": int(task.get("max_papers") or task.get("batch_size") or 1),
+            "base_dir": base_dir,
+            "manual_override": bool(task.get("manual_override")),
+            "evidence_status_before": task.get("evidence_status_before") or "",
+            "progress_callback": progress,
+        }
+        if not supports_kwargs:
+            topup_kwargs = {
+                key: value
+                for key, value in topup_kwargs.items()
+                if key in parameters
+            }
+        progress("SEARCHING")
         result, retries = retry_with_exponential_backoff(
-            lambda: topup(
-                task["query"],
-                max_downloads=int(task.get("batch_size") or 3),
-                base_dir=base_dir,
-            ),
+            lambda: topup(task["query"], **topup_kwargs),
             sleep=sleep,
         )
+        summary = compact_task_result(result)
         task = update_task(
             task_id,
             base_dir=base_dir,
-            status="DOWNLOADING",
+            status=task.get("status") or "RUNNING",
             retry_count=int(task.get("retry_count") or 0) + retries,
-            candidate_count=int(result.get("candidate_count") or 0),
+            candidate_count=summary["candidate_count"],
+            oa_candidate_count=summary["oa_candidate_count"],
+            duplicate_rejected_count=summary["duplicate_rejected_count"],
+            paywall_rejected_count=summary["paywall_rejected_count"],
             checkpoint={
-                **checkpoint,
-                "last_completed_phase": "SEARCHING",
-                "topup_result": result,
+                **(task.get("checkpoint") or {}),
+                "result_summary": summary,
             },
         )
         downloads = result.get("downloaded") or []
@@ -228,48 +399,36 @@ def process_literature_task(
         deep_read_count = sum(
             row.get("status") == "DEEP_READ_COMPLETE" for row in downloads
         )
-        task = update_task(
-            task_id,
-            base_dir=base_dir,
-            status="DEEP_READING",
-            downloaded_count=downloaded_count,
-            checkpoint={
-                **task["checkpoint"],
-                "last_completed_phase": "DOWNLOADING",
-            },
-        )
         new_paper_ids = list(result.get("new_paper_ids") or [])
-        task = update_task(
-            task_id,
-            base_dir=base_dir,
-            status="INDEXING",
-            deep_read_count=deep_read_count,
-            checkpoint={
-                **task["checkpoint"],
-                "last_completed_phase": "DEEP_READING",
-                "downloaded_paper_ids": new_paper_ids,
-            },
-        )
-        manual = any(
-            row.get("manual_download_required") for row in downloads
-        )
-        final_status = (
-            "COMPLETED"
-            if result.get("status") in {"COMPLETED", "NOT_REQUIRED"}
-            else "MANUAL_ACTION_REQUIRED"
-            if manual and not new_paper_ids
-            else "PARTIAL"
-        )
+        result_status = str(result.get("status") or "PARTIAL")
+        if result_status == "NOT_REQUIRED":
+            final_status = "NOT_REQUIRED"
+        elif result_status == "COMPLETED":
+            final_status = "COMPLETED"
+        elif result_status == "FAILED":
+            final_status = "FAILED"
+        else:
+            final_status = "PARTIAL"
+        result_errors = [str(value) for value in result.get("errors") or []]
+        last_error = "; ".join(result_errors)
         return update_task(
             task_id,
             base_dir=base_dir,
             status=final_status,
             completed_at=_now(),
+            downloaded_count=downloaded_count,
+            deep_read_count=deep_read_count,
             indexed_count=len(new_paper_ids),
-            error="; ".join(result.get("errors") or []),
+            last_error=last_error,
+            error=last_error,
             checkpoint={
-                **task["checkpoint"],
-                "last_completed_phase": "INDEXING",
+                **(task.get("checkpoint") or {}),
+                "current_phase": final_status,
+                "last_completed_phase": (
+                    "REINDEXING" if new_paper_ids else "SEARCHING"
+                ),
+                "downloaded_paper_ids": new_paper_ids,
+                "result_summary": summary,
             },
         )
     except Exception as exc:
@@ -278,6 +437,7 @@ def process_literature_task(
             base_dir=base_dir,
             status="FAILED",
             completed_at=_now(),
+            last_error=str(exc),
             error=str(exc),
             retry_count=int(task.get("retry_count") or 0) + 1,
             checkpoint={
@@ -300,9 +460,11 @@ def run_pending_tasks(
         if row.get("status")
         in {
             "PENDING",
+            "RUNNING",
             "SEARCHING",
             "DOWNLOADING",
             "DEEP_READING",
+            "REINDEXING",
             "INDEXING",
             "FAILED",
         }

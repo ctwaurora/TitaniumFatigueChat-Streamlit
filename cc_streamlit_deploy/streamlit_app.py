@@ -2074,7 +2074,7 @@ def generate_comprehensive_answer(
 
     # ── Step 2: Build paper-level prefix ──
     coverage_warning = ""
-    if coverage_level in ("weak", "not_found"):
+    if coverage_result.get("topup_required"):
         coverage_warning = (
             "> ⚠️ **当前本地文献库不足以支持强假设生成**，"
             "以下内容仅为 search-guided candidate 输出。\n\n"
@@ -2096,52 +2096,15 @@ def generate_comprehensive_answer(
             if supplement:
                 answer += "\n" + supplement
 
-    # ── Step 9: Auto literature search (when coverage is weak/not_found) ──
-    if coverage_level in ("weak", "not_found"):
-        lit_auto_result = None
-        try:
-            from src.literature_agent import run_auto_literature_update as auto_lit
-            lit_auto_result = auto_lit(
-                user_query=question,
-                ind_var=ind_var,
-                dep_var=dep_var,
-                max_results=8,
-                use_api=True,
-            )
-            st.session_state.literature_result = lit_auto_result
-
-            if lit_auto_result["api_success"]:
-                answer += "\n## 自动文献补充\n\n"
-                answer += f"- 检索式: {lit_auto_result['queries_generated']} 条\n"
-                answer += f"- 检索成功: 是\n"
-                answer += f"- 新增候选文献: {lit_auto_result['candidates_new']} 篇 → "
-                answer += f"data/candidate_papers.csv\n"
-                if lit_auto_result['ingested_new'] > 0:
-                    answer += f"- 已纳入正式库: {lit_auto_result['ingested_new']} 篇 → "
-                    answer += f"data/literature_database.csv\n"
-                answer += f"- 开放获取 (OA): {lit_auto_result['oa_found']} 篇\n"
-                answer += f"- 需手动下载: {lit_auto_result['manual_needed']} 篇 → "
-                answer += f"data/manual_download_needed.csv\n"
-                answer += f"- 正式库当前总量: {lit_auto_result['total_literature']} 篇\n"
-                answer += f"- 更新报告: `{lit_auto_result.get('report_path', '')}`\n"
-            else:
-                answer += "\n## 自动文献补充\n\n"
-                answer += "当前为离线模式，未进行 API 检索。\n"
-                answer += f"已生成检索式 {lit_auto_result['queries_generated']} 条。\n"
-                answer += f"搜索计划已保存至: `{lit_auto_result.get('search_plan_path', '')}`\n"
-        except Exception:
-            # Fallback to original literature search
-            try:
-                lit_result = run_literature_search(
-                    ind_var, dep_var, question,
-                    max_results=5, use_api=True,
-                )
-                st.session_state.literature_result = lit_result
-                if lit_result["api_success"]:
-                    answer += "\n## 自动文献检索结果\n"
-                    answer += f"{lit_result['summary']}\n"
-            except Exception:
-                pass
+    # ── Step 9: Do not create an unclaimed Streamlit PENDING task ──
+    if coverage_result.get("topup_required"):
+        answer += "\n## OA 文献补充门禁\n\n"
+        answer += f"- 证据状态: {coverage_result['evidence_status']}\n"
+        answer += (
+            "- 未自动创建后台任务：Streamlit 网页没有常驻 worker，"
+            "为避免无人领取的 PENDING 任务，请在“文献库管理 → OA 全文补充”中"
+            "同步运行单篇任务并等待终态。\n"
+        )
 
     return answer
 
@@ -2396,11 +2359,15 @@ with st.sidebar:
     stats = get_system_stats_cached()
     col1, col2 = st.columns(2)
     with col1:
-        st.metric("文献数", stats["n_papers"])
-        st.metric("证据片段", stats["ev_count"])
+        st.metric("唯一文献", stats["unique_literature_count"])
+        st.metric("深读完成", stats["deep_read_complete_count"])
     with col2:
-        st.metric("变量-机制", stats["vm_count"])
-        st.metric("主案例文献", stats["primary_count"])
+        st.metric("已入统一索引", stats["indexed_count"])
+        st.metric("待处理/失败", stats["pending_or_failed_count"])
+    st.caption(
+        f"本地PDF文件数：{stats['local_pdf_file_count']}（含目录副本）；"
+        f"唯一SHA-256：{stats['unique_pdf_sha256_count']}"
+    )
 
     st.divider()
     st.caption("⚠️ 系统生成的是 candidate hypothesis，不得声称已被证明。")
@@ -2475,10 +2442,27 @@ if current_page == "search":
             st.rerun()
         st.caption(f"当前回答深度: {depth_options.get(current_depth, '论文级')}")
 
-        # ── Search button ──
-        st.markdown("<div style='text-align: center;'>", unsafe_allow_html=True)
-        analyze_clicked = st.button("🔍 开始分析", type="primary", use_container_width=True, key="run_analysis_btn")
-        st.markdown("</div>", unsafe_allow_html=True)
+        # ── Analysis and explicitly separated literature actions ──
+        action_cols = st.columns(3)
+        with action_cols[0]:
+            analyze_clicked = st.button(
+                "🔍 开始分析",
+                type="primary",
+                use_container_width=True,
+                key="run_analysis_btn",
+            )
+        with action_cols[1]:
+            refresh_metadata_clicked = st.button(
+                "刷新候选元数据",
+                use_container_width=True,
+                key="refresh_literature_metadata_btn",
+            )
+        with action_cols[2]:
+            manual_topup_clicked = st.button(
+                "手动补充1篇OA全文",
+                use_container_width=True,
+                key="manual_oa_topup_btn",
+            )
 
         # ── Smart query understanding display ──
         current_input = st.session_state.get("user_question", "").strip()
@@ -2500,6 +2484,77 @@ if current_page == "search":
             if sq.get('has_corrections'):
                 tag += " | ✏️ 已自动修正"
             st.caption(tag)
+
+        if refresh_metadata_clicked:
+            if not current_input:
+                st.warning("请先输入检索问题。")
+            else:
+                try:
+                    from src.literature_agent import run_auto_literature_update
+
+                    ind_var, dep_var, _ = extract_variable_pair(current_input)
+                    metadata_result = run_auto_literature_update(
+                        user_query=current_input,
+                        ind_var=ind_var,
+                        dep_var=dep_var,
+                        max_results=8,
+                        use_api=True,
+                    )
+                    st.session_state.literature_result = metadata_result
+                    st.success(
+                        f"候选元数据刷新完成：新增候选 "
+                        f"{metadata_result.get('candidates_new', 0)} 篇。"
+                    )
+                except Exception as exc:
+                    st.error(f"候选元数据刷新失败：{type(exc).__name__}: {exc}")
+
+        if manual_topup_clicked:
+            if not current_input:
+                st.warning("请先输入检索问题。")
+            else:
+                st.session_state.page = "library"
+                st.session_state.pop("oa_task_id", None)
+                st.info(
+                    "已转到“文献库管理”。请在“OA 全文补充”中同步运行单篇任务；"
+                    "网页不会创建等待外部 worker 的 PENDING 任务。"
+                )
+                st.rerun()
+
+        task_id = st.session_state.get("oa_task_id", "")
+        if task_id:
+            from src.literature_tasks import get_task
+
+            current_task = get_task(task_id, base_dir=BASE_DIR)
+            if current_task:
+                if current_task.get("manual_override"):
+                    st.info(
+                        "本次补充由用户主动触发，并非系统判定当前证据必然不足。"
+                    )
+                st.caption(
+                    "历史任务状态仅供审计；网页不会声称任务已在后台运行。"
+                    "新任务请到“文献库管理 → OA 全文补充”同步执行。"
+                )
+                with st.expander("OA文献补充任务状态", expanded=True):
+                    checkpoint = current_task.get("checkpoint") or {}
+                    st.markdown(
+                        "\n".join(
+                            [
+                                f"- task_id: `{current_task.get('task_id', '')}`",
+                                f"- 任务状态: **{current_task.get('status', '')}**",
+                                f"- 查询词: {current_task.get('query', '')}",
+                                f"- 创建时间: {current_task.get('created_at', '')}",
+                                f"- 候选数量: {current_task.get('candidate_count', 0)}",
+                                f"- OA候选数量: {current_task.get('oa_candidate_count', 0)}",
+                                f"- 下载数量: {current_task.get('downloaded_count', 0)}",
+                                f"- 重复拒绝: {current_task.get('duplicate_rejected_count', 0)}",
+                                f"- 付费墙/无OA权限拒绝: {current_task.get('paywall_rejected_count', 0)}",
+                                f"- 深读状态: {current_task.get('deep_read_count', 0)}/{current_task.get('max_papers', 1)}",
+                                f"- 入索引状态: {current_task.get('indexed_count', 0)}/{current_task.get('max_papers', 1)}",
+                                f"- checkpoint: {checkpoint.get('current_phase', '')}",
+                                f"- 失败原因: {current_task.get('last_error') or '无'}",
+                            ]
+                        )
+                    )
 
         # ── Sample question buttons ──
         st.divider()
@@ -3011,15 +3066,15 @@ elif current_page == "dashboard":
     from src.data_cache import (get_system_stats_cached, load_literature_database)
     stats = get_system_stats_cached()
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.metric("文献库", stats["n_papers"])
-        st.metric("证据片段", stats["ev_count"])
-        st.metric("方程参数", stats["equation_count"])
-    with col2:
-        st.metric("候选文献", stats["n_candidates"])
-        st.metric("变量关系", stats["vm_count"])
-        st.metric("假设数", stats["hypothesis_count"])
+    metric_cols = st.columns(4)
+    metric_cols[0].metric("唯一文献", stats["unique_literature_count"])
+    metric_cols[1].metric("深读完成", stats["deep_read_complete_count"])
+    metric_cols[2].metric("已入统一索引", stats["indexed_count"])
+    metric_cols[3].metric("待处理/失败", stats["pending_or_failed_count"])
+    st.caption(
+        f"本地PDF文件数 {stats['local_pdf_file_count']}，其中唯一SHA-256 "
+        f"{stats['unique_pdf_sha256_count']}；目录副本不重复计数。"
+    )
 
     st.caption(f"研究空白: {stats['gap_count']}  |  假设: {stats['hypothesis_count']}")
 
@@ -3027,7 +3082,10 @@ elif current_page == "dashboard":
     st.subheader("📋 文献库概览")
     lit_df = load_literature_database()
     n_lit = len(lit_df)
-    st.caption(f"文献总数: {n_lit} 篇 | 综述: {(lit_df['paper_type_primary'] == 'review').sum() if not lit_df.empty and 'paper_type_primary' in lit_df.columns else 0} 篇")
+    st.caption(
+        f"旧元数据CSV行数: {n_lit}（仅作兼容展示，不是唯一文献真源） | "
+        f"综述: {(lit_df['paper_type_primary'] == 'review').sum() if not lit_df.empty and 'paper_type_primary' in lit_df.columns else 0} 篇"
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════

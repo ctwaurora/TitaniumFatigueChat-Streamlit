@@ -2104,7 +2104,8 @@ class LiteratureSearchPlanner:
         "conflict_with_existing_literature",
     ]
 
-    def __init__(self):
+    def __init__(self, base_dir: Path = BASE_DIR):
+        self.base_dir = Path(base_dir)
         self.ev_df = load_evidence_snippets()
         self.vm_df = load_variable_mechanism()
         self.lit_df = load_literature()
@@ -2113,7 +2114,7 @@ class LiteratureSearchPlanner:
         self.conflict_df = load_conflict_claims()
 
     def analyze_question(self, question: str) -> dict:
-        """分析用户问题，判断证据覆盖程度。"""
+        """Use the canonical Stage-3 sufficiency gate for UI and OA decisions."""
         ql = question.lower()
 
         # Parse domain keywords from question
@@ -2123,46 +2124,62 @@ class LiteratureSearchPlanner:
             if matches:
                 matched_dims[dim] = matches
 
-        # Search literature database for relevant papers
-        matched_papers = []
-        matched_eids = []
-        for p in self.papers:
-            text = (str(p.get("title", "") or "") + " " +
-                    str(p.get("key_findings", "") or "") + " " +
-                    str(p.get("abstract", "") or "")).lower()
-            match_count = sum(1 for kws in self.DOMAIN_KEYWORDS.values()
-                            for kw in kws if kw in text)
-            if match_count >= 2:
-                matched_papers.append({
-                    "title": str(p.get("title", "") or "")[:80],
-                    "match_score": match_count,
-                })
+        from src.unified_rag import answer_research_question
 
-        # Search evidence snippets
-        for _, row in self.ev_df.iterrows():
-            text = (str(row.get("snippet", "") or "") + " " +
-                    str(row.get("linked_variable", "") or "") + " " +
-                    str(row.get("evidence_type", "") or "")).lower()
-            if any(kw in text for kws in self.DOMAIN_KEYWORDS.values() for kw in kws):
-                eid = str(row.get("evidence_id", "") or "")
-                if eid and eid not in matched_eids:
-                    matched_eids.append(eid)
-
-        # Determine coverage level
-        n_papers = len(matched_papers)
-        n_ev = len(matched_eids)
-        has_direct = n_papers >= 3 and n_ev >= 5
-        has_partial = n_papers >= 1 and n_ev >= 2
-        has_weak = n_papers >= 1 or n_ev >= 1
-
-        if has_direct:
-            coverage = "sufficient"
-        elif has_partial:
-            coverage = "partial"
-        elif has_weak:
-            coverage = "weak"
-        else:
-            coverage = "not_found"
+        canonical = answer_research_question(
+            question, base_dir=self.base_dir
+        )
+        sufficiency = dict(canonical.get("evidence_sufficiency") or {})
+        evidence_status = str(sufficiency.get("status") or "INSUFFICIENT")
+        supporting = list(canonical.get("supporting_evidence") or [])
+        counter = list(canonical.get("counter_evidence") or [])
+        conditional = list(
+            canonical.get("condition_dependent_evidence") or []
+        )
+        paper_rows: Dict[str, Dict[str, Any]] = {}
+        for row in supporting + counter + conditional:
+            paper_id = str(row.get("paper_id") or "")
+            if not paper_id or paper_id in paper_rows:
+                continue
+            paper_rows[paper_id] = {
+                "paper_id": paper_id,
+                "title": str(row.get("title") or "")[:120],
+                "match_score": round(float(row.get("rerank_score") or 0.0), 4),
+            }
+        matched_papers = list(paper_rows.values())
+        matched_eids = [
+            str(row.get("evidence_id") or "")
+            for row in supporting + counter + conditional
+            if row.get("evidence_id")
+        ]
+        n_papers = len(paper_rows)
+        n_ev = len(set(matched_eids)) or len(
+            supporting + counter + conditional
+        )
+        coverage = {
+            "SUFFICIENT": "sufficient",
+            "PARTIALLY_SUFFICIENT": "partial",
+            "INSUFFICIENT": "not_found",
+        }.get(evidence_status, "not_found")
+        missing_fields = list(sufficiency.get("failure_reasons") or [])
+        score_components = (
+            min(float(sufficiency.get("direct_paper_count") or 0) / 3.0, 1.0),
+            float(sufficiency.get("condition_coverage") or 0.0),
+            float(sufficiency.get("variable_coverage") or 0.0),
+            float(sufficiency.get("page_traceability_rate") or 0.0),
+            float(sufficiency.get("direct_evidence_rate") or 0.0),
+            1.0 if int(sufficiency.get("counter_evidence_count") or 0) else 0.0,
+        )
+        evidence_score = round(100.0 * sum(score_components) / len(score_components), 1)
+        topup_required = evidence_status in {
+            "INSUFFICIENT",
+            "PARTIALLY_SUFFICIENT",
+        }
+        topup_reason = (
+            "; ".join(missing_fields)
+            if missing_fields
+            else "canonical Stage-3 evidence sufficiency gate"
+        )
 
         # Identify missing evidence types
         missing_types = self._identify_missing(matched_dims)
@@ -2181,10 +2198,19 @@ class LiteratureSearchPlanner:
             "matched_papers": matched_papers[:5],
             "matched_evidence_ids": matched_eids[:10],
             "coverage_level": coverage,
+            "evidence_status": evidence_status,
+            "evidence_score": evidence_score,
+            "support_count": len(supporting),
+            "counter_count": len(counter),
+            "condition_count": len(conditional),
+            "missing_fields": missing_fields,
+            "topup_required": topup_required,
+            "topup_reason": topup_reason,
+            "evidence_sufficiency": sufficiency,
             "missing_evidence_types": missing_types,
             "search_queries": queries,
             "recommended_literature_types": rec_types,
-            "why_insufficient": self._why_insufficient(coverage, n_papers, n_ev, matched_dims),
+            "why_insufficient": topup_reason if topup_required else "本地证据门禁判定为充分。",
         }
 
     def _identify_missing(self, matched: dict) -> List[str]:

@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import re
 import shutil
+import stat
+import subprocess
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple
 
@@ -128,7 +133,11 @@ def validate_output_directory(project_root: Path, output_dir: Path) -> Path:
 def clean_output_directory(project_root: Path, output_dir: Path) -> Path:
     destination = validate_output_directory(project_root, output_dir)
     if destination.exists():
-        shutil.rmtree(destination)
+        def remove_readonly(function: object, path: str, _: object) -> None:
+            Path(path).chmod(stat.S_IWRITE)
+            function(path)
+
+        shutil.rmtree(destination, onerror=remove_readonly)
     destination.mkdir(parents=True, exist_ok=False)
     return destination
 
@@ -181,6 +190,70 @@ def copy_allowlist(project_root: Path, output_dir: Path) -> None:
     for directory in CODE_DIRECTORIES:
         _copy_code_directory(project_root, output_dir, directory)
     _copy_assets(project_root, output_dir)
+
+
+def write_empty_cloud_library(project_root: Path, output_dir: Path) -> None:
+    """Keep CSV schemas but never export local literature rows as cloud truth."""
+    fallback_headers = {
+        "data/candidate_papers.csv": (
+            "candidate_id,title,authors,year,doi,source_url,metadata_source,"
+            "oa_status,pdf_status,validation_status\n"
+        ),
+        "data/literature_database.csv": (
+            "paper_id,title,authors,year,doi,source_url,metadata_source,"
+            "pdf_status,evidence_status,rag_status\n"
+        ),
+    }
+    for relative, fallback in fallback_headers.items():
+        source = project_root / relative
+        header = ""
+        if source.exists():
+            with source.open("r", encoding="utf-8-sig") as handle:
+                header = handle.readline().strip()
+        target = output_dir / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text((header or fallback.strip()) + "\n", encoding="utf-8")
+
+
+def _content_manifest_hash(output_dir: Path) -> str:
+    digest = hashlib.sha256()
+    excluded = {"DEPLOY_MANIFEST.txt", "DEPLOY_VERSION.json"}
+    for path in sorted(output_dir.rglob("*")):
+        if not path.is_file() or path.name in excluded:
+            continue
+        relative = path.relative_to(output_dir).as_posix()
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
+
+
+def source_commit(project_root: Path) -> str:
+    completed = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=project_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def write_deploy_version(project_root: Path, output_dir: Path) -> Path:
+    payload = {
+        "source_commit": source_commit(project_root),
+        "export_time": datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat(),
+        "deploy_manifest_hash": _content_manifest_hash(output_dir),
+        "application_version": "3.2.0-cloud-oa",
+    }
+    target = output_dir / "DEPLOY_VERSION.json"
+    target.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return target
 
 
 def _contains_forbidden_parts(relative: Path) -> bool:
@@ -247,6 +320,8 @@ def export_deployment(
     project = project_root.resolve()
     destination = clean_output_directory(project, output_dir)
     copy_allowlist(project, destination)
+    write_empty_cloud_library(project, destination)
+    write_deploy_version(project, destination)
 
     violations = scan_deployment(destination)
     if violations:
