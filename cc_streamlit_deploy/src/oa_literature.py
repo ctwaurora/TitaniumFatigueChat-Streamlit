@@ -494,11 +494,15 @@ def candidate_duplicate_reason(
     title = str(candidate.get("title") or "")
     for paper in load_paper_manifest(base_dir):
         if doi and normalize_doi(paper.get("doi") or "") == doi:
+            if not paper.get("pdf_valid") or not paper.get("canonical_pdf_path"):
+                return ""
             return f"DOI_DUPLICATE:{paper.get('paper_id')}"
         if content_hash and paper.get("file_hash_sha256") == content_hash:
             return f"HASH_DUPLICATE:{paper.get('paper_id')}"
         similarity = title_similarity(title, paper.get("title") or "")
         if title and similarity >= 0.94:
+            if not paper.get("pdf_valid") or not paper.get("canonical_pdf_path"):
+                return ""
             return f"TITLE_NEAR_DUPLICATE:{paper.get('paper_id')}:{similarity:.3f}"
     return ""
 
@@ -682,13 +686,38 @@ def ingest_verified_oa_bytes(
         "paper_id": registered["paper_id"],
         "title": registered.get("title") or candidate.get("title") or "",
         "doi": normalize_doi(candidate.get("doi") or ""),
+        "authors": str(candidate.get("authors") or ""),
+        "year": str(candidate.get("year") or candidate.get("date") or ""),
+        "metadata_source": str(
+            candidate.get("metadata_source") or candidate.get("source") or ""
+        ),
+        "oa_source": str(
+            candidate.get("oa_source")
+            or candidate.get("metadata_source")
+            or candidate.get("source")
+            or ""
+        ),
         "pdf_url": candidate.get("pdf_url") or "",
         "license": candidate.get("license") or "",
         "canonical_pdf_path": str(canonical_path.resolve()),
         "file_hash_sha256": content_hash,
+        "file_size": len(content),
+        "downloaded_pdf": True,
         "real_page_count": validation["real_page_count"],
         "page_record_count": int(deep_read.get("page_record_count") or 0),
+        "processed_page_count": int(
+            deep_read.get("processed_page_count")
+            or deep_read.get("page_record_count")
+            or 0
+        ),
         "evidence_count": int(deep_read.get("evidence_count") or 0),
+        "direct_evidence_count": int(
+            deep_read.get("direct_evidence_count") or 0
+        ),
+        "indirect_evidence_count": int(
+            deep_read.get("indirect_evidence_count") or 0
+        ),
+        "mention_only_count": int(deep_read.get("mention_only_count") or 0),
         "pdf_valid": True,
         "http": dict(download_metadata or {}),
         "deep_read": deep_read,

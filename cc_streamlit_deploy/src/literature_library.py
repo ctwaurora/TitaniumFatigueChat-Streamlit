@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import json
 import re
+import shutil
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
@@ -20,6 +21,7 @@ from src.stage1_store import (
     normalize_doi,
     normalize_title,
     register_metadata_record,
+    update_paper_library_status,
 )
 
 
@@ -70,6 +72,17 @@ def _write_manifest(base_dir: Path, rows: Sequence[Dict[str, Any]]) -> None:
     with temp.open("w", encoding="utf-8", newline="\n") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+    temp.replace(path)
+
+
+def _write_jsonl(path: Path, rows: Sequence[Dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(path.suffix + ".tmp")
+    with temp.open("w", encoding="utf-8", newline="\n") as handle:
+        for row in rows:
+            handle.write(
+                json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n"
+            )
     temp.replace(path)
 
 
@@ -307,6 +320,34 @@ def canonical_pdf_records(base_dir: Path = BASE_DIR) -> List[Dict[str, Any]]:
         review_counts = Counter(
             str(row.get("review_status") or "") for row in evidence
         )
+        rag_status = (
+            "INDEXED_STAGE3_UNIFIED"
+            if paper_id in rag_ids
+            else "NOT_INDEXED"
+        )
+        evidence_status = str(primary.get("evidence_status") or "")
+        if evidence_status not in {"AUTO_VALIDATED", HUMAN_CONFIRMED}:
+            evidence_status = (
+                HUMAN_CONFIRMED
+                if review_counts[HUMAN_CONFIRMED] == len(evidence) and evidence
+                else "AUTO_VALIDATED"
+                if evidence
+                and deep_complete
+                and rag_status == "INDEXED_STAGE3_UNIFIED"
+                else "PENDING_CONFIRMATION"
+                if evidence
+                else "NO_EVIDENCE"
+            )
+        library_status = str(primary.get("library_status") or "CANDIDATE")
+        if (
+            library_status != QUARANTINED
+            and bool(primary.get("pdf_valid"))
+            and deep_complete
+            and evidence
+            and evidence_status in {"AUTO_VALIDATED", HUMAN_CONFIRMED}
+            and rag_status == "INDEXED_STAGE3_UNIFIED"
+        ):
+            library_status = "FORMAL"
         records.append(
             {
                 **primary,
@@ -340,23 +381,16 @@ def canonical_pdf_records(base_dir: Path = BASE_DIR) -> List[Dict[str, Any]]:
                     "COMPLETED" if deep_complete else str(deep_status.get("status") or "PENDING")
                 ),
                 "evidence_count": len(evidence),
-                "evidence_status": (
-                    HUMAN_CONFIRMED
-                    if review_counts[HUMAN_CONFIRMED] == len(evidence) and evidence
-                    else "PENDING_CONFIRMATION"
-                    if evidence
-                    else "NO_EVIDENCE"
-                ),
-                "rag_status": (
-                    "INDEXED_STAGE3_UNIFIED"
-                    if paper_id in rag_ids
-                    else "NOT_INDEXED"
-                ),
+                "evidence_status": evidence_status,
+                "rag_status": rag_status,
+                "library_status": library_status,
                 "selectable": bool(
                     is_valid_title(title)
                     and deep_complete
                     and evidence
-                    and str(primary.get("library_status") or "") != QUARANTINED
+                    and evidence_status in {"AUTO_VALIDATED", HUMAN_CONFIRMED}
+                    and library_status == "FORMAL"
+                    and rag_status == "INDEXED_STAGE3_UNIFIED"
                 ),
                 "quarantine_reason": str(primary.get("quarantine_reason") or ""),
             }
@@ -389,38 +423,152 @@ def canonical_pdf_records(base_dir: Path = BASE_DIR) -> List[Dict[str, Any]]:
     )
 
 
-def library_statistics(base_dir: Path = BASE_DIR) -> Dict[str, int]:
-    from src.data_cache import get_canonical_literature_counts
-
-    canonical = get_canonical_literature_counts(base_dir)
-    candidates = load_candidate_records(base_dir)
-    pdf_records = canonical_pdf_records(base_dir)
-    evidence = trusted_evidence_rows(base_dir)
-    papers_with_pending = {
-        str(row.get("paper_id") or "")
-        for row in evidence
-        if str(row.get("review_status") or "") != HUMAN_CONFIRMED
+def canonical_library_records(base_dir: Path = BASE_DIR) -> List[Dict[str, Any]]:
+    """Build every library view from the single canonical paper manifest."""
+    manifest = load_paper_manifest(base_dir)
+    pdf_by_id = {
+        str(row.get("paper_id") or ""): row
+        for row in canonical_pdf_records(base_dir)
+        if row.get("paper_id")
     }
-    papers_confirmed = {
-        row["paper_id"]
-        for row in pdf_records
-        if row.get("evidence_status") == HUMAN_CONFIRMED
-    }
-    result = {
-        "unique_literature": int(canonical["unique_literature_count"]),
-        "candidate_metadata": sum(
-            row["validation_status"] == VALID_METADATA
-            and row["duplicate_status"] == "UNIQUE"
-            for row in candidates
+    records: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for source in manifest:
+        paper_id = str(source.get("paper_id") or "")
+        row = {**source, **pdf_by_id.get(paper_id, {})}
+        title = str(row.get("title") or "").strip()
+        authors = " ".join(str(row.get("authors") or "").split())
+        publication_date = str(
+            row.get("publication_date") or row.get("year") or ""
+        )
+        year_match = re.search(r"\b(19|20)\d{2}\b", publication_date)
+        year = year_match.group(0) if year_match else ""
+        doi = normalize_doi(row.get("doi") or "")
+        source_url = str(
+            row.get("source_url") or row.get("source_path") or ""
+        ).strip()
+        trusted_url = source_url.startswith("https://")
+        metadata_source = str(
+            row.get("metadata_source") or row.get("source_type") or ""
+        ).strip()
+        metadata_valid = bool(
+            is_valid_title(title)
+            and authors
+            and authors.lower() not in {"nan", "none", "unknown"}
+            and year
+            and (doi or trusted_url)
+            and metadata_source
+        )
+        library_status = str(row.get("library_status") or "CANDIDATE")
+        formal_ready = bool(
+            is_valid_title(title)
+            and row.get("pdf_valid")
+            and row.get("deep_read_complete")
+            and int(row.get("evidence_count") or 0) > 0
+            and row.get("evidence_status")
+            in {"AUTO_VALIDATED", HUMAN_CONFIRMED}
+            and row.get("rag_status") == "INDEXED_STAGE3_UNIFIED"
+        )
+        if (
+            (not metadata_valid and not formal_ready)
+            or row.get("duplicate_status") not in {
+            "", "UNIQUE", None
+            }
+        ):
+            library_status = QUARANTINED
+        elif library_status == "ARCHIVED":
+            pass
+        elif formal_ready:
+            library_status = "FORMAL"
+        elif library_status == "FORMAL":
+            library_status = "CANDIDATE"
+        key = f"doi:{doi}" if doi else f"title:{normalize_title(title)}"
+        if key in seen:
+            library_status = QUARANTINED
+            row["quarantine_reason"] = "UNMERGED_CANONICAL_DUPLICATE"
+            key = f"id:{paper_id}"
+        seen.add(key)
+        records.append(
+            {
+                **row,
+                "paper_id": paper_id,
+                "title": title if is_valid_title(title) else "",
+                "authors": authors,
+                "year": year,
+                "doi": doi,
+                "source_url": source_url,
+                "metadata_source": metadata_source,
+                "library_status": library_status,
+                "validation_status": (
+                    VALID_METADATA
+                    if metadata_valid or formal_ready
+                    else INVALID_METADATA
+                ),
+                "source": (
+                    "formal"
+                    if library_status == "FORMAL"
+                    else "candidate"
+                    if library_status not in {QUARANTINED, "ARCHIVED"}
+                    else "archived"
+                    if library_status == "ARCHIVED"
+                    else "quarantined"
+                ),
+                "pdf_status": (
+                    "PDF_VALID" if row.get("pdf_valid") else "PDF_NOT_ACQUIRED"
+                ),
+                "deep_read_complete": bool(row.get("deep_read_complete")),
+                "evidence_count": int(row.get("evidence_count") or 0),
+                "rag_status": str(row.get("rag_status") or "NOT_INDEXED"),
+                "selectable": bool(
+                    library_status == "FORMAL" and row.get("selectable")
+                ),
+                "type_code": str(row.get("paper_type_primary") or "other"),
+            }
+        )
+    return sorted(
+        records,
+        key=lambda row: (
+            str(row.get("library_status") or ""),
+            str(row.get("title") or "").lower(),
+            str(row.get("paper_id") or ""),
         ),
-        "pdf_acquired": int(canonical["unique_pdf_sha256_count"]),
-        "deep_read_complete": int(canonical["deep_read_complete_count"]),
-        "evidence_pending": len(papers_with_pending),
-        "evidence_confirmed": len(papers_confirmed),
-        "rag_indexed": int(canonical["indexed_count"]),
-        "pending_or_failed": int(canonical["pending_or_failed_count"]),
+    )
+
+
+def library_statistics(base_dir: Path = BASE_DIR) -> Dict[str, int]:
+    records = canonical_library_records(base_dir)
+    result = {
+        "unique_literature": sum(
+            row.get("library_status") != QUARANTINED for row in records
+        ),
+        "candidate_metadata": sum(
+            row.get("library_status") not in {"FORMAL", QUARANTINED}
+            for row in records
+        ),
+        "pdf_acquired": sum(bool(row.get("pdf_valid")) for row in records),
+        "deep_read_complete": sum(
+            bool(row.get("deep_read_complete")) for row in records
+        ),
+        "evidence_pending": sum(
+            bool(row.get("evidence_count"))
+            and row.get("evidence_status")
+            not in {"AUTO_VALIDATED", HUMAN_CONFIRMED}
+            for row in records
+        ),
+        "evidence_confirmed": sum(
+            row.get("evidence_status") in {"AUTO_VALIDATED", HUMAN_CONFIRMED}
+            for row in records
+        ),
+        "rag_indexed": sum(
+            row.get("rag_status") == "INDEXED_STAGE3_UNIFIED"
+            for row in records
+        ),
+        "pending_or_failed": sum(
+            row.get("library_status") not in {"FORMAL", "ARCHIVED"}
+            for row in records
+        ),
         "invalid_metadata": sum(
-            row["validation_status"] == INVALID_METADATA for row in candidates
+            row.get("library_status") == QUARANTINED for row in records
         ),
     }
     snapshot = _canonical_snapshot(base_dir)
@@ -464,9 +612,21 @@ def eligible_paper_ids(
                 reasons.append("DEEP_READ_REQUIRED")
             if int(row.get("evidence_count") or 0) < 1:
                 reasons.append("EVIDENCE_REQUIRED")
+            if (
+                row.get("library_status") != "FORMAL"
+                and not (
+                    require_confirmation
+                    and row.get("evidence_status")
+                    in {"AUTO_VALIDATED", HUMAN_CONFIRMED}
+                )
+            ):
+                reasons.append("FORMAL_LIBRARY_REQUIRED")
             if row.get("quarantine_reason"):
                 reasons.append(QUARANTINED)
-            if require_confirmation and row.get("evidence_status") != HUMAN_CONFIRMED:
+            if require_confirmation and row.get("evidence_status") not in {
+                "AUTO_VALIDATED",
+                HUMAN_CONFIRMED,
+            }:
                 reasons.append("EVIDENCE_CONFIRMATION_REQUIRED")
         if reasons:
             rejected[paper_id] = reasons
@@ -524,6 +684,103 @@ def quarantine_record(
     return {"status": "NOT_FOUND", "record_id": record_id}
 
 
+def archive_canonical_records(
+    paper_ids: Sequence[str], *, base_dir: Path = BASE_DIR
+) -> Dict[str, Any]:
+    requested = set(str(value) for value in paper_ids if value)
+    rows = load_paper_manifest(base_dir)
+    archived: List[str] = []
+    for row in rows:
+        paper_id = str(row.get("paper_id") or "")
+        if paper_id not in requested:
+            continue
+        row["library_status"] = "ARCHIVED"
+        row["updated_at"] = _now()
+        archived.append(paper_id)
+    if archived:
+        _write_manifest(base_dir, rows)
+    return {"status": "COMPLETED", "archived": archived}
+
+
+def permanently_delete_canonical_records(
+    paper_ids: Sequence[str], *, base_dir: Path = BASE_DIR
+) -> Dict[str, Any]:
+    """Delete only explicitly selected canonical records and rebuild Stage-3."""
+    requested = set(str(value) for value in paper_ids if value)
+    manifest = load_paper_manifest(base_dir)
+    targets = [
+        row for row in manifest if str(row.get("paper_id") or "") in requested
+    ]
+    kept = [
+        row for row in manifest if str(row.get("paper_id") or "") not in requested
+    ]
+    if not targets:
+        return {"status": "NOT_FOUND", "deleted": []}
+
+    kept_paths = {
+        str(Path(value).resolve())
+        for row in kept
+        for value in [
+            row.get("canonical_pdf_path"),
+            *(row.get("linked_versions") or []),
+        ]
+        if value
+    }
+    root = base_dir.resolve()
+    deleted_files: List[str] = []
+    for row in targets:
+        for value in [
+            row.get("canonical_pdf_path"),
+            *(row.get("linked_versions") or []),
+        ]:
+            if not value:
+                continue
+            path = Path(value).resolve()
+            if (
+                path.is_file()
+                and path.is_relative_to(root)
+                and str(path) not in kept_paths
+            ):
+                path.unlink()
+                deleted_files.append(path.name)
+        deep_dir = (base_dir / "data" / "deep_read" / str(row["paper_id"])).resolve()
+        if deep_dir.is_dir() and deep_dir.is_relative_to(root):
+            shutil.rmtree(deep_dir)
+
+    _write_manifest(base_dir, kept)
+    # Retain physical-file rows through the canonical JSONL loader.
+    from src.stage1_store import load_pdf_file_records
+
+    pdf_rows = [
+        row
+        for row in load_pdf_file_records(base_dir)
+        if str(row.get("paper_id") or "") not in requested
+    ]
+    _write_jsonl(base_dir / "data" / "pdf_files.jsonl", pdf_rows)
+    evidence_path = base_dir / "data" / "evidence" / "trusted_evidence.csv"
+    evidence = [
+        row
+        for row in _read_csv(evidence_path)
+        if str(row.get("paper_id") or "") not in requested
+    ]
+    _write_csv(evidence_path, evidence)
+
+    from src.unified_rag import build_unified_rag
+
+    remaining_formal = [
+        row["paper_id"]
+        for row in canonical_library_records(base_dir)
+        if row.get("library_status") == "FORMAL"
+    ]
+    rag = build_unified_rag(remaining_formal, base_dir=base_dir)
+    return {
+        "status": "COMPLETED",
+        "deleted": sorted(requested),
+        "deleted_pdf_files": deleted_files,
+        "rag": rag,
+    }
+
+
 def delete_invalid_candidate(record_id: str, *, base_dir: Path = BASE_DIR) -> bool:
     path = base_dir / "data" / "candidate_papers.csv"
     rows = _read_csv(path)
@@ -578,6 +835,25 @@ def add_doi_or_url(
             base_dir=base_dir,
             session=session,
         )
+        paper_id = str(result["oa_ingest"].get("paper_id") or "")
+        if paper_id:
+            from src.auto_oa_pipeline import index_auto_validated_paper
+
+            indexed = index_auto_validated_paper(paper_id, base_dir=base_dir)
+            result["oa_index"] = indexed
+            if indexed.get("status") == "INDEXED_STAGE3_UNIFIED":
+                update_paper_library_status(
+                    paper_id, "FORMAL", base_dir=base_dir
+                )
+            else:
+                reasons = (indexed.get("gate") or {}).get("reasons") or []
+                update_paper_library_status(
+                    paper_id,
+                    QUARANTINED,
+                    quarantine_reason=";".join(reasons)
+                    or "OA_FULLTEXT_PIPELINE_FAILED",
+                    base_dir=base_dir,
+                )
     return result
 
 
@@ -763,11 +1039,36 @@ def ingest_uploaded_pdf(
             "evidence_status", "NEEDS_HUMAN_REVIEW"
         )
         result["rag_status"] = indexed.get("status", "NOT_INDEXED")
+        if result["rag_status"] == "INDEXED_STAGE3_UNIFIED":
+            result["library_status"] = "FORMAL"
+            update_paper_library_status(
+                str(result["paper_id"]), "FORMAL", base_dir=base_dir
+            )
+        else:
+            result["library_status"] = QUARANTINED
+            update_paper_library_status(
+                str(result["paper_id"]),
+                QUARANTINED,
+                quarantine_reason=";".join(
+                    str(value) for value in result["quality_gate_reasons"]
+                ),
+                base_dir=base_dir,
+            )
     else:
         result["quality_gate"] = "FAILED"
         result["quality_gate_reasons"] = metadata_errors or [
             "UPLOAD_PIPELINE_INCOMPLETE"
         ]
+        result["library_status"] = QUARANTINED
+        if result.get("paper_id"):
+            update_paper_library_status(
+                str(result["paper_id"]),
+                QUARANTINED,
+                quarantine_reason=";".join(
+                    str(value) for value in result["quality_gate_reasons"]
+                ),
+                base_dir=base_dir,
+            )
     return result
 
 

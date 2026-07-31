@@ -23,7 +23,9 @@ from src.literature_library import (
     HUMAN_REVISION_REQUIRED,
     VALID_METADATA,
     add_doi_or_url,
+    archive_canonical_records,
     backfill_invalid_candidates,
+    canonical_library_records,
     canonical_pdf_records,
     delete_invalid_candidate,
     eligible_paper_ids,
@@ -32,6 +34,7 @@ from src.literature_library import (
     library_statistics,
     load_candidate_records,
     quarantine_record,
+    permanently_delete_canonical_records,
     repair_candidate_metadata,
     rebuild_unified_rag,
     set_evidence_review_status,
@@ -115,36 +118,63 @@ def _display_title(row: Dict[str, Any]) -> str:
     return f"{title}（{year or '年份未知'}）— {suffix}"
 
 
+def _deployment_version() -> Dict[str, Any]:
+    try:
+        value = json.loads(
+            (PROJECT_ROOT / "DEPLOY_VERSION.json").read_text(encoding="utf-8")
+        )
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _storage_label(mode: str) -> str:
+    return {
+        CLOUD_TEMPORARY: "云端临时存储",
+        "LOCAL_PERSISTENT": "本地持久化存储",
+        "EXTERNAL_PERSISTENT": "外部持久化存储",
+    }.get(mode, "存储状态未知")
+
+
 def _render_storage_status(base_dir: Path, mode: str, warning: str) -> None:
-    left, right = st.columns([1, 3])
-    with left:
-        st.metric("存储后端", mode)
-    with right:
-        st.caption(f"当前工作目录：{base_dir}")
-        version_path = PROJECT_ROOT / "DEPLOY_VERSION.json"
-        try:
-            version = json.loads(version_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            version = {}
-        if version.get("source_commit"):
-            st.caption(
-                f"部署版本：`{str(version['source_commit'])[:8]}` · "
-                f"应用版本：{version.get('application_version') or 'unknown'}"
-            )
-        if mode == CLOUD_TEMPORARY:
-            st.warning(warning)
-            st.warning("当前云端为临时存储模式，应用重启后新增PDF和索引可能丢失。")
-            st.info(
-                "云端临时模式不运行独立后台 worker。短任务会在当前网页请求内同步执行并显示进度；"
-                "较大 PDF、慢速 OA 下载或大规模重建可能超过 Community Cloud 的请求时限或内存限制，"
-                "超时后不会在后台继续，也不会保留为等待领取的 PENDING 任务。"
-            )
-        else:
-            st.success("当前存储后端具备持久化语义。")
+    """Render only compact user-facing persistence guidance above the fold."""
+    del base_dir, warning
+    if mode == CLOUD_TEMPORARY:
+        st.warning("当前为云端临时存储模式，应用重启后新增PDF和索引可能丢失。")
+        st.caption("云端任务在当前页面同步执行，关闭网页或超时后不会在后台继续。")
+
+
+def _render_system_status(base_dir: Path, mode: str) -> None:
+    """Keep deployment and filesystem details out of the default library view."""
+    version = _deployment_version()
+    try:
+        from src.unified_rag import rag_paths
+
+        rag_exists = rag_paths(base_dir)["manifest"].exists()
+    except (ImportError, KeyError, OSError):
+        rag_exists = False
+    with st.expander("系统状态与部署信息", expanded=False):
+        st.markdown(f"**存储模式**：{_storage_label(mode)}")
+        st.markdown(f"**工作目录**：`{base_dir}`")
+        st.markdown(
+            f"**部署版本**：`{version.get('source_commit') or '本地开发版本'}`"
+        )
+        st.markdown(
+            f"**应用版本**：{version.get('application_version') or '未标记'}"
+        )
+        st.markdown(f"**统一 RAG**：{'已存在' if rag_exists else '尚未建立'}")
+        st.markdown(
+            f"**云端模式**：{'是' if mode == CLOUD_TEMPORARY else '否'}"
+        )
 
 
 def _render_pdf_upload(base_dir: Path) -> None:
-    st.markdown("#### 上传本地 PDF 并深读")
+    st.markdown("### 上传本地PDF")
+    st.caption("支持单篇或多篇；上传后自动查重、精读、质量门禁和入RAG。")
+    st.caption(
+        "上传 → 元数据核验 → PDF校验 → 查重 → 逐页精读 → "
+        "证据审计 → 质量门禁 → 写入RAG → 完成"
+    )
     files = st.file_uploader(
         "选择一篇或多篇 PDF",
         type=["pdf"],
@@ -152,51 +182,46 @@ def _render_pdf_upload(base_dir: Path) -> None:
         key="lib_pdf_upload",
         help="系统验证真实 PDF 结构并按 SHA-256 查重，HTML 伪 PDF 会被拒绝。",
     )
-    if not files:
-        return
-    file_rows = [
-        {"文件名": item.name, "大小": f"{item.size / 1024:.1f} KB"}
-        for item in files
-    ]
-    st.dataframe(pd.DataFrame(file_rows), hide_index=True, width="stretch")
-    st.caption(
-        "若 PDF 内嵌元数据不完整，可在单篇上传时手动补全；系统不会用文件名猜测题名。"
-    )
-    meta_cols = st.columns(2)
-    with meta_cols[0]:
-        manual_title = st.text_input(
-            "真实题名（可选）",
-            key="upload_manual_title",
-            disabled=len(files) != 1,
-        )
-        manual_authors = st.text_input(
-            "作者（可选）",
-            key="upload_manual_authors",
-            disabled=len(files) != 1,
-        )
-    with meta_cols[1]:
-        manual_year = st.text_input(
-            "年份（可选）",
-            key="upload_manual_year",
-            disabled=len(files) != 1,
-        )
-        manual_doi = st.text_input(
-            "DOI（自动入 RAG 时必需）",
-            key="upload_manual_doi",
-            disabled=len(files) != 1,
-        )
+    manual_title = manual_authors = manual_year = manual_doi = ""
+    if files:
+        file_rows = [
+            {"文件名": item.name, "大小": f"{item.size / 1024:.1f} KB"}
+            for item in files
+        ]
+        st.dataframe(pd.DataFrame(file_rows), hide_index=True, width="stretch")
+        if len(files) == 1:
+            with st.expander("单篇元数据补充（可选）", expanded=False):
+                st.caption("系统不会用文件名猜测题名。")
+                manual_title = st.text_input(
+                    "真实题名",
+                    key="upload_manual_title",
+                )
+                manual_authors = st.text_input(
+                    "作者",
+                    key="upload_manual_authors",
+                )
+                manual_year = st.text_input(
+                    "年份",
+                    key="upload_manual_year",
+                )
+                manual_doi = st.text_input(
+                    "DOI（自动入 RAG 时必需）",
+                    key="upload_manual_doi",
+                )
     if not st.button(
-        "开始上传并执行完整摄取",
+        "处理上传文献",
         type="primary",
         key="process_library_uploads",
+        disabled=not files,
+        width="stretch",
     ):
         return
-    progress = st.progress(0, text="准备处理 PDF…")
+    progress = st.progress(0, text="上传：准备接收 PDF…")
     results = []
     for index, uploaded in enumerate(files, start=1):
         progress.progress(
             (index - 1) / len(files),
-            text=f"正在验证、查重和逐页深读：{uploaded.name}",
+            text=f"PDF校验 → 查重 → 逐页精读：{uploaded.name}",
         )
         payload = bytes(uploaded.getbuffer())
         metadata_override = None
@@ -240,13 +265,44 @@ def _render_pdf_upload(base_dir: Path) -> None:
                 f"{uploaded.name} 已保存，但深读状态为 "
                 f"{result.get('deep_read_status') or 'PARTIAL'}。"
             )
-    progress.progress(1.0, text="上传处理完成")
+    progress.progress(1.0, text="完成：上传文献已处理")
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "真实题名": row.get("title") or row.get("filename") or "",
+                    "作者": row.get("authors") or "",
+                    "年份": row.get("year") or row.get("publication_date") or "",
+                    "DOI": row.get("doi") or "",
+                    "真实下载PDF": bool(row.get("pdf_valid")),
+                    "PDF大小（字节）": row.get("file_size") or 0,
+                    "SHA-256": row.get("file_hash_sha256") or "",
+                    "真实页数": row.get("real_page_count") or 0,
+                    "已精读页数": (
+                        row.get("processed_page_count")
+                        or row.get("page_record_count")
+                        or 0
+                    ),
+                    "EvidenceRecord": row.get("evidence_count") or 0,
+                    "DIRECT": row.get("direct_evidence_count") or 0,
+                    "INDIRECT": row.get("indirect_evidence_count") or 0,
+                    "MENTION_ONLY": row.get("mention_only_count") or 0,
+                    "质量门禁": row.get("quality_gate") or "FAILED",
+                    "库状态": row.get("library_status") or "QUARANTINED",
+                    "RAG状态": row.get("rag_status") or "NOT_INDEXED",
+                }
+                for row in results
+            ]
+        ),
+        hide_index=True,
+        width="stretch",
+    )
     st.session_state["last_upload_results"] = results
     _clear_library_cache()
 
 
 def _render_doi_add(base_dir: Path) -> None:
-    st.markdown("#### 2. 通过 DOI / URL 添加")
+    st.markdown("#### 通过 DOI / URL 添加")
     value = st.text_input(
         "DOI 或包含 DOI 的 URL",
         placeholder="10.xxxx/xxxxx 或 https://doi.org/10.xxxx/xxxxx",
@@ -281,20 +337,20 @@ def _render_doi_add(base_dir: Path) -> None:
 
 
 def _render_oa_topup(base_dir: Path) -> None:
-    st.markdown("### 自动发现OA文献")
+    st.markdown("### 自动发现并处理OA文献")
     st.caption(
-        "自动检索与 OA 全文补充会在当前网页请求内同步完成合法 OA 下载、逐页深读、证据门禁和统一 RAG；"
-        "关闭页面后不会转入后台继续运行。"
+        "SEARCHING → METADATA_VALIDATED → DOWNLOADING → PDF_VALIDATED → "
+        "DEDUPLICATING → DEEP_READING → QUALITY_GATING → REINDEXING → COMPLETED"
     )
     query = st.text_input(
         "检索主题",
         value="L-PBF Ti-6Al-4V fatigue pore defect crack initiation",
         key="library_auto_oa_query",
     )
-    controls = st.columns(4)
+    controls = st.columns(2)
     with controls[0]:
         max_new = st.number_input(
-            "最大新增数量",
+            "最大新增数量（1—3篇）",
             min_value=1,
             max_value=3,
             value=1,
@@ -303,7 +359,7 @@ def _render_oa_topup(base_dir: Path) -> None:
         )
     with controls[1]:
         topic_filter = st.selectbox(
-            "文献主题筛选",
+            "文献类型",
             [
                 "疲劳与裂纹萌生",
                 "孔隙与缺陷",
@@ -314,37 +370,51 @@ def _render_oa_topup(base_dir: Path) -> None:
             ],
             key="library_auto_oa_topic",
         )
-    with controls[2]:
-        year_from = st.number_input(
-            "起始年份",
-            min_value=1900,
-            max_value=datetime.now().year,
-            value=2000,
-            step=1,
-            key="library_auto_oa_year_from",
-        )
-    with controls[3]:
-        year_to = st.number_input(
-            "结束年份",
-            min_value=1900,
-            max_value=datetime.now().year,
-            value=datetime.now().year,
-            step=1,
-            key="library_auto_oa_year_to",
-        )
-    core_only = st.checkbox(
-        "仅L-PBF/SLM Ti-6Al-4V疲劳核心文献",
+    core_only = st.toggle(
+        "仅限L-PBF/SLM Ti-6Al-4V疲劳",
         value=True,
         key="library_auto_oa_core",
     )
+    with st.expander("更多筛选（可选）", expanded=False):
+        year_columns = st.columns(2)
+        with year_columns[0]:
+            year_from = st.number_input(
+                "起始年份",
+                min_value=1900,
+                max_value=datetime.now().year,
+                value=2000,
+                step=1,
+                key="library_auto_oa_year_from",
+            )
+        with year_columns[1]:
+            year_to = st.number_input(
+                "结束年份",
+                min_value=1900,
+                max_value=datetime.now().year,
+                value=datetime.now().year,
+                step=1,
+                key="library_auto_oa_year_to",
+            )
     if st.button(
         "开始自动发现并处理",
         type="primary",
         key="library_auto_oa_start",
+        width="stretch",
     ):
         from src.auto_oa_pipeline import PHASES, run_auto_oa_discovery
 
-        progress = st.progress(0.0, text="SEARCHING：正在查询 OA 元数据源…")
+        progress_labels = {
+            "SEARCHING": "检索",
+            "METADATA_VALIDATED": "元数据核验",
+            "DOWNLOADING": "PDF校验",
+            "PDF_VALIDATED": "PDF校验",
+            "DEDUPLICATING": "查重",
+            "DEEP_READING": "逐页精读",
+            "QUALITY_GATING": "质量门禁",
+            "REINDEXING": "写入RAG",
+            "COMPLETED": "完成",
+        }
+        progress = st.progress(0.0, text="检索：正在查询 OA 元数据源…")
         phase_rows: List[Dict[str, Any]] = []
 
         def on_progress(phase: str, payload: Dict[str, Any]) -> None:
@@ -352,7 +422,10 @@ def _render_oa_topup(base_dir: Path) -> None:
             position = PHASES.index(phase) + 1 if phase in PHASES else 1
             progress.progress(
                 min(position / len(PHASES), 1.0),
-                text=f"{phase}：{payload.get('title') or payload.get('paper_id') or query}",
+                text=(
+                    f"{progress_labels.get(phase, phase)}："
+                    f"{payload.get('title') or payload.get('paper_id') or query}"
+                ),
             )
 
         result = run_auto_oa_discovery(
@@ -374,6 +447,15 @@ def _render_oa_topup(base_dir: Path) -> None:
             st.warning(
                 "本次没有文献通过完整门禁；未创建 PENDING 任务，也不会在后台继续。"
             )
+        st.caption(
+            "搜索候选 {search} · OA候选 {oa} · 下载尝试 {attempts} · "
+            "真实下载成功 {success}".format(
+                search=result.get("search_candidate_count", 0),
+                oa=result.get("oa_candidate_count", 0),
+                attempts=result.get("download_attempt_count", 0),
+                success=result.get("download_success_count", 0),
+            )
+        )
         if result.get("results"):
             display_rows = []
             for row in result["results"]:
@@ -383,13 +465,23 @@ def _render_oa_topup(base_dir: Path) -> None:
                         "作者": row.get("authors"),
                         "年份": row.get("year"),
                         "DOI": row.get("doi"),
+                        "元数据来源": row.get("metadata_source"),
                         "OA来源": row.get("oa_source"),
+                        "真实下载PDF": row.get("downloaded_pdf"),
                         "下载状态": row.get("download_status"),
                         "HTTP": row.get("http_status"),
+                        "PDF大小（字节）": row.get("file_size"),
+                        "SHA-256": row.get("file_hash_sha256"),
+                        "保存位置": row.get("saved_location"),
                         "真实页数": row.get("real_page_count"),
+                        "已精读页数": row.get("processed_page_count"),
                         "深读状态": row.get("deep_read_status"),
                         "EvidenceRecord": row.get("evidence_count"),
+                        "DIRECT": row.get("direct_evidence_count"),
+                        "INDIRECT": row.get("indirect_evidence_count"),
+                        "MENTION_ONLY": row.get("mention_only_count"),
                         "自动质量门禁": row.get("quality_gate"),
+                        "库状态": row.get("library_status"),
                         "RAG状态": row.get("rag_status"),
                         "失败原因": row.get("failure_reason"),
                     }
@@ -407,71 +499,46 @@ def _render_oa_topup(base_dir: Path) -> None:
 
 
 def render_ingestion_entries(base_dir: Path) -> None:
-    st.subheader("📥 添加文献")
-    _render_oa_topup(base_dir)
-    st.divider()
-    upload_tab, doi_tab = st.tabs(["上传本地 PDF", "DOI / URL 添加"])
-    with upload_tab:
-        _render_pdf_upload(base_dir)
-    with doi_tab:
-        _render_doi_add(base_dir)
+    left, right = st.columns(2, gap="large")
+    with left:
+        with st.container(border=True):
+            _render_oa_topup(base_dir)
+    with right:
+        with st.container(border=True):
+            _render_pdf_upload(base_dir)
 
 
 def _render_statistics(base_dir: Path) -> None:
     stats = library_statistics(base_dir)
     labels = [
         ("唯一文献", "unique_literature"),
-        ("候选元数据", "candidate_metadata"),
         ("PDF 已获取", "pdf_acquired"),
         ("深读完成", "deep_read_complete"),
-        ("证据待确认", "evidence_pending"),
-        ("已确认", "evidence_confirmed"),
         ("已入统一 RAG", "rag_indexed"),
         ("待处理/失败", "pending_or_failed"),
-        ("异常元数据", "invalid_metadata"),
     ]
-    first = st.columns(5)
-    second = st.columns(4)
-    for column, (label, key) in zip([*first, *second], labels):
+    columns = st.columns(5)
+    for column, (label, key) in zip(columns, labels):
         with column:
             st.metric(label, stats[key])
-    st.caption(
-        "统计真源：canonical PDF SHA/DOI/题名分组、Stage-2 extraction_status、"
-        "可信 EvidenceRecord 与 Stage-3 unified RAG manifest。"
-    )
 
 
 def _normal_library_rows(base_dir: Path) -> List[Dict[str, Any]]:
-    rows = []
-    for row in canonical_pdf_records(base_dir):
-        if row.get("validation_status") != VALID_METADATA:
-            continue
-        rows.append(
-            {
-                **row,
-                "source": "formal",
-                "authors": str(row.get("authors") or ""),
-                "type_cn": paper_type_cn(row.get("type_code", "")),
-                "verification": (
-                    "部署快照（只读）"
-                    if row.get("snapshot_read_only")
-                    else "已核验"
-                ),
-            }
-        )
-    for row in valid_candidate_records(base_dir):
-        rows.append(
-            {
-                **row,
-                "deep_read_complete": False,
-                "evidence_status": "无全文证据",
-                "rag_status": "NOT_INDEXED",
-                "type_cn": paper_type_cn(row.get("type_code", "")),
-                "verification": "候选元数据",
-                "selectable": False,
-            }
-        )
-    return rows
+    return [
+        {
+            **row,
+            "authors": str(row.get("authors") or ""),
+            "type_cn": paper_type_cn(row.get("type_code", "")),
+            "verification": (
+                "正式库"
+                if row.get("library_status") == "FORMAL"
+                else "异常记录"
+                if row.get("library_status") == "QUARANTINED"
+                else "候选库"
+            ),
+        }
+        for row in canonical_library_records(base_dir)
+    ]
 
 
 def _render_evidence_table(evidence: Sequence[Dict[str, Any]]) -> None:
@@ -516,6 +583,24 @@ def render_paper_detail(record: Dict[str, Any], base_dir: Path) -> None:
         deep_status = json.loads(deep_status_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         deep_status = {}
+    source_url = str(record.get("source_url") or "")
+    display_source = (
+        source_url
+        if source_url.startswith(("https://", "http://"))
+        else "本地上传/系统临时存储"
+    )
+    pdf_candidates = [
+        record.get("canonical_pdf_path"),
+        *(record.get("linked_versions") or []),
+    ]
+    pdf_path = next(
+        (
+            Path(value)
+            for value in pdf_candidates
+            if value and Path(value).is_file()
+        ),
+        None,
+    )
 
     st.markdown(f"### 📄 {record['title']}")
     left, right = st.columns(2)
@@ -523,7 +608,7 @@ def render_paper_detail(record: Dict[str, Any], base_dir: Path) -> None:
         st.markdown(f"**作者**：{record.get('authors') or '未报告'}")
         st.markdown(f"**年份**：{record.get('year') or '未报告'}")
         st.markdown(f"**DOI**：{record.get('doi') or '未报告'}")
-        st.markdown(f"**PDF 来源**：{record.get('source_url') or '本地上传/迁移'}")
+        st.markdown(f"**PDF 来源**：{display_source}")
         st.markdown(f"**真实页数**：{record.get('real_page_count') or 0}")
         st.markdown(f"**canonical_paper_id**：`{paper_id}`")
     with right:
@@ -547,6 +632,25 @@ def render_paper_detail(record: Dict[str, Any], base_dir: Path) -> None:
         st.markdown(
             f"**失败/隔离原因**：{record.get('quarantine_reason') or deep_status.get('error') or '无'}"
         )
+
+    if pdf_path is not None:
+        try:
+            pdf_bytes = pdf_path.read_bytes()
+        except OSError:
+            pdf_bytes = b""
+        if pdf_bytes.startswith(b"%PDF"):
+            safe_title = re.sub(
+                r'[\\/:*?"<>|]+',
+                "_",
+                str(record.get("title") or paper_id),
+            ).strip(" ._")
+            st.download_button(
+                "下载PDF到本机",
+                data=pdf_bytes,
+                file_name=f"{safe_title or paper_id}.pdf",
+                mime="application/pdf",
+                key=f"download_pdf_{paper_id}",
+            )
 
     with st.expander("查看可信证据", expanded=False):
         _render_evidence_table(evidence)
@@ -622,7 +726,8 @@ def render_paper_detail(record: Dict[str, Any], base_dir: Path) -> None:
         if st.button(
             "写入/重建 RAG",
             key=f"rag_{paper_id}",
-            disabled=record.get("evidence_status") != HUMAN_CONFIRMED,
+            disabled=record.get("evidence_status")
+            not in {"AUTO_VALIDATED", HUMAN_CONFIRMED},
         ):
             with st.spinner("正在调用统一 Stage-3 索引…"):
                 result = rebuild_unified_rag([paper_id], base_dir=base_dir)
@@ -658,7 +763,7 @@ def render_batch_operations(
             "以下记录已自动排除：" + json.dumps(gate["rejected"], ensure_ascii=False)
         )
     st.markdown(f"**已选 {len(selected_ids)} 条；科研操作可用 {len(eligible)} 篇。**")
-    gap_col, hyp_col, rag_col = st.columns(3)
+    gap_col, hyp_col, experiment_col = st.columns(3)
     with gap_col:
         run_gap = st.button(
             "🔍 分析研究空白",
@@ -673,6 +778,15 @@ def render_batch_operations(
             disabled=not eligible,
             width="stretch",
         )
+    with experiment_col:
+        run_experiment = st.button(
+            "🧫 生成实验设计",
+            key="batch_experiment_btn",
+            disabled=not eligible,
+            width="stretch",
+        )
+
+    rag_col, archive_col, delete_col = st.columns(3)
     with rag_col:
         confirmed = eligible_paper_ids(
             eligible,
@@ -683,6 +797,25 @@ def render_batch_operations(
             "🔄 写入/重建统一 RAG",
             key="batch_rag_btn",
             disabled=not confirmed,
+            width="stretch",
+        )
+    with archive_col:
+        run_archive = st.button(
+            "归档",
+            key="batch_archive_btn",
+            disabled=not eligible,
+            width="stretch",
+        )
+    with delete_col:
+        confirm_delete = st.checkbox(
+            "确认彻底删除",
+            key="batch_delete_confirm",
+            disabled=not eligible,
+        )
+        run_delete = st.button(
+            "彻底删除",
+            key="batch_delete_btn",
+            disabled=not eligible or not confirm_delete,
             width="stretch",
         )
 
@@ -698,16 +831,77 @@ def render_batch_operations(
         with st.spinner("正在通过正式证据门禁生成候选假设…"):
             result = generate_hypotheses(eligible, base_dir=base_dir)
         st.session_state["library_hypothesis_result"] = result
+    if run_experiment:
+        from src.hypothesis_service import generate_hypotheses
+
+        with st.spinner("正在基于可追溯正文证据生成可证伪实验设计…"):
+            hypotheses = generate_hypotheses(
+                eligible, base_dir=base_dir, persist=False
+            )
+            designs = [
+                {
+                    "hypothesis_id": hypothesis.get("hypothesis_id"),
+                    "objective": hypothesis.get("hypothesis"),
+                    "independent_variables": hypothesis.get(
+                        "independent_variables", []
+                    ),
+                    "dependent_variables": hypothesis.get(
+                        "dependent_variables", []
+                    ),
+                    "control_variables": hypothesis.get(
+                        "control_variables", []
+                    ),
+                    "moderating_variables": hypothesis.get(
+                        "moderating_variables", []
+                    ),
+                    "support_criteria": hypothesis.get(
+                        "support_criteria", []
+                    ),
+                    "falsification_criteria": hypothesis.get(
+                        "falsification_criteria", []
+                    ),
+                    "supporting_evidence": hypothesis.get(
+                        "supporting_evidence", []
+                    ),
+                    "status": "SYSTEM_PROPOSAL_REQUIRES_HUMAN_REVIEW",
+                }
+                for hypothesis in hypotheses.get("hypotheses") or []
+            ]
+            result = {
+                "status": (
+                    "GENERATED"
+                    if designs
+                    else hypotheses.get("status", "INSUFFICIENT_EVIDENCE")
+                ),
+                "experiment_designs": designs,
+                "rejected": hypotheses.get("rejected", {}),
+            }
+        st.session_state["library_experiment_result"] = result
     if run_rag:
         with st.spinner("正在调用统一 Stage-3 索引…"):
             result = rebuild_unified_rag(confirmed, base_dir=base_dir)
         st.session_state["library_rag_result"] = result
         _clear_library_cache()
+    if run_archive:
+        result = archive_canonical_records(eligible, base_dir=base_dir)
+        st.session_state["library_archive_result"] = result
+        _clear_library_cache()
+        st.rerun()
+    if run_delete:
+        result = permanently_delete_canonical_records(
+            eligible, base_dir=base_dir
+        )
+        st.session_state["library_delete_result"] = result
+        _clear_library_cache()
+        st.rerun()
 
     for key, label in (
         ("library_gap_result", "研究空白结果"),
         ("library_hypothesis_result", "候选假设结果"),
+        ("library_experiment_result", "实验设计结果"),
         ("library_rag_result", "RAG 结果"),
+        ("library_archive_result", "归档结果"),
+        ("library_delete_result", "彻底删除结果"),
     ):
         result = st.session_state.get(key)
         if result:
@@ -815,6 +1009,14 @@ def render_task_status(base_dir: Path) -> None:
         st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
 
 
+def _render_secondary_sections(base_dir: Path, mode: str) -> None:
+    st.divider()
+    with st.expander("更多添加方式：DOI / URL", expanded=False):
+        _render_doi_add(base_dir)
+    render_task_status(base_dir)
+    _render_system_status(base_dir, mode)
+
+
 def render_library_page() -> None:
     """Render the same complete library workflow locally and on cloud."""
     backend = detect_storage_backend(PROJECT_ROOT)
@@ -825,48 +1027,52 @@ def render_library_page() -> None:
         unsafe_allow_html=True,
     )
     st.caption(
-        "上传、真实元数据核验、逐页深读、EvidenceRecord 审核、统一 RAG、"
-        "研究空白和候选假设均使用同一套 canonical 工作流。"
+        "集中寻找、上传和管理可追溯的疲劳文献证据。"
     )
     _render_storage_status(base_dir, backend.mode, backend.warning)
-    st.divider()
 
-    # Upload and DOI/OA entry points are intentionally at the top and are
-    # never hidden merely because the app is running on Community Cloud.
+    # The two primary workflows stay visible together above statistics.
     render_ingestion_entries(base_dir)
     st.divider()
+    st.subheader("文献统计")
     _render_statistics(base_dir)
-    render_task_status(base_dir)
-    render_invalid_metadata(base_dir)
     st.divider()
 
     rows = _normal_library_rows(base_dir)
     frame = pd.DataFrame(rows)
-    st.subheader("📋 正常文献与有效候选")
+    st.subheader("文献列表")
+    view_filter = st.radio(
+        "文献视图",
+        ["全部文献", "正式库", "候选库", "异常记录"],
+        horizontal=True,
+        key="library_view_filter",
+    )
     if frame.empty:
         st.info("当前没有可显示的有效文献；可使用页面顶部入口添加。")
+        _render_secondary_sections(base_dir, backend.mode)
         return
 
-    filter_cols = st.columns([1, 1, 2])
+    if view_filter == "正式库":
+        frame = frame[frame["library_status"] == "FORMAL"]
+    elif view_filter == "候选库":
+        frame = frame[
+            ~frame["library_status"].isin(
+                ["FORMAL", "QUARANTINED", "ARCHIVED"]
+            )
+        ]
+    elif view_filter == "异常记录":
+        frame = frame[frame["library_status"] == "QUARANTINED"]
+
+    filter_cols = st.columns([1, 2])
     with filter_cols[0]:
-        source_filter = st.selectbox(
-            "来源",
-            ["全部", "canonical PDF", "候选元数据"],
-            key="lib_source",
-        )
-    with filter_cols[1]:
         types = ["全部", *sorted(frame["type_cn"].dropna().unique())]
         type_filter = st.selectbox("分类", types, key="lib_type")
-    with filter_cols[2]:
+    with filter_cols[1]:
         keyword = st.text_input(
             "题名 / 作者 / DOI",
             placeholder="输入关键词…",
             key="lib_keyword",
         )
-    if source_filter == "canonical PDF":
-        frame = frame[frame["source"] == "formal"]
-    elif source_filter == "候选元数据":
-        frame = frame[frame["source"] == "candidate"]
     if type_filter != "全部":
         frame = frame[frame["type_cn"] == type_filter]
     if keyword.strip():
@@ -895,8 +1101,14 @@ def render_library_page() -> None:
             "证据状态": frame["evidence_status"],
             "RAG 状态": frame["rag_status"],
             "DOI": frame["doi"].fillna(""),
+            "库状态": frame["library_status"],
             "来源": frame["source"].map(
-                {"formal": "canonical PDF", "candidate": "候选元数据"}
+                {
+                    "formal": "正式库",
+                    "candidate": "候选库",
+                    "quarantined": "异常记录",
+                    "archived": "已归档",
+                }
             ),
             "_paper_id": frame["paper_id"],
             "_selectable": frame["selectable"],
@@ -918,6 +1130,7 @@ def render_library_page() -> None:
             "证据状态",
             "RAG 状态",
             "DOI",
+            "库状态",
             "来源",
         ],
         key="lib_data_editor",
@@ -969,3 +1182,4 @@ def render_library_page() -> None:
     st.divider()
     st.subheader(f"⚙️ 批量科研操作（{len(selected_ids)} 篇有效文献）")
     render_batch_operations(selected_ids, base_dir)
+    _render_secondary_sections(base_dir, backend.mode)

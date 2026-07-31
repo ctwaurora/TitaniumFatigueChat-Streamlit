@@ -29,7 +29,9 @@ from src.stage1_store import (
     load_trusted_evidence_rows,
     normalize_doi,
     normalize_title,
+    register_metadata_record,
     update_paper_extraction_status,
+    update_paper_library_status,
 )
 from src.unified_rag import build_unified_rag, rag_paths
 
@@ -42,7 +44,6 @@ PHASES = (
     "PDF_VALIDATED",
     "DEDUPLICATING",
     "DEEP_READING",
-    "AUDITING",
     "QUALITY_GATING",
     "REINDEXING",
     "COMPLETED",
@@ -435,50 +436,123 @@ def run_auto_oa_discovery(
 
     results: List[Dict[str, Any]] = []
     completed = 0
+    download_attempt_count = 0
+    download_success_count = 0
     for candidate in filtered[:max_new]:
+        registration = register_metadata_record(
+            {
+                **candidate,
+                "source_path": (
+                    candidate.get("source_url")
+                    or candidate.get("landing_page")
+                    or ""
+                ),
+            },
+            source_record_id=(
+                normalize_doi(candidate.get("doi") or "")
+                or normalize_title(candidate.get("title") or "")
+            ),
+            source_type=f"{str(candidate.get('metadata_source') or candidate.get('source') or 'OA').upper()}_METADATA",
+            library_status="CANDIDATE",
+            base_dir=base_dir,
+        )
         detail: Dict[str, Any] = {
+            "paper_id": str(registration.get("paper_id") or ""),
             "title": candidate.get("title") or "",
             "authors": candidate.get("authors") or "",
             "year": candidate.get("year") or "UNKNOWN",
             "doi": candidate.get("doi") or "",
-            "oa_source": candidate.get("metadata_source") or candidate.get("source") or "",
+            "metadata_source": candidate.get("metadata_source") or candidate.get("source") or "",
+            "oa_source": candidate.get("oa_source") or candidate.get("metadata_source") or candidate.get("source") or "",
             "oa_status": candidate.get("oa_status") or "",
             "source_url": candidate.get("source_url") or candidate.get("landing_page") or "",
             "pdf_url": candidate.get("pdf_url") or "",
             "download_status": "NOT_STARTED",
+            "downloaded_pdf": False,
+            "file_size": 0,
+            "file_hash_sha256": "",
+            "saved_location": "",
             "real_page_count": 0,
+            "processed_page_count": 0,
             "deep_read_status": "NOT_STARTED",
             "evidence_count": 0,
+            "direct_evidence_count": 0,
+            "indirect_evidence_count": 0,
+            "mention_only_count": 0,
             "quality_gate": "NOT_RUN",
             "evidence_status": "NOT_EXTRACTED",
+            "library_status": "CANDIDATE",
             "rag_status": "NOT_INDEXED",
             "failure_reason": "",
             "phases": ["SEARCHING", "METADATA_VALIDATED"],
         }
         _emit(progress_callback, "DOWNLOADING", title=detail["title"])
         detail["phases"].append("DOWNLOADING")
+        download_attempt_count += 1
         ingested = download_and_deep_read(
             candidate,
             base_dir=base_dir,
             session=session,
         )
         detail["download_status"] = str(ingested.get("status") or "FAILED")
+        detail["downloaded_pdf"] = bool(
+            ingested.get("downloaded_pdf") and ingested.get("pdf_valid")
+        )
+        if detail["downloaded_pdf"]:
+            download_success_count += 1
+        detail["file_size"] = int(ingested.get("file_size") or 0)
+        detail["file_hash_sha256"] = str(
+            ingested.get("file_hash_sha256") or ""
+        )
+        detail["saved_location"] = (
+            "CANONICAL_PDF_STORAGE" if detail["downloaded_pdf"] else ""
+        )
         detail["failure_reason"] = str(
             ingested.get("failure_reason") or ingested.get("reason") or ""
         )
         if not ingested.get("paper_id"):
+            if (
+                ingested.get("status") == "FAILED"
+                and detail.get("paper_id")
+            ):
+                detail["library_status"] = "QUARANTINED"
+                update_paper_library_status(
+                    str(detail["paper_id"]),
+                    "QUARANTINED",
+                    quarantine_reason=detail["failure_reason"]
+                    or "INVALID_DOWNLOADED_PDF",
+                    base_dir=base_dir,
+                )
             results.append(detail)
             continue
         paper_id = str(ingested["paper_id"])
         detail["paper_id"] = paper_id
         detail["real_page_count"] = int(ingested.get("real_page_count") or 0)
+        detail["processed_page_count"] = int(
+            ingested.get("processed_page_count")
+            or ingested.get("page_record_count")
+            or 0
+        )
         detail["deep_read_status"] = str(ingested.get("status") or "FAILED")
         detail["evidence_count"] = int(ingested.get("evidence_count") or 0)
+        detail["direct_evidence_count"] = int(
+            ingested.get("direct_evidence_count") or 0
+        )
+        detail["indirect_evidence_count"] = int(
+            ingested.get("indirect_evidence_count") or 0
+        )
+        detail["mention_only_count"] = int(
+            ingested.get("mention_only_count") or 0
+        )
         detail["http_status"] = int((ingested.get("http") or {}).get("status_code") or 0)
         detail["content_type"] = str((ingested.get("http") or {}).get("content_type") or "")
-        for phase in ("PDF_VALIDATED", "DEDUPLICATING", "DEEP_READING", "AUDITING"):
+        for phase in ("PDF_VALIDATED", "DEDUPLICATING", "DEEP_READING"):
             detail["phases"].append(phase)
             _emit(progress_callback, phase, paper_id=paper_id, title=detail["title"])
+        if ingested.get("status") == "DEEP_READ_COMPLETE":
+            update_paper_library_status(
+                paper_id, "DEEP_READ_COMPLETE", base_dir=base_dir
+            )
         detail["phases"].append("QUALITY_GATING")
         _emit(progress_callback, "QUALITY_GATING", paper_id=paper_id)
         gate = evaluate_auto_rag_gate(paper_id, base_dir=base_dir)
@@ -487,18 +561,32 @@ def run_auto_oa_discovery(
         detail["evidence_count"] = gate["evidence_count"]
         detail["gate_reasons"] = gate["reasons"]
         if gate["passed"]:
+            update_paper_library_status(
+                paper_id, "AUTO_VALIDATED", base_dir=base_dir
+            )
             detail["phases"].append("REINDEXING")
             _emit(progress_callback, "REINDEXING", paper_id=paper_id)
             indexed = index_auto_validated_paper(paper_id, base_dir=base_dir)
             detail["rag_status"] = indexed["status"]
             if indexed["status"] == "INDEXED_STAGE3_UNIFIED":
                 completed += 1
+                detail["library_status"] = "FORMAL"
+                update_paper_library_status(
+                    paper_id, "FORMAL", base_dir=base_dir
+                )
                 detail["phases"].append("COMPLETED")
                 _emit(progress_callback, "COMPLETED", paper_id=paper_id)
             else:
                 detail["failure_reason"] = "STAGE3_INDEX_BUILD_REJECTED"
         else:
             detail["failure_reason"] = ";".join(gate["reasons"])
+            detail["library_status"] = "QUARANTINED"
+            update_paper_library_status(
+                paper_id,
+                "QUARANTINED",
+                quarantine_reason=detail["failure_reason"],
+                base_dir=base_dir,
+            )
         results.append(detail)
 
     status = "COMPLETED" if completed else "NO_PAPER_INDEXED"
@@ -507,6 +595,10 @@ def run_auto_oa_discovery(
         "query": query,
         "max_new": max_new,
         "completed_count": completed,
+        "search_candidate_count": len(discovery["candidates"]),
+        "oa_candidate_count": len(filtered),
+        "download_attempt_count": download_attempt_count,
+        "download_success_count": download_success_count,
         "candidate_count": len(filtered),
         "results": results,
         "source_results": discovery["source_results"],

@@ -337,50 +337,72 @@ def register_pdf_bytes(
     )
     now = utc_now()
     semantic_candidates = semantic_duplicate_candidates(title, records)
+    canonical_upgrade = False
 
     if duplicate:
         paper_id = duplicate["paper_id"]
-        duplicate_status = "DUPLICATE"
-        duplicate_of = paper_id
-        if not duplicate.get("pdf_valid") or not duplicate.get(
+        metadata_only = not duplicate.get("pdf_valid") or not duplicate.get(
             "canonical_pdf_path"
-        ):
+        )
+        if metadata_only:
+            canonical_upgrade = True
+            duplicate_status = "UNIQUE"
+            duplicate_of = ""
             duplicate.update(
                 {
+                    "title": title or duplicate.get("title") or "",
+                    "authors": authors or duplicate.get("authors") or "",
+                    "publication_date": (
+                        publication_date
+                        or duplicate.get("publication_date")
+                        or ""
+                    ),
+                    "doi": doi or duplicate.get("doi") or "",
+                    "normalized_title": normalize_title(
+                        title or duplicate.get("title") or ""
+                    ),
+                    "source_type": source_type,
                     "source_path": source_path or original_filename,
                     "canonical_pdf_path": str(canonical_path.resolve()),
                     "file_hash_sha256": file_hash,
                     "real_page_count": int(validation["real_page_count"]),
                     "pdf_valid": True,
+                    "library_status": "PDF_DOWNLOADED",
+                    "duplicate_status": "UNIQUE",
+                    "duplicate_of": "",
                     "updated_at": now,
                 }
             )
-        linked = list(duplicate.get("linked_versions") or [])
-        canonical_str = str(canonical_path.resolve())
-        if canonical_str not in linked and canonical_str != duplicate.get(
-            "canonical_pdf_path"
-        ):
-            linked.append(canonical_str)
-            duplicate["linked_versions"] = linked
-            duplicate["updated_at"] = now
             _write_jsonl(paths["paper_manifest"], records)
-        duplicate_record = DuplicateRecord(
-            duplicate_id=f"DUP_{hashlib.sha256((paper_id + file_hash).encode()).hexdigest()[:16].upper()}",
-            source_record_id=file_hash,
-            duplicate_of=paper_id,
-            match_level=match_level,
-            match_value=match_value,
-            status="LINKED_VERSION" if match_level == "DOI_EXACT" else "DUPLICATE",
-            reason=f"Matched existing canonical paper by {match_level}",
-            created_at=now,
-        ).to_dict()
-        duplicate_rows = load_duplicate_records(base_dir)
-        if not any(
-            row.get("duplicate_id") == duplicate_record["duplicate_id"]
-            for row in duplicate_rows
-        ):
-            duplicate_rows.append(duplicate_record)
-            _write_jsonl(paths["duplicate_records"], duplicate_rows)
+        else:
+            duplicate_status = "DUPLICATE"
+            duplicate_of = paper_id
+            linked = list(duplicate.get("linked_versions") or [])
+            canonical_str = str(canonical_path.resolve())
+            if canonical_str not in linked and canonical_str != duplicate.get(
+                "canonical_pdf_path"
+            ):
+                linked.append(canonical_str)
+                duplicate["linked_versions"] = linked
+                duplicate["updated_at"] = now
+                _write_jsonl(paths["paper_manifest"], records)
+            duplicate_record = DuplicateRecord(
+                duplicate_id=f"DUP_{hashlib.sha256((paper_id + file_hash).encode()).hexdigest()[:16].upper()}",
+                source_record_id=file_hash,
+                duplicate_of=paper_id,
+                match_level=match_level,
+                match_value=match_value,
+                status="LINKED_VERSION" if match_level == "DOI_EXACT" else "DUPLICATE",
+                reason=f"Matched existing canonical paper by {match_level}",
+                created_at=now,
+            ).to_dict()
+            duplicate_rows = load_duplicate_records(base_dir)
+            if not any(
+                row.get("duplicate_id") == duplicate_record["duplicate_id"]
+                for row in duplicate_rows
+            ):
+                duplicate_rows.append(duplicate_record)
+                _write_jsonl(paths["duplicate_records"], duplicate_rows)
     else:
         paper_id = _stable_paper_id(doi, title, file_hash)
         duplicate_status = (
@@ -400,7 +422,7 @@ def register_pdf_bytes(
             file_hash_sha256=file_hash,
             real_page_count=int(validation["real_page_count"]),
             pdf_valid=True,
-            library_status="CANDIDATE",
+            library_status="PDF_DOWNLOADED",
             rag_status="NOT_INDEXED",
             evidence_status="NOT_EXTRACTED",
             duplicate_status=duplicate_status,
@@ -447,7 +469,13 @@ def register_pdf_bytes(
         _write_jsonl(review_path, review_rows)
 
     return {
-        "status": "DUPLICATE" if duplicate else "REGISTERED",
+        "status": (
+            "UPDATED_CANONICAL"
+            if canonical_upgrade
+            else "DUPLICATE"
+            if duplicate
+            else "REGISTERED"
+        ),
         "paper_id": paper_id,
         "title": title,
         "authors": authors,
@@ -504,6 +532,21 @@ def register_metadata_record(
                     existing[target] = str(value)
                     break
         existing["normalized_title"] = normalize_title(existing.get("title", ""))
+        existing["metadata_source"] = str(
+            existing.get("metadata_source")
+            or metadata.get("metadata_source")
+            or source_type
+        )
+        existing["oa_status"] = str(
+            metadata.get("oa_status") or existing.get("oa_status") or "UNKNOWN"
+        )
+        existing["source_url"] = str(
+            metadata.get("source_url")
+            or metadata.get("landing_page")
+            or existing.get("source_url")
+            or existing.get("source_path")
+            or ""
+        )
         existing["updated_at"] = now
         _write_jsonl(paths["paper_manifest"], records)
         duplicate = DuplicateRecord(
@@ -556,6 +599,18 @@ def register_metadata_record(
         created_at=now,
         updated_at=now,
     ).to_dict()
+    record.update(
+        {
+            "metadata_source": str(metadata.get("metadata_source") or source_type),
+            "oa_status": str(metadata.get("oa_status") or "UNKNOWN"),
+            "source_url": str(
+                metadata.get("source_url")
+                or metadata.get("landing_page")
+                or metadata.get("source_path")
+                or ""
+            ),
+        }
+    )
     records.append(record)
     _write_jsonl(paths["paper_manifest"], records)
     return {
@@ -597,6 +652,26 @@ def update_paper_rag_status(
             break
     if changed:
         _write_jsonl(paths["paper_manifest"], rows)
+
+
+def update_paper_library_status(
+    paper_id: str,
+    library_status: str,
+    *,
+    quarantine_reason: str = "",
+    base_dir: Path = BASE_DIR,
+) -> None:
+    """Update the lifecycle state of one canonical paper record in place."""
+    paths = stage1_paths(base_dir)
+    rows = load_paper_manifest(base_dir)
+    for row in rows:
+        if row.get("paper_id") != paper_id:
+            continue
+        row["library_status"] = library_status
+        row["quarantine_reason"] = quarantine_reason
+        row["updated_at"] = utc_now()
+        _write_jsonl(paths["paper_manifest"], rows)
+        return
 
 
 def update_paper_extraction_status(

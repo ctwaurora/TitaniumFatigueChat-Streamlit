@@ -1,0 +1,73 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+qwen_key.txt
+qwen_key.example.txt
+*.key
+*.pem
+.streamlit/*
+!.streamlit/config.toml
+!.streamlit/secrets.example.toml
+
+# Python environments and caches
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Local literature and runtime data
+*.pdf
+papers/
+paper/pdfs/
+early_papers/
+followup_papers/
+data/backups/
+data/downloaded_papers/
+data/uploaded_papers/*
+!data/uploaded_papers/.gitkeep
+data/evidence/
+data/migrations/
+data/rag/
+data/tasks/
+data/deep_read/
+outputs/
+tmp/
+logs/
+*.log
+
+# Generated archives and large model/index formats
+*.zip
+*.rar
+*.jsonl
+*.parquet
+*.h5
+*.hdf5
+*.pb
+*.onnx
+
+# Local tooling and legacy material
+.vscode/
+.idea/
+.claude/settings.local.json
+legacy_training/
+legacy_scripts/
+competition_package/
+tests/local_stage2_papers.json
+
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
