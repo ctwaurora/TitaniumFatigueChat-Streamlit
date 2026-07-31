@@ -278,12 +278,19 @@ def evaluate_auto_rag_gate(
         reasons.append("VALID_PDF_REQUIRED")
     if status.get("sequential_scan_complete") is not True:
         reasons.append("SEQUENTIAL_SCAN_INCOMPLETE")
+    if status.get("variable_sweep_complete") is not True:
+        reasons.append("VARIABLE_SWEEP_INCOMPLETE")
+    if status.get("missing_audit_complete") is not True:
+        reasons.append("MISSING_AUDIT_INCOMPLETE")
     if float(status.get("page_coverage_ratio") or 0.0) != 1.0:
         reasons.append("PAGE_COVERAGE_NOT_COMPLETE")
     if not status.get("deep_read_complete"):
         reasons.append("DEEP_READ_INCOMPLETE")
     if real_pages < 1 or len(pages) != real_pages:
         reasons.append("REAL_PAGE_COUNT_MISMATCH")
+    title = str(paper.get("title") or "").strip()
+    if not title or title.lower() in {"nan", "none", "null", "untitled"}:
+        reasons.append("CANONICAL_TITLE_REQUIRED")
     if not evidence:
         reasons.append("EVIDENCE_REQUIRED")
     for row in evidence:
@@ -325,6 +332,8 @@ def evaluate_auto_rag_gate(
         "page_record_count": len(pages),
         "evidence_count": len(evidence),
         "sequential_scan_complete": bool(status.get("sequential_scan_complete")),
+        "variable_sweep_complete": bool(status.get("variable_sweep_complete")),
+        "missing_audit_complete": bool(status.get("missing_audit_complete")),
         "page_coverage_ratio": float(status.get("page_coverage_ratio") or 0.0),
         "domain_scope": scope["domain_scope"],
         "scope_reason": scope["scope_reason"],

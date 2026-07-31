@@ -12,6 +12,7 @@ import hashlib
 import json
 import math
 import re
+import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -118,7 +119,7 @@ def _atomic_json(path: Path, value: Any) -> None:
         json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
     )
-    temp.replace(path)
+    _replace_with_windows_retry(temp, path)
 
 
 def _atomic_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
@@ -127,7 +128,19 @@ def _atomic_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
     with temp.open("w", encoding="utf-8", newline="\n") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-    temp.replace(path)
+    _replace_with_windows_retry(temp, path)
+
+
+def _replace_with_windows_retry(temp: Path, target: Path) -> None:
+    """Tolerate short-lived antivirus/indexer handles on Windows."""
+    for attempt in range(8):
+        try:
+            temp.replace(target)
+            return
+        except PermissionError:
+            if attempt == 7:
+                raise
+            time.sleep(0.08 * (attempt + 1))
 
 
 def _read_json(path: Path, default: Any) -> Any:

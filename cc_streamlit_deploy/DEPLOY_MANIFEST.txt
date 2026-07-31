@@ -1,5 +1,5 @@
 TitaniumFatigueChat Streamlit deployment manifest
-file_count=109
+file_count=110
 
 .gitignore
 .streamlit/config.toml
@@ -68,6 +68,7 @@ src/evidence_trace.py
 src/exporter.py
 src/formula_comparison.py
 src/formula_renderer.py
+src/full_library_deep_read.py
 src/full_text_extractor.py
 src/hypothesis_candidate.py
 src/hypothesis_dataset.py

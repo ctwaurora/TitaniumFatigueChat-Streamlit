@@ -17,7 +17,31 @@ PLACEHOLDER_TITLES = {"", "nan", "none", "null", "n/a", "na", "unknown", "untitl
 
 def is_valid_title(value: object) -> bool:
     title = " ".join(str(value or "").split()).strip()
-    return title.lower() not in PLACEHOLDER_TITLES and len(title) >= 4
+    lowered = title.lower()
+    if lowered in PLACEHOLDER_TITLES or len(title) < 4:
+        return False
+    if re.fullmatch(r"[a-z]{0,5}\d{5,}[a-z0-9._-]*", lowered):
+        return False
+    if lowered.startswith((
+        "university of ", "accepted manuscript", "author's personal copy",
+        "elsevier editorial system", "researchgate", "materials research, vol.",
+        "a sheffield hallam university thesis",
+        "microsoft word - ", "type of the paper ",
+    )):
+        return False
+    if lowered.endswith((".doc", ".docx", ".pdf")):
+        return False
+    if lowered.startswith(("arxiv:", "proceedings of ")):
+        return False
+    if re.match(r"^(?:metals|materials|fatigue|journal)\s+20\d{2}\s*,\s*\d+", lowered):
+        return False
+    if len(re.findall(r"[^\W\d_]", title, flags=re.UNICODE)) < 4:
+        return False
+    # A Latin-script scholarly title is not a single identifier/header token.
+    if re.search(r"[a-z]", lowered) and not re.search(r"[\u3400-\u9fff]", title):
+        if len(re.findall(r"[a-z0-9]+", lowered)) < 4:
+            return False
+    return True
 
 
 def doi_from_input(value: str) -> str:
@@ -160,4 +184,3 @@ def fetch_metadata(
         "doi": doi,
         "error": "; ".join(errors) or "真实元数据源未返回可用题名。",
     }
-

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Dict, Iterable, Mapping, Optional
 
 import requests
@@ -35,7 +36,9 @@ class DeepSeekClient:
         *,
         temperature: float = 0.1,
         max_tokens: int = 800,
-        timeout: int = 30,
+        timeout: int = 60,
+        connect_timeout: int = 10,
+        max_retries: int = 3,
     ) -> str:
         payload: Dict[str, Any] = {
             "model": self.settings.model,
@@ -44,18 +47,37 @@ class DeepSeekClient:
             "max_tokens": max_tokens,
             "stream": False,
         }
-        try:
-            response = requests.post(
-                self.endpoint,
-                headers={
-                    "Authorization": f"Bearer {self.settings.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=payload,
-                timeout=timeout,
-            )
-        except requests.RequestException as exc:
-            raise DeepSeekRequestError("DeepSeek API 请求失败，请检查网络和服务配置。") from exc
+        response = None
+        last_error: Optional[BaseException] = None
+        for attempt in range(max(1, max_retries)):
+            try:
+                response = requests.post(
+                    self.endpoint,
+                    headers={
+                        "Authorization": f"Bearer {self.settings.api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                    timeout=(connect_timeout, timeout),
+                )
+                if response.status_code != 429:
+                    break
+                retry_after = response.headers.get("Retry-After", "")
+                delay = (
+                    float(retry_after)
+                    if retry_after.replace(".", "", 1).isdigit()
+                    else 2 ** attempt
+                )
+                time.sleep(min(delay, 30.0))
+            except requests.RequestException as exc:
+                last_error = exc
+                if attempt + 1 >= max(1, max_retries):
+                    break
+                time.sleep(min(2 ** attempt, 30.0))
+        if response is None:
+            raise DeepSeekRequestError(
+                "DeepSeek API 请求失败，请检查网络和服务配置。"
+            ) from last_error
         if response.status_code != 200:
             raise DeepSeekRequestError(
                 f"DeepSeek API 返回状态码 {response.status_code}。"

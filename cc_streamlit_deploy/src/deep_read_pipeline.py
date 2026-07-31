@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from collections import defaultdict
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import fitz
 
@@ -302,6 +303,7 @@ def deep_read_paths(base_dir: Path, paper_id: str) -> Dict[str, Path]:
         "equations": root / "equations.jsonl",
         "audit": root / "audit_log.jsonl",
         "status": root / "extraction_status.json",
+        "page_checkpoint": root / "page_checkpoint.jsonl",
     }
 
 
@@ -508,9 +510,14 @@ def _extract_page_text(page: fitz.Page) -> str:
 
 
 def parse_pdf_pages(
-    pdf_path: Path, paper_id: str
+    pdf_path: Path,
+    paper_id: str,
+    *,
+    checkpoint_path: Optional[Path] = None,
+    progress_callback: Optional[Callable[[int, int, PageRecord], None]] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> Tuple[List[PageRecord], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Visit every page exactly once in real PDF order."""
+    """Visit every page exactly once, persisting one recoverable checkpoint per page."""
     records: List[PageRecord] = []
     tables: List[Dict[str, Any]] = []
     figures: List[Dict[str, Any]] = []
@@ -519,10 +526,33 @@ def parse_pdf_pages(
     seen_figure_ids: set[str] = set()
     previous_section = "unclassified"
     source = str(pdf_path.resolve())
+    checkpoint_rows: Dict[int, Dict[str, Any]] = {}
+    if checkpoint_path and checkpoint_path.exists():
+        try:
+            for line in checkpoint_path.read_text(encoding="utf-8").splitlines():
+                row = json.loads(line)
+                number = int((row.get("page_record") or {}).get("page_number") or 0)
+                if number > 0:
+                    checkpoint_rows[number] = row
+        except (OSError, ValueError, json.JSONDecodeError):
+            checkpoint_rows = {}
     with fitz.open(pdf_path) as document:
         total_pages = len(document)
         for page_index in range(total_pages):
             page_number = page_index + 1
+            cached = checkpoint_rows.get(page_number)
+            if cached:
+                record = PageRecord(**cached["page_record"])
+                records.append(record)
+                tables.extend(cached.get("tables") or [])
+                figures.extend(cached.get("figures") or [])
+                equations.extend(cached.get("equations") or [])
+                previous_section = record.section_title or previous_section
+                if progress_callback:
+                    progress_callback(page_number, total_pages, record)
+                continue
+            if should_stop and should_stop():
+                raise DeepReadInterrupted(page_number - 1, total_pages)
             page = document.load_page(page_index)
             parse_status = "PROCESSED"
             raw_text = ""
@@ -591,8 +621,23 @@ def parse_pdf_pages(
                 source_pdf_path=source,
                 processed_at=_now(),
                 classification_confidence=confidence,
+                canonical_paper_id=paper_id,
+                page_text=cleaned,
+                text_length=len(cleaned),
+                extraction_status=parse_status,
+                image_count=image_count,
+                table_candidate=has_table,
+                formula_candidate=has_equation,
+                visual_review_status=(
+                    "NEEDS_VISUAL_REVIEW"
+                    if image_count or has_table or has_figure else "NOT_REQUIRED"
+                ),
             )
             records.append(record)
+
+            page_tables: List[Dict[str, Any]] = []
+            page_figures: List[Dict[str, Any]] = []
+            page_equations: List[Dict[str, Any]] = []
 
             for match in TABLE_RE.finditer(cleaned):
                 table_key = re.sub(r"\s+", "", match.group(0).lower())
@@ -600,7 +645,7 @@ def parse_pdf_pages(
                     continue
                 seen_table_ids.add(table_key)
                 excerpt = cleaned[match.start(): match.start() + 900]
-                tables.append(
+                page_tables.append(
                     {
                         "paper_id": paper_id,
                         "table_id": match.group(0),
@@ -626,7 +671,7 @@ def parse_pdf_pages(
                     continue
                 seen_figure_ids.add(figure_key)
                 excerpt = cleaned[match.start(): match.start() + 700]
-                figures.append(
+                page_figures.append(
                     {
                         "paper_id": paper_id,
                         "figure_id": match.group(0),
@@ -641,7 +686,7 @@ def parse_pdf_pages(
                 )
             for match in EQUATION_RE.finditer(cleaned):
                 excerpt = cleaned[max(0, match.start() - 160): match.start() + 360]
-                equations.append(
+                page_equations.append(
                     {
                         "paper_id": paper_id,
                         "page_number": page_number,
@@ -650,7 +695,30 @@ def parse_pdf_pages(
                         "review_status": "TEXT_EXTRACTED",
                     }
                 )
+            tables.extend(page_tables)
+            figures.extend(page_figures)
+            equations.extend(page_equations)
+            if checkpoint_path:
+                checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+                with checkpoint_path.open("a", encoding="utf-8", newline="\n") as handle:
+                    handle.write(json.dumps({
+                        "page_record": record.to_dict(),
+                        "tables": page_tables,
+                        "figures": page_figures,
+                        "equations": page_equations,
+                    }, ensure_ascii=False) + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            if progress_callback:
+                progress_callback(page_number, total_pages, record)
     return records, tables, figures, equations
+
+
+class DeepReadInterrupted(RuntimeError):
+    def __init__(self, processed_pages: int, total_pages: int):
+        super().__init__("DEEP_READ_INTERRUPTED")
+        self.processed_pages = processed_pages
+        self.total_pages = total_pages
 
 
 def _matching_terms(text: str, terms: Sequence[str]) -> List[str]:
@@ -1390,6 +1458,28 @@ def build_trusted_evidence(
                     section=section,
                     paragraph_index=int(item.get("paragraph_index", 0)),
                     experimental_conditions=_conditions_from_text(original),
+                    canonical_paper_id=paper_id,
+                    evidence_type=category.upper(),
+                    variables={"category": category},
+                    conditions=_conditions_from_text(original),
+                    result=original,
+                    units=sorted(set(re.findall(
+                        r"\b(?:MPa|GPa|Hz|kHz|cycles?|mm|µm|μm|nm|%|°C|K)\b",
+                        original,
+                        re.I,
+                    ))),
+                    formula_reference=(
+                        original if category == "equations_and_models" else ""
+                    ),
+                    table_or_figure_reference=(caption_kind or ""),
+                    support_or_counter=(
+                        "COUNTER" if re.search(
+                            r"\b(?:however|contrary|in contrast|did not|no significant)\b",
+                            original,
+                            re.I,
+                        ) else "SUPPORT"
+                    ),
+                    extraction_method=f"STAGE2_PAGE_SWEEP:{category}",
                     directness=directness,
                     confidence=0.95 if directness == "DIRECT" else 0.75,
                     review_status=review_status,
@@ -1438,6 +1528,9 @@ def deep_read_pdf(
     title: str = "",
     base_dir: Path = BASE_DIR,
     force: bool = False,
+    checkpoint_path: Optional[Path] = None,
+    progress_callback: Optional[Callable[[int, int, PageRecord], None]] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
     """Run the complete Stage-2 loop for one real PDF."""
     source_path = Path(pdf_path).resolve()
@@ -1454,7 +1547,7 @@ def deep_read_pdf(
             "evidence_count": 0,
         }
     paper_id = paper_id or str(registered["paper_id"])
-    title = title or str(registered.get("title") or source_path.stem)
+    title = title or str(registered.get("title") or "")
     canonical_path = Path(registered["canonical_pdf_path"]).resolve()
     file_hash = str(registered["file_hash_sha256"])
     paths = deep_read_paths(base_dir, paper_id)
@@ -1464,7 +1557,24 @@ def deep_read_pdf(
             return cached
 
     try:
-        pages, tables, figures, equations = parse_pdf_pages(canonical_path, paper_id)
+        pages, tables, figures, equations = parse_pdf_pages(
+            canonical_path,
+            paper_id,
+            checkpoint_path=checkpoint_path or paths["page_checkpoint"],
+            progress_callback=progress_callback,
+            should_stop=should_stop,
+        )
+    except DeepReadInterrupted as exc:
+        update_paper_extraction_status(
+            paper_id, extraction_status="INTERRUPTED", deep_read_complete=False,
+            base_dir=base_dir,
+        )
+        return {
+            "paper_id": paper_id, "title": title, "status": "INTERRUPTED",
+            "processed_page_count": exc.processed_pages,
+            "real_page_count": exc.total_pages, "deep_read_complete": False,
+            "evidence_count": 0,
+        }
     except Exception as exc:
         update_paper_extraction_status(
             paper_id,

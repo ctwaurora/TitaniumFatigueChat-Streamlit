@@ -720,6 +720,54 @@ def literature_task(
     )
 
 
+@app.command("deep-read-all")
+def deep_read_all(
+    pdf_dir: Path = typer.Option(Path("paper/pdfs"), "--pdf-dir"),
+    resume: bool = typer.Option(False, "--resume"),
+    retry_failed: bool = typer.Option(False, "--retry-failed"),
+    only_unread: bool = typer.Option(False, "--only-unread"),
+    limit: int = typer.Option(None, "--limit", min=1),
+    concurrency: int = typer.Option(1, "--concurrency", min=1, max=2),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    stop_after_pages: int = typer.Option(None, "--stop-after-pages", min=1, hidden=True),
+):
+    """Deep-read every unique valid local PDF with durable page checkpoints."""
+    from src.full_library_deep_read import build_full_library_queue, run_full_library_queue
+
+    if dry_run:
+        inventory = build_full_library_queue(
+            pdf_dir, base_dir=BASE_DIR, resume=resume, dry_run=True
+        )["inventory"]
+        console.print_json(data={
+            "dry_run": True,
+            "pdf_file_count": inventory["pdf_file_count"],
+            "logical_document_count": inventory["logical_document_count"],
+            "exact_duplicate_count": inventory["exact_duplicate_count"],
+            "different_version_count": inventory["different_version_count"],
+            "total_pages": inventory["total_pages"],
+        })
+        return
+    result = run_full_library_queue(
+        pdf_dir, base_dir=BASE_DIR, resume=resume,
+        retry_failed=retry_failed, only_unread=only_unread, limit=limit,
+        concurrency=concurrency, stop_after_pages=stop_after_pages,
+    )
+    report = result["report"]
+    console.print_json(data={
+        "processed_tasks": result["processed_tasks"],
+        "scanned_pdf_count": report["scanned_pdf_count"],
+        "unique_logical_document_count": report["unique_logical_document_count"],
+        "completed_paper_count": report["completed_paper_count"],
+        "page_coverage_ratio": report["page_coverage_ratio"],
+        "evidence_record_count": report["evidence_record_count"],
+        "formal_paper_count": report["formal_paper_count"],
+        "indexed_paper_count": report["indexed_paper_count"],
+        "failed_paper_count": report["failed_paper_count"],
+        "needs_human_review_count": report["needs_human_review_count"],
+        "report": str((BASE_DIR / "outputs" / "full_library_deep_read_report.json").resolve()),
+    })
+
+
 # ── Health check ─────────────────────────────────────────────────────────
 
 

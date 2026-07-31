@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import subprocess
+import sys
 import time
 from datetime import datetime
 from pathlib import Path
@@ -63,6 +66,103 @@ PAPER_TYPE_CN = {
 
 def paper_type_cn(code: str) -> str:
     return PAPER_TYPE_CN.get(str(code or ""), str(code or "") or "待分类")
+
+
+@st.fragment(run_every=5.0)
+def _render_full_read_status(base_dir: Path) -> None:
+    from src.full_library_deep_read import queue_summary
+
+    summary = queue_summary(base_dir=base_dir)
+    metrics = st.columns(6)
+    labels = ("唯一文献", "已完成", "处理中", "待处理", "失败", "待人工审核")
+    values = (
+        summary["logical_document_count"], summary["completed"], summary["running"],
+        summary["pending"], summary["failed"], summary["needs_human_review"],
+    )
+    for column, label, value in zip(metrics, labels, values):
+        column.metric(label, value)
+    page_cols = st.columns(5)
+    for column, label, value in zip(page_cols, (
+        "总页数", "已读页数", "EvidenceRecord", "已入RAG", "当前控制",
+    ), (
+        summary["total_pages"], summary["completed_pages"], summary["evidence_count"],
+        summary["indexed"], summary["control"],
+    )):
+        column.metric(label, value)
+    rows = summary.get("tasks") or []
+    if rows:
+        st.dataframe(pd.DataFrame([{
+            "题名": row.get("canonical_title") or "待元数据核验",
+            "PDF": row.get("original_filename"), "页数": row.get("real_page_count"),
+            "已读页数": row.get("processed_pages"), "精读状态": row.get("status"),
+            "EvidenceRecord": (row.get("gate") or {}).get("evidence_count", 0),
+            "质量门禁": (row.get("gate") or {}).get("passed", False),
+            "RAG状态": (row.get("index_result") or {}).get("status", "NOT_INDEXED"),
+            "失败原因": row.get("last_error") or "",
+        } for row in rows]), hide_index=True, width="stretch")
+
+
+def _render_full_library_deep_read(base_dir: Path, mode: str) -> None:
+    """Local durable batch controls; cloud never creates unusable tasks."""
+    with st.expander("全文精读全部未完成PDF", expanded=False):
+        if mode == CLOUD_TEMPORARY:
+            st.info("该功能仅在本地运行：Streamlit Cloud 无法读取用户电脑 C 盘中的 paper/pdfs。")
+            return
+        from src.full_library_deep_read import (
+            build_full_library_queue, inventory_pdfs, set_queue_control,
+        )
+
+        pdf_dir = base_dir / "paper" / "pdfs"
+        if st.button("刷新全量PDF清单", key="refresh_full_read_inventory"):
+            with st.spinner("正在校验PDF、真实页数并执行分层查重……"):
+                preview = inventory_pdfs(pdf_dir, base_dir=base_dir)
+            st.session_state["full_read_inventory_preview"] = preview
+        preview = st.session_state.get("full_read_inventory_preview")
+        if preview:
+            cols = st.columns(5)
+            for column, label, value in zip(cols, (
+                "PDF文件总数", "唯一逻辑文献", "完全重复", "PDF总页数", "预计DeepSeek调用",
+            ), (
+                preview["pdf_file_count"], preview["logical_document_count"],
+                preview["exact_duplicate_count"], preview["total_pages"], 0,
+            )):
+                column.metric(label, value)
+            st.caption(
+                "当前精读器使用本地确定性逐页解析；未调用DeepSeek时，实际API调用为0。"
+                f" 本地目录：{pdf_dir}"
+            )
+        _render_full_read_status(base_dir)
+        concurrency = st.number_input("并发数", min_value=1, max_value=2, value=1, step=1)
+        confirm = st.checkbox("我确认启动全部未完成PDF的逐篇逐页精读", key="confirm_full_read_all")
+        start, pause, resume, stop, retry = st.columns(5)
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        if start.button("开始全部精读", type="primary", disabled=not confirm, width="stretch"):
+            build_full_library_queue(pdf_dir, base_dir=base_dir, resume=True)
+            set_queue_control("RUN", base_dir=base_dir)
+            command = [
+                sys.executable, str(base_dir / "app.py"), "deep-read-all",
+                "--pdf-dir", str(pdf_dir), "--resume", "--only-unread",
+                "--concurrency", str(int(concurrency)),
+            ]
+            process = subprocess.Popen(command, cwd=base_dir, creationflags=flags)
+            st.success(f"本地持久化任务已启动（PID {process.pid}）；关闭页面后仍可用继续按钮恢复。")
+        if pause.button("暂停", width="stretch"):
+            set_queue_control("PAUSE", base_dir=base_dir)
+        if resume.button("继续", width="stretch"):
+            set_queue_control("RUN", base_dir=base_dir)
+            subprocess.Popen([
+                sys.executable, str(base_dir / "app.py"), "deep-read-all",
+                "--pdf-dir", str(pdf_dir), "--resume", "--only-unread",
+                "--concurrency", str(int(concurrency)),
+            ], cwd=base_dir, creationflags=flags)
+        if stop.button("当前文献后停止", width="stretch"):
+            set_queue_control("STOP_AFTER_CURRENT", base_dir=base_dir)
+        if retry.button("仅重试失败", width="stretch"):
+            subprocess.Popen([
+                sys.executable, str(base_dir / "app.py"), "deep-read-all",
+                "--pdf-dir", str(pdf_dir), "--resume", "--retry-failed", "--concurrency", "1",
+            ], cwd=base_dir, creationflags=flags)
+        st.caption("状态从持久化队列读取；已COMPLETED文献默认跳过，默认并发1，最大2。")
 
 
 def paginate_dataframe(
@@ -1152,6 +1252,7 @@ def render_library_page() -> None:
 
     # The two primary workflows stay visible together above statistics.
     render_ingestion_entries(base_dir)
+    _render_full_library_deep_read(base_dir, backend.mode)
     st.divider()
     st.subheader("文献统计")
     _render_statistics(base_dir)

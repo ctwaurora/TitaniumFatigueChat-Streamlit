@@ -170,6 +170,97 @@ def validate_pdf_path(path: Path) -> Dict[str, Any]:
         }
 
 
+def _looks_like_scholarly_title(value: object) -> bool:
+    title = " ".join(str(value or "").split()).strip()
+    lower = title.lower()
+    if lower in {"", "nan", "none", "null", "unknown", "untitled"}:
+        return False
+    if re.fullmatch(r"[a-z]{0,5}\d{5,}[a-z0-9._-]*", lower):
+        return False
+    if lower.startswith((
+        "university of ", "materials research, vol.", "accepted manuscript",
+        "microsoft word - ", "type of the paper ",
+        "arxiv:", "proceedings of ",
+    )) or lower.endswith((".doc", ".docx", ".pdf")):
+        return False
+    if re.match(r"^(?:metals|materials|fatigue|journal)\s+20\d{2}\s*,\s*\d+", lower):
+        return False
+    if len(re.findall(r"[^\W\d_]", title, flags=re.UNICODE)) < 4:
+        return False
+    if re.search(r"[a-z]", lower) and not re.search(r"[\u3400-\u9fff]", title):
+        return len(re.findall(r"[a-z0-9]+", lower)) >= 4
+    return len(title) >= 4
+
+
+def clean_pdf_title(value: object) -> str:
+    """Remove recognizable publisher furniture without inventing a title."""
+    title = " ".join(str(value or "").split()).strip()
+    numbered = re.search(
+        r"(?:文章编号|Article\s+ID)\s*[:：]\s*\S+\s+(.+)$", title, re.I
+    )
+    if numbered and _looks_like_scholarly_title(numbered.group(1)):
+        title = numbered.group(1).strip()
+    return title
+
+
+def _title_from_first_page(page: Any) -> str:
+    """Use prominent real first-page text, never the filesystem name."""
+    try:
+        lines = [" ".join(line.split()) for line in page.get_text("text").splitlines()]
+        lines = [line for line in lines if line]
+        for index, line in enumerate(lines[:30]):
+            cleaned = clean_pdf_title(line)
+            if not _looks_like_scholarly_title(cleaned):
+                continue
+            if cleaned.lower().startswith((
+                "available from ", "copyright ", "materials research, vol.",
+                "the chinese journal of ", "received:", "published:",
+            )):
+                continue
+            title_lines = [cleaned]
+            if not re.search(r"[.!?。]\s*$", cleaned):
+                for follow in lines[index + 1:index + 5]:
+                    low = follow.lower()
+                    if (
+                        low.startswith(("abstract", "keywords", "available from", "received", "published"))
+                        or "@" in follow or "http" in low
+                        or re.search(r"\b(?:university|institute|laboratory|correspondence)\b", low)
+                        or (follow.count(",") >= 2 and re.search(r"\b\d\b", follow))
+                    ):
+                        break
+                    if len(follow) < 8:
+                        break
+                    title_lines.append(follow)
+                    if re.search(r"[.!?。]\s*$", follow):
+                        break
+            sequential = clean_pdf_title(" ".join(title_lines)).rstrip(".")
+            if _looks_like_scholarly_title(sequential) and len(sequential) <= 600:
+                return sequential
+        candidates: List[Tuple[float, float, str]] = []
+        for block in (page.get_text("dict") or {}).get("blocks") or []:
+            for line in block.get("lines") or []:
+                spans = line.get("spans") or []
+                text = " ".join(str(span.get("text") or "") for span in spans).strip()
+                if not text:
+                    continue
+                size = max(float(span.get("size") or 0.0) for span in spans)
+                y = min(float((span.get("bbox") or [0, 0])[1]) for span in spans)
+                if y < 18 or re.match(r"^(?:article|research article|open access)$", text, re.I):
+                    continue
+                candidates.append((size, y, text))
+        plausible = [row for row in candidates if _looks_like_scholarly_title(row[2])]
+        if plausible:
+            max_size = max(row[0] for row in plausible)
+            prominent = [row for row in candidates if row[0] >= max_size - 0.6]
+            prominent.sort(key=lambda row: row[1])
+            joined = " ".join(row[2] for row in prominent)
+            if _looks_like_scholarly_title(joined) and len(joined) <= 600:
+                return clean_pdf_title(joined)
+    except Exception:
+        pass
+    return ""
+
+
 def extract_basic_pdf_metadata(content: bytes, filename: str = "") -> Dict[str, str]:
     """Extract only Stage-1 identity metadata and real parser metadata."""
     result = {
@@ -183,7 +274,7 @@ def extract_basic_pdf_metadata(content: bytes, filename: str = "") -> Dict[str, 
 
         with fitz.open(stream=content, filetype="pdf") as doc:
             metadata = doc.metadata or {}
-            result["title"] = str(metadata.get("title") or "").strip()
+            result["title"] = clean_pdf_title(metadata.get("title") or "")
             result["authors"] = str(metadata.get("author") or "").strip()
             result["publication_date"] = str(
                 metadata.get("creationDate") or metadata.get("modDate") or ""
@@ -195,13 +286,16 @@ def extract_basic_pdf_metadata(content: bytes, filename: str = "") -> Dict[str, 
             doi_match = DOI_RE.search(first_text)
             if doi_match:
                 result["doi"] = normalize_doi(doi_match.group(0))
-            if not result["title"]:
+            if not _looks_like_scholarly_title(result["title"]):
+                result["title"] = _title_from_first_page(doc.load_page(0))
+            if not _looks_like_scholarly_title(result["title"]):
+                result["title"] = ""
                 for line in first_text.splitlines()[:40]:
                     clean = " ".join(line.split())
-                    if len(clean) >= 20 and not clean.lower().startswith(
+                    if _looks_like_scholarly_title(clean) and not clean.lower().startswith(
                         ("abstract", "doi", "http")
                     ):
-                        result["title"] = clean[:500]
+                        result["title"] = clean_pdf_title(clean[:500])
                         break
     except Exception:
         pass
@@ -703,6 +797,63 @@ def update_paper_library_status(
         row["updated_at"] = utc_now()
         _write_jsonl(paths["paper_manifest"], rows)
         return
+
+
+def update_paper_verified_metadata(
+    paper_id: str,
+    metadata: Dict[str, Any],
+    *,
+    base_dir: Path = BASE_DIR,
+) -> None:
+    """Apply metadata returned by a real scholarly API to one canonical row."""
+    paths = stage1_paths(base_dir)
+    rows = load_paper_manifest(base_dir)
+    for row in rows:
+        if row.get("paper_id") != paper_id:
+            continue
+        for target, source in (
+            ("title", "title"), ("authors", "authors"),
+            ("publication_date", "year"), ("doi", "doi"),
+        ):
+            value = str(metadata.get(source) or "").strip()
+            if value:
+                row[target] = value
+        row["normalized_title"] = normalize_title(row.get("title") or "")
+        row["metadata_source"] = str(metadata.get("metadata_source") or "SCHOLARLY_API")
+        row["metadata_confidence"] = "VERIFIED_API"
+        row["updated_at"] = utc_now()
+        _write_jsonl(paths["paper_manifest"], rows)
+        return
+
+
+def set_primary_pdf_version(
+    paper_id: str,
+    pdf_path: Path | str,
+    *,
+    base_dir: Path = BASE_DIR,
+) -> Dict[str, Any]:
+    """Select a validated higher-quality linked PDF as the canonical read version."""
+    path = Path(pdf_path).resolve()
+    validation = validate_pdf_path(path)
+    if not validation.get("pdf_valid"):
+        raise ValueError(str(validation.get("error") or "INVALID_PDF"))
+    file_hash = sha256_file(path)
+    rows = load_paper_manifest(base_dir)
+    for row in rows:
+        if row.get("paper_id") != paper_id:
+            continue
+        row["canonical_pdf_path"] = str(path)
+        row["file_hash_sha256"] = file_hash
+        row["real_page_count"] = int(validation["real_page_count"])
+        row["pdf_valid"] = True
+        row["updated_at"] = utc_now()
+        _write_jsonl(stage1_paths(base_dir)["paper_manifest"], rows)
+        return {
+            "paper_id": paper_id, "canonical_pdf_path": str(path),
+            "file_hash_sha256": file_hash,
+            "real_page_count": int(validation["real_page_count"]),
+        }
+    raise KeyError(paper_id)
 
 
 def update_paper_domain_scope(

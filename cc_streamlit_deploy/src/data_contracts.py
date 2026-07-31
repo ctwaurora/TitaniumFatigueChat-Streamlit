@@ -105,6 +105,16 @@ class EvidenceRecord:
     confidence: float = 0.0
     review_status: str = "UNREVIEWED"
     source_method: str = ""
+    canonical_paper_id: str = ""
+    evidence_type: str = "SCIENTIFIC_CLAIM"
+    variables: Dict[str, Any] = field(default_factory=dict)
+    conditions: Dict[str, Any] = field(default_factory=dict)
+    result: str = ""
+    units: List[str] = field(default_factory=list)
+    formula_reference: str = ""
+    table_or_figure_reference: str = ""
+    support_or_counter: str = "SUPPORT"
+    extraction_method: str = ""
     created_at: str = ""
     updated_at: str = ""
     data_version: str = DATA_SCHEMA_VERSION
@@ -139,6 +149,14 @@ class PageRecord:
     processed_at: str
     classification_confidence: float = 0.0
     data_version: str = "stage2.0"
+    canonical_paper_id: str = ""
+    page_text: str = ""
+    text_length: int = 0
+    extraction_status: str = ""
+    image_count: int = 0
+    table_candidate: bool = False
+    formula_candidate: bool = False
+    visual_review_status: str = "NOT_REQUIRED"
 
     def __post_init__(self) -> None:
         if not 1 <= self.page_number <= self.total_pages:
