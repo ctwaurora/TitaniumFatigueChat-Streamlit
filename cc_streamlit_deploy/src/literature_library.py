@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
+from src.domain_scope import OUT_OF_SCOPE, classify_literature_scope
 from src.metadata_service import fetch_metadata, is_valid_title
 from src.stage1_store import (
     BASE_DIR,
@@ -21,6 +22,7 @@ from src.stage1_store import (
     normalize_doi,
     normalize_title,
     register_metadata_record,
+    update_paper_domain_scope,
     update_paper_library_status,
 )
 
@@ -338,6 +340,25 @@ def canonical_pdf_records(base_dir: Path = BASE_DIR) -> List[Dict[str, Any]]:
                 if evidence
                 else "NO_EVIDENCE"
             )
+        scope = classify_literature_scope(
+            {
+                **primary,
+                "title": title,
+                "abstract": " ".join(
+                    str(row.get("original_text") or row.get("claim") or "")
+                    for row in evidence[:12]
+                ),
+            }
+        )
+        if str(primary.get("domain_scope") or "") in {
+            "CORE",
+            "CONTEXT",
+            OUT_OF_SCOPE,
+        }:
+            scope["domain_scope"] = str(primary["domain_scope"])
+            scope["scope_reason"] = str(
+                primary.get("scope_reason") or scope["scope_reason"]
+            )
         library_status = str(primary.get("library_status") or "CANDIDATE")
         if (
             library_status != QUARANTINED
@@ -346,6 +367,7 @@ def canonical_pdf_records(base_dir: Path = BASE_DIR) -> List[Dict[str, Any]]:
             and evidence
             and evidence_status in {"AUTO_VALIDATED", HUMAN_CONFIRMED}
             and rag_status == "INDEXED_STAGE3_UNIFIED"
+            and scope["domain_scope"] != OUT_OF_SCOPE
         ):
             library_status = "FORMAL"
         records.append(
@@ -384,6 +406,8 @@ def canonical_pdf_records(base_dir: Path = BASE_DIR) -> List[Dict[str, Any]]:
                 "evidence_status": evidence_status,
                 "rag_status": rag_status,
                 "library_status": library_status,
+                "domain_scope": scope["domain_scope"],
+                "scope_reason": scope["scope_reason"],
                 "selectable": bool(
                     is_valid_title(title)
                     and deep_complete
@@ -391,6 +415,7 @@ def canonical_pdf_records(base_dir: Path = BASE_DIR) -> List[Dict[str, Any]]:
                     and evidence_status in {"AUTO_VALIDATED", HUMAN_CONFIRMED}
                     and library_status == "FORMAL"
                     and rag_status == "INDEXED_STAGE3_UNIFIED"
+                    and scope["domain_scope"] != OUT_OF_SCOPE
                 ),
                 "quarantine_reason": str(primary.get("quarantine_reason") or ""),
             }
@@ -451,6 +476,16 @@ def canonical_library_records(base_dir: Path = BASE_DIR) -> List[Dict[str, Any]]
         metadata_source = str(
             row.get("metadata_source") or row.get("source_type") or ""
         ).strip()
+        scope = classify_literature_scope(row)
+        if str(row.get("domain_scope") or "") in {
+            "CORE",
+            "CONTEXT",
+            OUT_OF_SCOPE,
+        }:
+            scope["domain_scope"] = str(row["domain_scope"])
+            scope["scope_reason"] = str(
+                row.get("scope_reason") or scope["scope_reason"]
+            )
         metadata_valid = bool(
             is_valid_title(title)
             and authors
@@ -468,6 +503,7 @@ def canonical_library_records(base_dir: Path = BASE_DIR) -> List[Dict[str, Any]]
             and row.get("evidence_status")
             in {"AUTO_VALIDATED", HUMAN_CONFIRMED}
             and row.get("rag_status") == "INDEXED_STAGE3_UNIFIED"
+            and scope["domain_scope"] != OUT_OF_SCOPE
         )
         if (
             (not metadata_valid and not formal_ready)
@@ -498,6 +534,8 @@ def canonical_library_records(base_dir: Path = BASE_DIR) -> List[Dict[str, Any]]
                 "doi": doi,
                 "source_url": source_url,
                 "metadata_source": metadata_source,
+                "domain_scope": scope["domain_scope"],
+                "scope_reason": scope["scope_reason"],
                 "library_status": library_status,
                 "validation_status": (
                     VALID_METADATA
@@ -623,6 +661,8 @@ def eligible_paper_ids(
                 reasons.append("FORMAL_LIBRARY_REQUIRED")
             if row.get("quarantine_reason"):
                 reasons.append(QUARANTINED)
+            if row.get("domain_scope") == OUT_OF_SCOPE:
+                reasons.append("OUT_OF_TITANIUM_FATIGUE_SCOPE")
             if require_confirmation and row.get("evidence_status") not in {
                 "AUTO_VALIDATED",
                 HUMAN_CONFIRMED,
@@ -805,15 +845,23 @@ def add_doi_or_url(
     metadata = fetch_metadata(value, session=session)
     if metadata.get("validation_status") != VALID_METADATA:
         return metadata
+    scope = classify_literature_scope(metadata)
+    metadata.update(scope)
     registration = register_metadata_record(
         metadata,
         source_record_id=metadata["doi"],
         source_type=f"{metadata['metadata_source'].upper()}_METADATA",
+        library_status=(
+            QUARANTINED
+            if scope["domain_scope"] == OUT_OF_SCOPE
+            else "CANDIDATE"
+        ),
         base_dir=base_dir,
     )
     result = {**metadata, **registration}
     if (
-        acquire_oa_pdf
+        scope["domain_scope"] != OUT_OF_SCOPE
+        and acquire_oa_pdf
         and metadata.get("is_oa") is True
         and metadata.get("pdf_url")
     ):
@@ -1009,10 +1057,21 @@ def ingest_uploaded_pdf(
         and result.get("real_page_count")
         and result.get("page_record_path")
     )
+    scope = classify_literature_scope(result)
+    result.update(scope)
+    if result.get("paper_id"):
+        update_paper_domain_scope(
+            str(result["paper_id"]),
+            scope["domain_scope"],
+            scope_reason=scope["scope_reason"],
+            base_dir=base_dir,
+        )
     authors = " ".join(str(result.get("authors") or "").split())
     year = str(result.get("year") or "")
     doi = normalize_doi(result.get("doi") or "")
     metadata_errors = []
+    if scope["domain_scope"] == OUT_OF_SCOPE:
+        metadata_errors.append("OUT_OF_TITANIUM_FATIGUE_SCOPE")
     if not is_valid_title(result.get("title")):
         metadata_errors.append("TITLE_REQUIRED")
     if not authors or authors.lower() in {"nan", "none", "unknown"}:

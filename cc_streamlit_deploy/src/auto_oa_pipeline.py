@@ -13,6 +13,11 @@ from urllib.parse import urlparse
 
 import requests
 
+from src.domain_scope import (
+    CORE,
+    OUT_OF_SCOPE,
+    classify_literature_scope,
+)
 from src.metadata_service import is_valid_title
 from src.oa_literature import (
     download_and_deep_read,
@@ -31,6 +36,7 @@ from src.stage1_store import (
     normalize_title,
     register_metadata_record,
     update_paper_extraction_status,
+    update_paper_domain_scope,
     update_paper_library_status,
 )
 from src.unified_rag import build_unified_rag, rag_paths
@@ -52,11 +58,29 @@ VALID_SOURCES = {"OpenAlex", "Crossref", "Unpaywall", "Semantic Scholar"}
 INVALID_TEXT = {"", "nan", "none", "null", "n/a", "na", "unknown", "untitled"}
 
 TOPIC_TERMS = {
-    "疲劳与裂纹萌生": ("fatigue", "crack initiation", "fracture origin"),
-    "孔隙与缺陷": ("pore", "porosity", "defect", "lack of fusion", "keyhole"),
-    "表面状态": ("surface", "roughness", "as-built", "machined", "polished"),
+    "全部钛合金疲劳": (),
+    "Ti-6Al-4V / TC4疲劳": ("ti-6al-4v", "ti6al4v", "tc4", "ti64"),
+    "增材制造钛合金疲劳": (
+        "additive manufacturing",
+        "l-pbf",
+        "lpbf",
+        "slm",
+        "laser powder bed fusion",
+    ),
+    "LCF": ("low cycle fatigue", "lcf", "低周疲劳"),
+    "HCF": ("high cycle fatigue", "hcf", "高周疲劳"),
+    "VHCF": ("very high cycle fatigue", "vhcf", "超高周疲劳"),
+    "裂纹起裂": ("crack initiation", "fracture origin", "裂纹起裂", "裂纹萌生"),
+    "短裂纹": ("short crack", "small crack", "短裂纹"),
+    "疲劳裂纹扩展": ("fatigue crack growth", "fcgr", "paris", "da/dn", "裂纹扩展"),
+    "表面粗糙度": ("surface roughness", "surface state", "as-built", "machined", "polished"),
+    "孔隙与未熔合": ("pore", "porosity", "lack of fusion", "keyhole", "孔隙", "未熔合"),
+    "微观组织与织构": ("microstructure", "texture", "grain", "phase", "微观组织", "织构"),
+    "残余应力": ("residual stress", "残余应力"),
     "热处理与HIP": ("heat treatment", "hip", "hot isostatic", "anneal"),
-    "裂纹扩展": ("crack growth", "fcgr", "paris", "da/dn"),
+    "成形方向": ("build orientation", "build direction", "成形方向", "打印方向"),
+    "环境疲劳": ("environmental fatigue", "corrosion fatigue", "hydrogen", "环境疲劳", "腐蚀疲劳"),
+    "疲劳模型与公式": ("fatigue model", "basquin", "coffin manson", "walker", "murakami", "kitagawa", "疲劳模型"),
 }
 
 
@@ -155,7 +179,7 @@ def validate_oa_metadata(candidate: Dict[str, Any]) -> Dict[str, Any]:
 
 def _matches_topic(candidate: Dict[str, Any], topic_filter: str) -> bool:
     terms = TOPIC_TERMS.get(topic_filter)
-    if not terms:
+    if terms is None or len(terms) == 0:
         return True
     haystack = normalize_title(
         f"{candidate.get('title', '')} {candidate.get('abstract', '')}"
@@ -164,26 +188,7 @@ def _matches_topic(candidate: Dict[str, Any], topic_filter: str) -> bool:
 
 
 def _is_core_paper(candidate: Dict[str, Any]) -> bool:
-    text = normalize_title(
-        f"{candidate.get('title', '')} {candidate.get('abstract', '')}"
-    )
-    material = any(term in text for term in ("ti 6al 4v", "ti6al4v", "titanium alloy"))
-    process = any(
-        term in text
-        for term in (
-            "l pbf",
-            "lpbf",
-            "slm",
-            "laser powder bed fusion",
-            "selective laser melting",
-            "additive manufactur",
-        )
-    )
-    fatigue = any(
-        term in text
-        for term in ("fatigue", "crack initiation", "crack growth", "fracture origin")
-    )
-    return material and process and fatigue
+    return classify_literature_scope(candidate)["domain_scope"] == CORE
 
 
 def _candidate_rank(candidate: Dict[str, Any], query: str) -> tuple[int, int, int, str]:
@@ -201,7 +206,24 @@ def _candidate_rank(candidate: Dict[str, Any], query: str) -> tuple[int, int, in
 
 def _existing_rag_ids(base_dir: Path) -> List[str]:
     manifest = _read_json(rag_paths(base_dir)["manifest"])
-    return [str(value) for value in manifest.get("paper_ids") or [] if value]
+    records = {
+        str(row.get("paper_id") or ""): row
+        for row in load_paper_manifest(base_dir)
+    }
+    retained: List[str] = []
+    for value in manifest.get("paper_ids") or []:
+        paper_id = str(value or "")
+        if not paper_id:
+            continue
+        record = records.get(paper_id) or {}
+        if str(record.get("library_status") or "") != "FORMAL":
+            continue
+        scope = str(record.get("domain_scope") or "")
+        if not scope:
+            scope = classify_literature_scope(record)["domain_scope"]
+        if scope != OUT_OF_SCOPE:
+            retained.append(paper_id)
+    return retained
 
 
 def evaluate_auto_rag_gate(
@@ -229,6 +251,29 @@ def evaluate_auto_rag_gate(
         for row in pages
     }
     reasons: List[str] = []
+    scope = classify_literature_scope(
+        {
+            **paper,
+            "abstract": " ".join(
+                str(row.get("cleaned_text") or "")
+                for row in pages[:3]
+            ),
+        }
+    )
+    stored_scope = str(paper.get("domain_scope") or "")
+    if stored_scope in {"CORE", "CONTEXT", "OUT_OF_SCOPE"}:
+        scope["domain_scope"] = stored_scope
+        scope["scope_reason"] = str(
+            paper.get("scope_reason") or scope["scope_reason"]
+        )
+    update_paper_domain_scope(
+        paper_id,
+        scope["domain_scope"],
+        scope_reason=scope["scope_reason"],
+        base_dir=base_dir,
+    )
+    if scope["domain_scope"] == OUT_OF_SCOPE:
+        reasons.append("OUT_OF_TITANIUM_FATIGUE_SCOPE")
     if paper.get("pdf_valid") is not True:
         reasons.append("VALID_PDF_REQUIRED")
     if status.get("sequential_scan_complete") is not True:
@@ -281,6 +326,8 @@ def evaluate_auto_rag_gate(
         "evidence_count": len(evidence),
         "sequential_scan_complete": bool(status.get("sequential_scan_complete")),
         "page_coverage_ratio": float(status.get("page_coverage_ratio") or 0.0),
+        "domain_scope": scope["domain_scope"],
+        "scope_reason": scope["scope_reason"],
     }
 
 
@@ -294,7 +341,10 @@ def index_auto_validated_paper(
         return {"status": "NOT_INDEXED", "gate": gate}
     paper_ids = list(dict.fromkeys([*_existing_rag_ids(base_dir), paper_id]))
     result = build_unified_rag(paper_ids, base_dir=base_dir)
-    actually_indexed = paper_id in set(_existing_rag_ids(base_dir))
+    rag_manifest = _read_json(rag_paths(base_dir)["manifest"])
+    actually_indexed = paper_id in {
+        str(value) for value in (rag_manifest.get("paper_ids") or [])
+    }
     gate["index_status"] = (
         "INDEXED_STAGE3_UNIFIED" if actually_indexed else "NOT_INDEXED"
     )
@@ -394,10 +444,10 @@ def run_auto_oa_discovery(
     query: str,
     *,
     max_new: int = 1,
-    topic_filter: str = "疲劳与裂纹萌生",
+    topic_filter: str = "全部钛合金疲劳",
     year_from: Optional[int] = None,
     year_to: Optional[int] = None,
-    core_only: bool = True,
+    core_only: bool = False,
     base_dir: Path = BASE_DIR,
     session: Optional[requests.Session] = None,
     progress_callback: Optional[ProgressCallback] = None,
@@ -416,6 +466,10 @@ def run_auto_oa_discovery(
     )
     filtered: List[Dict[str, Any]] = []
     for candidate in discovery["candidates"]:
+        scope = classify_literature_scope(candidate)
+        candidate = {**candidate, **scope}
+        if scope["domain_scope"] == OUT_OF_SCOPE:
+            continue
         year = _year(candidate.get("year"))
         if year_from and year and int(year) < int(year_from):
             continue
@@ -465,6 +519,8 @@ def run_auto_oa_discovery(
             "metadata_source": candidate.get("metadata_source") or candidate.get("source") or "",
             "oa_source": candidate.get("oa_source") or candidate.get("metadata_source") or candidate.get("source") or "",
             "oa_status": candidate.get("oa_status") or "",
+            "domain_scope": candidate.get("domain_scope") or "",
+            "scope_reason": candidate.get("scope_reason") or "",
             "source_url": candidate.get("source_url") or candidate.get("landing_page") or "",
             "pdf_url": candidate.get("pdf_url") or "",
             "download_status": "NOT_STARTED",

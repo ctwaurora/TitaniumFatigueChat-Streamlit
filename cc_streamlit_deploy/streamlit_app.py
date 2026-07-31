@@ -1,6 +1,6 @@
 """
 streamlit_app.py — TitaniumFatigueChat AI Scientist (Search-Engine Style)
-面向 L-PBF Ti-6Al-4V 疲劳机制发现的 AI Scientist
+面向钛合金疲劳研究的 AI Scientist；L-PBF Ti-6Al-4V 是当前主案例
 
 四种回答模式:
   - popular_science      科普解释
@@ -2316,7 +2316,7 @@ if current_page in legacy_page_modes:
 # Sidebar
 with st.sidebar:
     st.title("🔬 TitaniumFatigueChat")
-    st.caption("面向 L-PBF Ti-6Al-4V 疲劳机制发现的领域科研助手系统")
+    st.caption("钛合金疲劳科研助手 · L-PBF Ti-6Al-4V 为当前主案例")
     from src.app_auth import render_logout_control
     from src.api_keys import get_deepseek_settings
 
@@ -2387,7 +2387,7 @@ if current_page == "search":
     )
     st.markdown(
         "<p style='text-align: center; font-size: 1.1rem; color: #888;'>"
-        "面向 L-PBF Ti-6Al-4V 疲劳机制发现的 AI Scientist</p>",
+        "面向钛合金疲劳研究的 AI Scientist · L-PBF Ti-6Al-4V 为当前主案例</p>",
         unsafe_allow_html=True,
     )
     st.divider()

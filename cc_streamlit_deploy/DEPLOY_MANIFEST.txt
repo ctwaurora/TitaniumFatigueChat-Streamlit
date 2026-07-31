@@ -1,5 +1,5 @@
 TitaniumFatigueChat Streamlit deployment manifest
-file_count=107
+file_count=109
 
 .gitignore
 .streamlit/config.toml
@@ -60,6 +60,7 @@ src/deep_read_pipeline.py
 src/deepseek_client.py
 src/deepseek_usage.py
 src/discovery.py
+src/domain_scope.py
 src/equation_engine.py
 src/evidence_extraction.py
 src/evidence_gate.py
@@ -82,6 +83,7 @@ src/literature_library.py
 src/literature_search_agent.py
 src/literature_support_fields.py
 src/literature_tasks.py
+src/local_pdf_import.py
 src/metadata_service.py
 src/oa_literature.py
 src/page_answers.py

@@ -21,6 +21,7 @@ import hashlib
 import json
 import re
 import shutil
+import time
 from dataclasses import fields
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
@@ -231,7 +232,16 @@ def _write_jsonl(path: Path, rows: Sequence[Dict[str, Any]]) -> None:
     with temp_path.open("w", encoding="utf-8", newline="\n") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-    temp_path.replace(path)
+    for attempt in range(5):
+        try:
+            temp_path.replace(path)
+            break
+        except PermissionError:
+            if attempt == 4:
+                raise
+            # Windows virus scanners/indexers can briefly retain a handle
+            # after the writer closes.  Retry the same atomic replacement.
+            time.sleep(0.05 * (attempt + 1))
 
 
 def load_paper_manifest(base_dir: Path = BASE_DIR) -> List[Dict[str, Any]]:
@@ -260,6 +270,13 @@ def _find_duplicate(
 ) -> Tuple[Optional[Dict[str, Any]], str, str]:
     normalized_doi = normalize_doi(doi)
     normalized_title = normalize_title(title)
+    # Exact file identity is stronger than metadata identity.  Checking it
+    # first prevents a local PDF that already has Stage-2/3 state from being
+    # attached to an older metadata-only DOI record.
+    if file_hash:
+        for row in records:
+            if row.get("file_hash_sha256") == file_hash:
+                return row, "HASH_EXACT", file_hash
     if normalized_doi:
         for row in records:
             if normalize_doi(row.get("doi", "")) == normalized_doi:
@@ -268,10 +285,6 @@ def _find_duplicate(
         for row in records:
             if normalize_title(row.get("title", "")) == normalized_title:
                 return row, "TITLE_EXACT", normalized_title
-    if file_hash:
-        for row in records:
-            if row.get("file_hash_sha256") == file_hash:
-                return row, "HASH_EXACT", file_hash
     return None, "", ""
 
 
@@ -348,16 +361,22 @@ def register_pdf_bytes(
             canonical_upgrade = True
             duplicate_status = "UNIQUE"
             duplicate_of = ""
+            existing_title = str(duplicate.get("title") or "").strip()
+            existing_title_usable = (
+                bool(existing_title)
+                and normalize_title(existing_title)
+                not in {"nan", "none", "null", "unknown", "untitled"}
+            )
             duplicate.update(
                 {
-                    "title": title or duplicate.get("title") or "",
-                    "authors": authors or duplicate.get("authors") or "",
+                    "title": existing_title if existing_title_usable else title,
+                    "authors": duplicate.get("authors") or authors or "",
                     "publication_date": (
-                        publication_date
-                        or duplicate.get("publication_date")
+                        duplicate.get("publication_date")
+                        or publication_date
                         or ""
                     ),
-                    "doi": doi or duplicate.get("doi") or "",
+                    "doi": duplicate.get("doi") or doi or "",
                     "normalized_title": normalize_title(
                         title or duplicate.get("title") or ""
                     ),
@@ -547,6 +566,16 @@ def register_metadata_record(
             or existing.get("source_path")
             or ""
         )
+        existing["domain_scope"] = str(
+            metadata.get("domain_scope")
+            or existing.get("domain_scope")
+            or ""
+        )
+        existing["scope_reason"] = str(
+            metadata.get("scope_reason")
+            or existing.get("scope_reason")
+            or ""
+        )
         existing["updated_at"] = now
         _write_jsonl(paths["paper_manifest"], records)
         duplicate = DuplicateRecord(
@@ -609,6 +638,8 @@ def register_metadata_record(
                 or metadata.get("source_path")
                 or ""
             ),
+            "domain_scope": str(metadata.get("domain_scope") or ""),
+            "scope_reason": str(metadata.get("scope_reason") or ""),
         }
     )
     records.append(record)
@@ -669,6 +700,26 @@ def update_paper_library_status(
             continue
         row["library_status"] = library_status
         row["quarantine_reason"] = quarantine_reason
+        row["updated_at"] = utc_now()
+        _write_jsonl(paths["paper_manifest"], rows)
+        return
+
+
+def update_paper_domain_scope(
+    paper_id: str,
+    domain_scope: str,
+    *,
+    scope_reason: str = "",
+    base_dir: Path = BASE_DIR,
+) -> None:
+    """Persist titanium-fatigue scope without changing scientific artifacts."""
+    paths = stage1_paths(base_dir)
+    rows = load_paper_manifest(base_dir)
+    for row in rows:
+        if row.get("paper_id") != paper_id:
+            continue
+        row["domain_scope"] = domain_scope
+        row["scope_reason"] = scope_reason
         row["updated_at"] = utc_now()
         _write_jsonl(paths["paper_manifest"], rows)
         return
@@ -906,6 +957,85 @@ def discover_pdf_files(
                 if file_hash:
                     seen_hashes.add(file_hash)
     return list(found.values())
+
+
+def update_paper_metadata_fields(
+    paper_id: str,
+    *,
+    title: str = "",
+    authors: str = "",
+    publication_date: str = "",
+    doi: str = "",
+    metadata_source: str = "",
+    source_url: str = "",
+    base_dir: Path = BASE_DIR,
+) -> Dict[str, Any]:
+    """Fill verified metadata on one canonical record without replacing identity."""
+    paths = ensure_stage1_dirs(base_dir)
+    rows = load_paper_manifest(base_dir)
+    for row in rows:
+        if row.get("paper_id") != paper_id:
+            continue
+        current_title = str(row.get("title") or "").strip()
+        incoming_title = str(title or "").strip()
+        current_title_suspicious = (
+            "http" in current_title.lower()
+            or "www." in current_title.lower()
+            or current_title.lower().startswith("contents lists")
+            or "journal homepage" in current_title.lower()
+            or current_title.lower().startswith(
+                "international journal of fatigue"
+            )
+            or "/4.0/)." in current_title.lower()
+            or current_title.lower().startswith("journal of ")
+            or "published by elsevier" in current_title.lower()
+            or " department of " in current_title.lower()
+            or len(current_title) > 350
+            or current_title.startswith("\u7b2c")
+            or "\u6458 \u8981" in current_title
+        )
+        if incoming_title and (
+            not current_title
+            or current_title_suspicious
+            or (
+                normalize_title(incoming_title).startswith(
+                    normalize_title(current_title)
+                )
+                and len(incoming_title) > len(current_title)
+            )
+        ):
+            row["title"] = incoming_title
+            row["normalized_title"] = normalize_title(incoming_title)
+        current_authors = str(row.get("authors") or "").strip()
+        authors_suspicious = (
+            "http" in current_authors.lower()
+            or "scientific reports" in current_authors.lower()
+            or current_authors.lower() in {"admin", "unknown", "untitled"}
+            or len(current_authors) > 350
+            or (
+                current_title
+                and normalize_title(current_authors).startswith(
+                    normalize_title(current_title)[:50]
+                )
+            )
+        )
+        if authors and (not current_authors or authors_suspicious):
+            row["authors"] = str(authors).strip()
+        if publication_date and (
+            not str(row.get("publication_date") or "").strip()
+            or str(row.get("publication_date") or "").startswith("D:")
+        ):
+            row["publication_date"] = str(publication_date).strip()
+        if doi and not normalize_doi(row.get("doi") or ""):
+            row["doi"] = normalize_doi(doi)
+        if metadata_source and not str(row.get("metadata_source") or "").strip():
+            row["metadata_source"] = str(metadata_source).strip()
+        if source_url and not str(row.get("source_url") or "").strip():
+            row["source_url"] = str(source_url).strip()
+        row["updated_at"] = utc_now()
+        _write_jsonl(paths["paper_manifest"], rows)
+        return row
+    return {}
 
 
 def load_rag_index(base_dir: Path = BASE_DIR) -> Dict[str, Any]:

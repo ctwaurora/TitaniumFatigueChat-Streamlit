@@ -24,6 +24,13 @@ VARIABLE_PATTERNS: Tuple[Tuple[str, str], ...] = (
     ("成形方向 build_orientation", r"\b(?:build orientation|build direction|成形方向|打印方向)\b"),
     ("残余应力 residual_stress", r"\b(?:residual stress|残余应力)\b"),
     ("孔隙率 porosity", r"\b(?:porosity|pore fraction|孔隙率)\b"),
+    ("微观组织 microstructure", r"\b(?:microstructure|alpha phase|beta phase|grain size|lath width|微观组织|晶粒|相组成)\b"),
+    ("织构 texture", r"\b(?:crystallographic texture|texture|织构)\b"),
+    ("应变幅 strain_amplitude", r"\b(?:strain amplitude|plastic strain|total strain|应变幅|塑性应变)\b"),
+    ("应力幅 stress_amplitude", r"\b(?:stress amplitude|maximum stress|应力幅|最大应力)\b"),
+    ("加载频率 frequency", r"\b(?:loading frequency|test frequency|frequency|hz|加载频率)\b"),
+    ("环境 environment", r"\b(?:corrosion|hydrogen|vacuum|air environment|temperature|腐蚀|氢|真空|环境|温度)\b"),
+    ("裂纹闭合 crack_closure", r"\b(?:crack closure|closure level|裂纹闭合)\b"),
 )
 
 OUTCOME_PATTERNS: Tuple[Tuple[str, str], ...] = (
@@ -31,6 +38,9 @@ OUTCOME_PATTERNS: Tuple[Tuple[str, str], ...] = (
     ("疲劳极限 fatigue_limit", r"\b(?:fatigue limit|fatigue strength|疲劳极限|疲劳强度)\b"),
     ("裂纹扩展速率 da/dN", r"\b(?:crack growth rate|da\s*/\s*dN|裂纹扩展速率)\b"),
     ("裂纹起裂 crack_initiation", r"\b(?:crack initiation|起裂|裂纹萌生)\b"),
+    ("短裂纹行为 short_crack", r"\b(?:short crack|small crack|短裂纹)\b"),
+    ("循环塑性 cyclic_response", r"\b(?:cyclic hardening|cyclic softening|hysteresis|循环硬化|循环软化|滞回)\b"),
+    ("LCF/HCF/VHCF响应 fatigue_regime", r"\b(?:low cycle fatigue|high cycle fatigue|very high cycle fatigue|LCF|HCF|VHCF|低周疲劳|高周疲劳|超高周疲劳)\b"),
 )
 
 COUNTER_RE = re.compile(
@@ -265,4 +275,3 @@ def generate_hypotheses(
         "hypotheses": [hypothesis],
         "rejected": gate["rejected"],
     }
-

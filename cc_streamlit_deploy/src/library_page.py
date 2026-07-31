@@ -344,7 +344,7 @@ def _render_oa_topup(base_dir: Path) -> None:
     )
     query = st.text_input(
         "检索主题",
-        value="L-PBF Ti-6Al-4V fatigue pore defect crack initiation",
+        value="L-PBF Ti-6Al-4V fatigue",
         key="library_auto_oa_query",
     )
     controls = st.columns(2)
@@ -361,18 +361,29 @@ def _render_oa_topup(base_dir: Path) -> None:
         topic_filter = st.selectbox(
             "文献类型",
             [
-                "疲劳与裂纹萌生",
-                "孔隙与缺陷",
-                "表面状态",
+                "全部钛合金疲劳",
+                "Ti-6Al-4V / TC4疲劳",
+                "增材制造钛合金疲劳",
+                "LCF",
+                "HCF",
+                "VHCF",
+                "裂纹起裂",
+                "短裂纹",
+                "疲劳裂纹扩展",
+                "表面粗糙度",
+                "孔隙与未熔合",
+                "微观组织与织构",
+                "残余应力",
                 "热处理与HIP",
-                "裂纹扩展",
-                "不限",
+                "成形方向",
+                "环境疲劳",
+                "疲劳模型与公式",
             ],
             key="library_auto_oa_topic",
         )
     core_only = st.toggle(
-        "仅限L-PBF/SLM Ti-6Al-4V疲劳",
-        value=True,
+        "仅限CORE：Ti-6Al-4V / TC4疲劳",
+        value=False,
         key="library_auto_oa_core",
     )
     with st.expander("更多筛选（可选）", expanded=False):
@@ -467,6 +478,7 @@ def _render_oa_topup(base_dir: Path) -> None:
                         "DOI": row.get("doi"),
                         "元数据来源": row.get("metadata_source"),
                         "OA来源": row.get("oa_source"),
+                        "领域分级": row.get("domain_scope"),
                         "真实下载PDF": row.get("downloaded_pdf"),
                         "下载状态": row.get("download_status"),
                         "HTTP": row.get("http_status"),
@@ -506,6 +518,113 @@ def render_ingestion_entries(base_dir: Path) -> None:
     with right:
         with st.container(border=True):
             _render_pdf_upload(base_dir)
+    _render_local_pdf_scan(base_dir)
+
+
+def _render_local_pdf_scan(base_dir: Path) -> None:
+    from src.local_pdf_import import (
+        local_pdf_directory_summary,
+        scan_and_import_local_pdfs,
+    )
+
+    with st.expander("扫描本地PDF并批量导入文献库", expanded=False):
+        directory_rows = local_pdf_directory_summary(base_dir)
+        st.dataframe(
+            pd.DataFrame(directory_rows),
+            hide_index=True,
+            width="stretch",
+        )
+        batch_mode = st.radio(
+            "处理范围",
+            ["小批量验收（最多3篇）", "全部目录"],
+            horizontal=True,
+            key="local_pdf_scan_mode",
+        )
+        total = sum(int(row["pdf_count"]) for row in directory_rows)
+        run_scan = st.button(
+            "扫描本地PDF",
+            key="scan_local_pdf_button",
+            disabled=total == 0,
+        )
+        if not run_scan:
+            return
+        progress = st.progress(0.0, text="正在递归扫描PDF…")
+        events: List[Dict[str, Any]] = []
+
+        def on_progress(phase: str, payload: Dict[str, Any]) -> None:
+            events.append(payload)
+            if phase == "SCANNING":
+                index = int(payload.get("index") or 0)
+                count = max(1, int(payload.get("total") or 1))
+                progress.progress(
+                    min(index / count, 0.85),
+                    text=f"扫描、查重和导入：{payload.get('path') or ''}",
+                )
+            elif phase == "DEEP_READING":
+                progress.progress(0.9, text="正在逐页精读并生成证据…")
+            elif phase == "QUALITY_GATING":
+                progress.progress(0.95, text="正在质量门禁并写入RAG…")
+
+        full_run = batch_mode == "全部目录"
+        result = scan_and_import_local_pdfs(
+            base_dir=base_dir,
+            max_files=None if full_run else 3,
+            progress_callback=on_progress,
+            report_name=(
+                "pdf_storage_unification_report.json"
+                if full_run
+                else "pdf_import_smoke_3_report.json"
+            ),
+        )
+        progress.progress(1.0, text="本地PDF扫描处理完成")
+        metrics = st.columns(8)
+        values = (
+            ("扫描PDF总数", result.get("original_pdf_count", 0)),
+            ("唯一PDF数", result.get("unique_pdf_count", 0)),
+            ("重复数", result.get("duplicate_pdf_count", 0)),
+            ("新增候选", result.get("new_candidate_count", 0)),
+            ("新增正式", result.get("new_formal_count", 0)),
+            ("深读成功", result.get("deep_read_success_count", 0)),
+            ("已入RAG", result.get("indexed_count", 0)),
+            ("失败", result.get("failure_count", 0)),
+        )
+        for column, (label, value) in zip(metrics, values):
+            column.metric(label, value)
+        if result.get("validation", {}).get("passed"):
+            st.success("PDF、canonical、深读、EvidenceRecord和RAG关联验证通过。")
+        else:
+            st.error("关联验证未通过；请查看迁移报告，旧文件没有被删除。")
+        display = pd.DataFrame(result.get("processing_results") or [])
+        if not display.empty:
+            columns = [
+                name
+                for name in (
+                    "title",
+                    "doi",
+                    "domain_scope",
+                    "real_page_count",
+                    "status",
+                    "deep_read_complete",
+                    "evidence_count",
+                    "rag_status",
+                    "failure_reason",
+                )
+                if name in display.columns
+            ]
+            st.dataframe(
+                display[columns], hide_index=True, width="stretch"
+            )
+        with st.expander("查看扫描日志", expanded=False):
+            st.json(
+                {
+                    "report": Path(
+                        str(result.get("report_path") or "")
+                    ).name,
+                    "path_updates": result.get("path_updates"),
+                    "events": events,
+                }
+            )
+        _clear_library_cache()
 
 
 def _render_statistics(base_dir: Path) -> None:

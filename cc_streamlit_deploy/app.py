@@ -70,7 +70,7 @@ def _print_banner():
 """
     console.print(banner, style="bold cyan")
     console.print(Panel(
-        "[yellow]本项目是面向 L-PBF Ti-6Al-4V 疲劳机制发现的领域科研助手系统，\n"
+        "[yellow]本项目是钛合金疲劳科研助手，L-PBF Ti-6Al-4V 孔隙问题是当前主案例，\n"
         "通过文献证据抽取、RAG 文献分析、研究空白验证和假设生成，\n"
         "构建可追溯、可验证的领域知识库与假设生成系统。[/yellow]",
         title="定位",
