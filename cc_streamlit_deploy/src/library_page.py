@@ -95,6 +95,7 @@ def _render_full_read_status(base_dir: Path) -> None:
             "题名": row.get("canonical_title") or "待元数据核验",
             "PDF": row.get("original_filename"), "页数": row.get("real_page_count"),
             "已读页数": row.get("processed_pages"), "精读状态": row.get("status"),
+            "终态分类": row.get("terminal_state") or "待终态核验",
             "EvidenceRecord": (row.get("gate") or {}).get("evidence_count", 0),
             "质量门禁": (row.get("gate") or {}).get("passed", False),
             "RAG状态": (row.get("index_result") or {}).get("status", "NOT_INDEXED"),
@@ -104,7 +105,7 @@ def _render_full_read_status(base_dir: Path) -> None:
 
 def _render_full_library_deep_read(base_dir: Path, mode: str) -> None:
     """Local durable batch controls; cloud never creates unusable tasks."""
-    with st.expander("全文精读全部未完成PDF", expanded=False):
+    with st.expander("全库精读状态与控制", expanded=False):
         if mode == CLOUD_TEMPORARY:
             st.info("该功能仅在本地运行：Streamlit Cloud 无法读取用户电脑 C 盘中的 paper/pdfs。")
             return
@@ -133,6 +134,11 @@ def _render_full_library_deep_read(base_dir: Path, mode: str) -> None:
             )
         _render_full_read_status(base_dir)
         concurrency = st.number_input("并发数", min_value=1, max_value=2, value=1, step=1)
+        use_deepseek = st.checkbox(
+            "启用 DeepSeek 语义增强",
+            value=True,
+            help="只显示是否启用；不会显示或记录 API Key。",
+        )
         confirm = st.checkbox("我确认启动全部未完成PDF的逐篇逐页精读", key="confirm_full_read_all")
         start, pause, resume, stop, retry = st.columns(5)
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
@@ -141,9 +147,12 @@ def _render_full_library_deep_read(base_dir: Path, mode: str) -> None:
             set_queue_control("RUN", base_dir=base_dir)
             command = [
                 sys.executable, str(base_dir / "app.py"), "deep-read-all",
-                "--pdf-dir", str(pdf_dir), "--resume", "--only-unread",
+                "--pdf-dir", str(pdf_dir), "--resume", "--only-incomplete",
+                "--include-review", "--retry-failed",
                 "--concurrency", str(int(concurrency)),
             ]
+            if use_deepseek:
+                command.append("--use-deepseek")
             process = subprocess.Popen(command, cwd=base_dir, creationflags=flags)
             st.success(f"本地持久化任务已启动（PID {process.pid}）；关闭页面后仍可用继续按钮恢复。")
         if pause.button("暂停", width="stretch"):
@@ -152,15 +161,19 @@ def _render_full_library_deep_read(base_dir: Path, mode: str) -> None:
             set_queue_control("RUN", base_dir=base_dir)
             subprocess.Popen([
                 sys.executable, str(base_dir / "app.py"), "deep-read-all",
-                "--pdf-dir", str(pdf_dir), "--resume", "--only-unread",
+                "--pdf-dir", str(pdf_dir), "--resume", "--only-incomplete",
+                "--include-review", "--retry-failed",
                 "--concurrency", str(int(concurrency)),
+                *(["--use-deepseek"] if use_deepseek else []),
             ], cwd=base_dir, creationflags=flags)
         if stop.button("当前文献后停止", width="stretch"):
             set_queue_control("STOP_AFTER_CURRENT", base_dir=base_dir)
         if retry.button("仅重试失败", width="stretch"):
             subprocess.Popen([
                 sys.executable, str(base_dir / "app.py"), "deep-read-all",
-                "--pdf-dir", str(pdf_dir), "--resume", "--retry-failed", "--concurrency", "1",
+                "--pdf-dir", str(pdf_dir), "--resume", "--retry-failed",
+                "--include-review", "--only-incomplete", "--concurrency", "1",
+                *(["--use-deepseek"] if use_deepseek else []),
             ], cwd=base_dir, creationflags=flags)
         st.caption("状态从持久化队列读取；已COMPLETED文献默认跳过，默认并发1，最大2。")
 

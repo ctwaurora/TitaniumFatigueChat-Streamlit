@@ -45,6 +45,19 @@ from src.unified_rag import rag_paths
 
 
 QUEUE_VERSION = "full-library-deep-read-1.0"
+FINAL_CLASSIFICATIONS = {
+    "FORMAL_INDEXED",
+    "COMPLETE_NOT_INDEXED",
+    "MANUAL_VISUAL_REVIEW_REQUIRED",
+    "INVALID_OR_UNREADABLE",
+}
+PAGE_FINAL_STATUSES = {
+    "TEXT_EXTRACTED",
+    "EMPTY_PAGE",
+    "OCR_EXTRACTED",
+    "VISUAL_REVIEW_REQUIRED",
+    "INVALID_PAGE",
+}
 TERMINAL_STATES = {
     "COMPLETED", "NEEDS_HUMAN_REVIEW", "SKIPPED_DUPLICATE", "FAILED_RETRYABLE"
 }
@@ -90,6 +103,189 @@ def _read_json(path: Path, default: Any) -> Any:
         return json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return default
+
+
+def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                value = json.loads(line)
+                if isinstance(value, dict):
+                    rows.append(value)
+    except (OSError, json.JSONDecodeError):
+        return []
+    return rows
+
+
+def page_final_status(row: Dict[str, Any]) -> str:
+    """Map parser detail to one explicit, auditable page outcome."""
+    explicit = str(row.get("page_final_status") or "").upper()
+    if explicit in PAGE_FINAL_STATUSES:
+        return explicit
+    parse_status = str(
+        row.get("parse_status") or row.get("extraction_status") or ""
+    ).upper()
+    if parse_status == "OCR_EXTRACTED":
+        return "OCR_EXTRACTED"
+    if parse_status == "EMPTY_PAGE":
+        return "EMPTY_PAGE"
+    if parse_status in {"OCR_REQUIRED", "MANUAL_REVIEW_REQUIRED"}:
+        return "VISUAL_REVIEW_REQUIRED"
+    if parse_status in {"PARSE_FAILED", "INVALID_PAGE"}:
+        return "INVALID_PAGE"
+    if str(row.get("page_text") or row.get("cleaned_text") or "").strip():
+        return "TEXT_EXTRACTED"
+    return "VISUAL_REVIEW_REQUIRED"
+
+
+def classify_terminal_state(
+    task: Dict[str, Any],
+    paper: Dict[str, Any],
+    status: Dict[str, Any],
+    pages: Sequence[Dict[str, Any]],
+) -> tuple[str, str]:
+    """Classify one logical paper without treating a queue label as evidence."""
+    if not bool(task.get("valid_pdf")) or int(task.get("real_page_count") or 0) < 1:
+        return "INVALID_OR_UNREADABLE", str(task.get("last_error") or "INVALID_PDF")
+    # The task is keyed by the physical primary PDF.  Never let an artifact
+    # left by a previously false canonical merge override its real page count.
+    expected = int(task.get("real_page_count") or status.get("real_page_count") or 0)
+    page_numbers = sorted({
+        int(row.get("page_number") or 0)
+        for row in pages
+        if 1 <= int(row.get("page_number") or 0) <= expected
+    })
+    complete_numbers = page_numbers == list(range(1, expected + 1))
+    final_page_states = [
+        page_final_status(row)
+        for row in pages
+        if 1 <= int(row.get("page_number") or 0) <= expected
+    ]
+    invalid_pages = sum(value == "INVALID_PAGE" for value in final_page_states)
+    visual_pages = sum(value == "VISUAL_REVIEW_REQUIRED" for value in final_page_states)
+    metadata_ok = is_valid_title(paper.get("title") or task.get("canonical_title"))
+    deepseek_ok = bool(
+        task.get("deepseek_semantic_complete")
+        or task.get("deepseek_enhancement_applied")
+        or status.get("deepseek_enhancement_applied")
+        or int(status.get("deepseek_semantic_success_count") or 0) > 0
+    )
+    audit_ok = all(bool(status.get(key)) for key in (
+        "sequential_scan_complete", "variable_sweep_complete", "missing_audit_complete"
+    ))
+    if invalid_pages:
+        return "INVALID_OR_UNREADABLE", f"INVALID_PAGE_COUNT={invalid_pages}"
+    if not complete_numbers:
+        missing = sorted(set(range(1, expected + 1)) - set(page_numbers))
+        return "MANUAL_VISUAL_REVIEW_REQUIRED", f"MISSING_PAGE_RECORDS={missing}"
+    if visual_pages or not metadata_ok:
+        reasons = []
+        if visual_pages:
+            reasons.append(f"VISUAL_REVIEW_REQUIRED_PAGES={visual_pages}")
+        if not metadata_ok:
+            reasons.append("NEEDS_METADATA_REVIEW")
+        if not deepseek_ok:
+            reasons.append("DEEPSEEK_ENHANCEMENT_INCOMPLETE")
+        return "MANUAL_VISUAL_REVIEW_REQUIRED", ";".join(reasons)
+    if not deepseek_ok or not audit_ok:
+        reasons = []
+        if not deepseek_ok:
+            reasons.append("DEEPSEEK_ENHANCEMENT_INCOMPLETE")
+        if not audit_ok:
+            reasons.append("FULL_TEXT_AUDIT_INCOMPLETE")
+        return "COMPLETE_NOT_INDEXED", ";".join(reasons)
+    scope = str(paper.get("domain_scope") or "")
+    formal_indexed = (
+        str(paper.get("library_status") or "") == "FORMAL"
+        and str(paper.get("rag_status") or "") == "INDEXED_STAGE3_UNIFIED"
+        and bool((task.get("gate") or {}).get("passed"))
+    )
+    if formal_indexed and scope != OUT_OF_SCOPE:
+        return "FORMAL_INDEXED", "QUALITY_GATE_PASSED_AND_INDEXED"
+    if scope == OUT_OF_SCOPE:
+        return "COMPLETE_NOT_INDEXED", "OUT_OF_SCOPE_NOT_INDEXED"
+    return "COMPLETE_NOT_INDEXED", str(
+        task.get("last_error") or "QUALITY_GATE_OR_INDEX_NOT_PASSED"
+    )
+
+
+def refresh_terminal_states(*, base_dir: Path = BASE_DIR) -> Dict[str, int]:
+    """Persist A-D terminal classification and an explicit page audit."""
+    queue = load_full_library_queue(base_dir)
+    # Use the same derived canonical view as the library page and final report.
+    # Raw Stage-1 rows can retain stale FORMAL/RAG flags after a later downgrade.
+    from src.literature_library import canonical_library_records
+
+    manifest = {
+        str(row.get("paper_id") or ""): row
+        for row in canonical_library_records(base_dir)
+    }
+    page_audit: List[Dict[str, Any]] = []
+    counts: Counter[str] = Counter()
+    for task in queue.get("tasks") or []:
+        paper_id = str(task.get("canonical_paper_id") or "")
+        paths = deep_read_paths(base_dir, paper_id) if paper_id else {}
+        status = _read_json(paths.get("status", Path("__missing__")), {}) if paths else {}
+        pages = _read_jsonl(paths.get("pages", Path("__missing__"))) if paths else []
+        final_state, reason = classify_terminal_state(
+            task, manifest.get(paper_id, {}), status, pages
+        )
+        semantic_complete = bool(
+            task.get("deepseek_enhancement_applied")
+            or int((task.get("deepseek_usage") or {}).get("success_count") or 0) > 0
+            or status.get("deepseek_enhancement_applied")
+            or int(status.get("deepseek_semantic_success_count") or 0) > 0
+        )
+        current_status = str(task.get("status") or "PENDING")
+        normalized_status = current_status
+        if current_status in {"PENDING", "FAILED_RETRYABLE", "PAUSED"}:
+            normalized_status = (
+                "COMPLETED"
+                if final_state in {"FORMAL_INDEXED", "COMPLETE_NOT_INDEXED"}
+                else "NEEDS_HUMAN_REVIEW"
+            )
+        _save_task(
+            base_dir,
+            str(task.get("task_id") or ""),
+            terminal_state=final_state,
+            terminal_reason=reason,
+            terminal_at=_now(),
+            deepseek_semantic_complete=semantic_complete,
+            status=normalized_status,
+            last_error=(
+                "" if final_state == "FORMAL_INDEXED" else task.get("last_error") or ""
+            ),
+        )
+        counts[final_state] += 1
+        expected = int(task.get("real_page_count") or status.get("real_page_count") or 0)
+        by_number = {int(row.get("page_number") or 0): row for row in pages}
+        for page_number in range(1, expected + 1):
+            row = by_number.get(page_number)
+            page_audit.append({
+                "task_id": task.get("task_id"),
+                "canonical_paper_id": paper_id,
+                "filename": task.get("original_filename"),
+                "page_number": page_number,
+                "page_status": page_final_status(row) if row else "INVALID_PAGE",
+                "source_method": (
+                    "OCR" if row and page_final_status(row) == "OCR_EXTRACTED"
+                    else "PDF_NATIVE_TEXT" if row and page_final_status(row) == "TEXT_EXTRACTED"
+                    else "VISUAL_OR_EMPTY_PAGE_AUDIT"
+                ),
+                "text_length": int((row or {}).get("text_length") or (row or {}).get("character_count") or 0),
+            })
+    outputs = base_dir / "outputs"
+    outputs.mkdir(parents=True, exist_ok=True)
+    _atomic_json(outputs / "full_library_page_terminal_audit.json", page_audit)
+    with (outputs / "full_library_page_terminal_audit.csv").open(
+        "w", encoding="utf-8-sig", newline=""
+    ) as handle:
+        columns = list(page_audit[0]) if page_audit else ["task_id", "page_number", "page_status"]
+        writer = csv.DictWriter(handle, fieldnames=columns)
+        writer.writeheader()
+        writer.writerows(page_audit)
+    return dict(counts)
 
 
 def _event(base_dir: Path, task_id: str, status: str, detail: str = "") -> None:
@@ -439,6 +635,8 @@ def run_full_library_queue(
     resume: bool = True,
     retry_failed: bool = False,
     only_unread: bool = False,
+    include_review: bool = False,
+    only_incomplete: bool = False,
     limit: Optional[int] = None,
     concurrency: int = 1,
     stop_after_pages: Optional[int] = None,
@@ -458,13 +656,27 @@ def run_full_library_queue(
     tasks = built["tasks"]
     if retry_failed:
         for task in tasks:
-            if task["status"] in {"FAILED_RETRYABLE", "PAUSED"}:
+            retry_state = retry_failed and task["status"] in {
+                "FAILED_RETRYABLE", "PAUSED"
+            }
+            if retry_state:
                 _save_task(base_dir, task["task_id"], status="PENDING", last_error="")
     processed_tasks = 0
     pages_this_run = 0
     for snapshot in list(load_full_library_queue(base_dir).get("tasks") or []):
         task_id = snapshot["task_id"]
         task = next(row for row in load_full_library_queue(base_dir)["tasks"] if row["task_id"] == task_id)
+        if only_incomplete:
+            terminal_state = str(task.get("terminal_state") or "")
+            has_semantic_read = bool(
+                task.get("deepseek_semantic_complete")
+                or task.get("deepseek_enhancement_applied")
+                or int((task.get("deepseek_usage") or {}).get("success_count") or 0) > 0
+            )
+            if terminal_state in FINAL_CLASSIFICATIONS and (
+                not use_deepseek or has_semantic_read
+            ):
+                continue
         if task["status"] == "COMPLETED" and only_unread:
             continue
         if (
@@ -478,7 +690,7 @@ def run_full_library_queue(
             continue
         if task["status"] == "SKIPPED_DUPLICATE":
             continue
-        if task["status"] == "NEEDS_HUMAN_REVIEW":
+        if task["status"] == "NEEDS_HUMAN_REVIEW" and not include_review:
             continue
         if task["status"] == "FAILED_RETRYABLE" and not retry_failed:
             continue
@@ -488,7 +700,11 @@ def run_full_library_queue(
             break
         started = time.monotonic()
         if not task["valid_pdf"]:
-            _save_task(base_dir, task_id, status="NEEDS_HUMAN_REVIEW", last_error="INVALID_PDF")
+            _save_task(
+                base_dir, task_id, status="NEEDS_HUMAN_REVIEW",
+                last_error="INVALID_PDF", terminal_state="INVALID_OR_UNREADABLE",
+                terminal_reason="INVALID_PDF", terminal_at=_now(),
+            )
             continue
         _save_task(base_dir, task_id, status="PDF_VALIDATED", started_at=_now(), last_error="")
         try:
@@ -570,9 +786,43 @@ def run_full_library_queue(
                 _save_task(base_dir, task_id, status="PAUSED", processed_pages=result.get("processed_page_count", 0), last_error="CONTROLLED_INTERRUPTION")
                 break
             if not result.get("deep_read_complete"):
+                current_paper = _canonical(base_dir, paper_id)
+                current_pages = _read_jsonl(deep_read_paths(base_dir, paper_id)["pages"])
+                terminal_state, terminal_reason = classify_terminal_state(
+                    {**task, "canonical_title": title},
+                    current_paper,
+                    result,
+                    current_pages,
+                )
                 retry = int(task.get("retry_count") or 0) + 1
-                state = "FAILED_RETRYABLE" if retry < 3 else "NEEDS_HUMAN_REVIEW"
-                _save_task(base_dir, task_id, status=state, retry_count=retry, last_error=str(result.get("error") or "DEEP_READ_INCOMPLETE"))
+                deterministic_review = terminal_state in {
+                    "MANUAL_VISUAL_REVIEW_REQUIRED", "INVALID_OR_UNREADABLE"
+                }
+                state = (
+                    "NEEDS_HUMAN_REVIEW"
+                    if deterministic_review or retry >= 3
+                    else "FAILED_RETRYABLE"
+                )
+                _save_task(
+                    base_dir,
+                    task_id,
+                    status=state,
+                    retry_count=retry,
+                    processed_pages=int(result.get("processed_page_count") or 0),
+                    deepseek_enhancement_enabled=bool(result.get("deepseek_enhancement_enabled")),
+                    deepseek_enhancement_applied=bool(result.get("deepseek_enhancement_applied")),
+                    deepseek_enriched_record_count=int(result.get("deepseek_enriched_record_count") or 0),
+                    deepseek_usage=dict(result.get("deepseek_usage") or {}),
+                    deepseek_semantic_complete=bool(
+                        int(result.get("deepseek_semantic_success_count") or 0) > 0
+                        or int((result.get("deepseek_usage") or {}).get("success_count") or 0) > 0
+                    ),
+                    last_error=str(result.get("error") or terminal_reason or "DEEP_READ_INCOMPLETE"),
+                    terminal_state=terminal_state if deterministic_review else "",
+                    terminal_reason=terminal_reason if deterministic_review else "",
+                    terminal_at=_now() if deterministic_review else "",
+                )
+                processed_tasks += 1
                 continue
             _save_task(
                 base_dir,
@@ -589,6 +839,10 @@ def run_full_library_queue(
                     result.get("deepseek_enriched_record_count") or 0
                 ),
                 deepseek_usage=dict(result.get("deepseek_usage") or {}),
+                deepseek_semantic_complete=bool(
+                    int(result.get("deepseek_semantic_success_count") or 0) > 0
+                    or int((result.get("deepseek_usage") or {}).get("success_count") or 0) > 0
+                ),
             )
             _save_task(base_dir, task_id, status="DEEP_READING")
             extras = _postprocess_artifacts(base_dir, paper_id, title)
@@ -601,7 +855,26 @@ def run_full_library_queue(
             if not gate["passed"]:
                 update_paper_library_status(paper_id, "CANDIDATE", base_dir=base_dir)
                 update_paper_rag_status(paper_id, "NOT_INDEXED", base_dir)
-                _save_task(base_dir, task_id, status="NEEDS_HUMAN_REVIEW", gate=gate, last_error=";".join(gate["reasons"]), elapsed_seconds=round(time.monotonic() - started, 3))
+                paper = _canonical(base_dir, paper_id)
+                pages = _read_jsonl(deep_read_paths(base_dir, paper_id)["pages"])
+                terminal_state, terminal_reason = classify_terminal_state(
+                    {
+                        **task,
+                        "gate": gate,
+                        "deepseek_enhancement_applied": bool(result.get("deepseek_enhancement_applied")),
+                    },
+                    paper,
+                    result,
+                    pages,
+                )
+                _save_task(
+                    base_dir, task_id, status="NEEDS_HUMAN_REVIEW", gate=gate,
+                    last_error=";".join(gate["reasons"]),
+                    terminal_state=terminal_state,
+                    terminal_reason=terminal_reason,
+                    terminal_at=_now(),
+                    elapsed_seconds=round(time.monotonic() - started, 3),
+                )
                 processed_tasks += 1
                 continue
             update_paper_library_status(paper_id, "FORMAL", base_dir=base_dir)
@@ -621,7 +894,13 @@ def run_full_library_queue(
                 update_paper_library_status(paper_id, "CANDIDATE", base_dir=base_dir)
                 _save_task(base_dir, task_id, status="NEEDS_HUMAN_REVIEW", last_error="STAGE3_INDEX_FAILED", index_result=indexed)
             else:
-                _save_task(base_dir, task_id, status="COMPLETED", index_result=indexed, elapsed_seconds=round(time.monotonic() - started, 3), completed_at=_now())
+                _save_task(
+                    base_dir, task_id, status="COMPLETED", index_result=indexed,
+                    terminal_state="FORMAL_INDEXED",
+                    terminal_reason="QUALITY_GATE_PASSED_AND_INDEXED",
+                    terminal_at=_now(),
+                    elapsed_seconds=round(time.monotonic() - started, 3), completed_at=_now()
+                )
             processed_tasks += 1
         except Exception as exc:
             current = next((row for row in load_full_library_queue(base_dir)["tasks"] if row["task_id"] == task_id), task)
@@ -630,6 +909,7 @@ def run_full_library_queue(
             _save_task(base_dir, task_id, status=state, retry_count=retry, last_error=f"{type(exc).__name__}: {exc}", elapsed_seconds=round(time.monotonic() - started, 3))
         if _control(base_dir) == "STOP_AFTER_CURRENT":
             break
+    terminal_counts = refresh_terminal_states(base_dir=base_dir)
     report = generate_full_library_report(base_dir=base_dir)
     usage = (
         deepseek_client.usage_snapshot()
@@ -645,6 +925,7 @@ def run_full_library_queue(
         "concurrency": concurrency,
         "deepseek_enabled": bool(use_deepseek),
         "deepseek_usage": usage,
+        "terminal_counts": terminal_counts,
         "report": report,
     }
 
@@ -654,6 +935,7 @@ def queue_summary(*, base_dir: Path = BASE_DIR) -> Dict[str, Any]:
     inventory = _read_json(queue_paths(base_dir)["inventory"], {})
     tasks = queue.get("tasks") or []
     counts = Counter(str(row.get("status") or "PENDING") for row in tasks)
+    terminal_counts = Counter(str(row.get("terminal_state") or "") for row in tasks)
     return {
         "pdf_file_count": int(inventory.get("pdf_file_count") or 0),
         "logical_document_count": int(inventory.get("logical_document_count") or 0),
@@ -668,6 +950,9 @@ def queue_summary(*, base_dir: Path = BASE_DIR) -> Dict[str, Any]:
         "evidence_count": sum(int(row.get("gate", {}).get("evidence_count") or 0) for row in tasks),
         "indexed": sum(str(row.get("index_result", {}).get("status") or "") == "INDEXED_STAGE3_UNIFIED" for row in tasks),
         "control": _control(base_dir),
+        "terminal_state_counts": {
+            state: terminal_counts[state] for state in sorted(FINAL_CLASSIFICATIONS)
+        },
         "tasks": tasks,
     }
 
@@ -775,13 +1060,36 @@ def generate_full_library_report(*, base_dir: Path = BASE_DIR) -> Dict[str, Any]
             artifact_paper_ids.add(paper_id)
         paper_evidence = evidence_by_paper.get(paper_id, [])
         directness = Counter(str(row.get("directness") or "") for row in paper_evidence)
+        pages = _read_jsonl(deep_read_paths(base_dir, paper_id)["pages"]) if paper_id else []
+        expected_pages = int(task.get("real_page_count") or status.get("real_page_count") or 0)
+        page_rows_by_number = {
+            int(row.get("page_number") or 0): row
+            for row in pages
+            if 1 <= int(row.get("page_number") or 0) <= expected_pages
+        }
+        page_states = Counter(page_final_status(row) for row in page_rows_by_number.values())
+        recorded_pages = len(page_rows_by_number)
+        resolved_pages = sum(
+            page_final_status(row) in {"TEXT_EXTRACTED", "OCR_EXTRACTED", "EMPTY_PAGE"}
+            for row in page_rows_by_number.values()
+        )
+        page_record_coverage = recorded_pages / expected_pages if expected_pages else 0.0
+        resolved_page_coverage = resolved_pages / expected_pages if expected_pages else 0.0
+        terminal_state, terminal_reason = classify_terminal_state(
+            task, paper, status, pages
+        )
         details.append({
             "canonical_paper_id": paper_id,
             "title": str(paper.get("title") or task.get("canonical_title") or ""),
             "filename": task.get("original_filename"),
-            "pages": int(status.get("real_page_count") or task.get("real_page_count") or 0),
-            "processed_pages": int(status.get("processed_page_count") or task.get("processed_pages") or 0),
-            "page_coverage_ratio": float(status.get("page_coverage_ratio") or 0.0),
+            "pages": expected_pages,
+            "processed_pages": resolved_pages,
+            "page_record_count": recorded_pages,
+            "page_record_coverage_ratio": round(page_record_coverage, 6),
+            # Native text, verified OCR text, and explicit empty pages are read.
+            # Visual-review and invalid/missing pages stay visible but never
+            # inflate the reported full-text coverage.
+            "page_coverage_ratio": round(resolved_page_coverage, 6),
             "evidence_count": len(paper_evidence),
             "direct_count": directness["DIRECT"], "indirect_count": directness["INDIRECT"],
             "inferred_count": directness["INFERRED"], "mention_only_count": directness["MENTION_ONLY"],
@@ -790,6 +1098,13 @@ def generate_full_library_report(*, base_dir: Path = BASE_DIR) -> Dict[str, Any]
             "rag_status": paper.get("rag_status") or "NOT_INDEXED",
             "domain_scope": paper.get("domain_scope") or "",
             "task_status": task.get("status"), "failure_reason": task.get("last_error") or "",
+            "terminal_state": terminal_state,
+            "terminal_reason": terminal_reason,
+            "text_extracted_pages": page_states["TEXT_EXTRACTED"],
+            "empty_pages": page_states["EMPTY_PAGE"],
+            "ocr_extracted_pages": page_states["OCR_EXTRACTED"],
+            "visual_review_required_pages": page_states["VISUAL_REVIEW_REQUIRED"],
+            "invalid_pages": page_states["INVALID_PAGE"],
             "elapsed_seconds": task.get("elapsed_seconds") or 0,
             "formula_count": extras["formula_count"], "visual_review_count": extras["visual_review_count"],
             "deepseek_enhancement_enabled": bool(
@@ -824,8 +1139,9 @@ def generate_full_library_report(*, base_dir: Path = BASE_DIR) -> Dict[str, Any]
             ),
         })
     directness_total = Counter(str(row.get("directness") or "") for row in evidence)
+    terminal_counts = Counter(str(row.get("terminal_state") or "") for row in details)
     total_pages = sum(row["pages"] for row in details)
-    completed_pages = sum(row["processed_pages"] if row["page_coverage_ratio"] == 1.0 else 0 for row in details)
+    completed_pages = sum(row["processed_pages"] for row in details)
     report = {
         "generated_at": _now(), "schema_version": QUEUE_VERSION,
         "scanned_pdf_count": int(inventory.get("pdf_file_count") or 0),
@@ -869,13 +1185,27 @@ def generate_full_library_report(*, base_dir: Path = BASE_DIR) -> Dict[str, Any]
             row["deepseek_completion_tokens"] for row in details
         ),
         "deepseek_total_tokens": sum(row["deepseek_total_tokens"] for row in details),
+        "terminal_state_counts": {
+            state: terminal_counts[state] for state in sorted(FINAL_CLASSIFICATIONS)
+        },
+        "unclassified_terminal_count": sum(
+            str(row.get("terminal_state") or "") not in FINAL_CLASSIFICATIONS
+            for row in details
+        ),
         "papers": details,
     }
     outputs = base_dir / "outputs"
     outputs.mkdir(parents=True, exist_ok=True)
     _atomic_json(outputs / "full_library_deep_read_report.json", report)
+    _atomic_json(outputs / "full_library_terminal_state_report.json", report)
     columns = list(details[0]) if details else ["canonical_paper_id", "title", "filename"]
     with (outputs / "full_library_deep_read_report.csv").open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns)
+        writer.writeheader()
+        writer.writerows(details)
+    with (outputs / "full_library_terminal_state_report.csv").open(
+        "w", encoding="utf-8-sig", newline=""
+    ) as handle:
         writer = csv.DictWriter(handle, fieldnames=columns)
         writer.writeheader()
         writer.writerows(details)
@@ -897,4 +1227,22 @@ def generate_full_library_report(*, base_dir: Path = BASE_DIR) -> Dict[str, Any]
             f"{row['library_status']} | {row['rag_status']} | {row['failure_reason']}"
         )
     (outputs / "full_library_deep_read_summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    terminal_lines = [
+        "# Full-library terminal-state audit",
+        "",
+        *(f"- {state}: {terminal_counts[state]}" for state in sorted(FINAL_CLASSIFICATIONS)),
+        f"- UNCLASSIFIED: {report['unclassified_terminal_count']}",
+        "",
+        "## Paper outcomes",
+        "",
+    ]
+    terminal_lines.extend(
+        f"- {row['terminal_state']} | {row['title'] or '[NEEDS_METADATA_REVIEW]'} | "
+        f"{row['filename']} | pages {row['processed_pages']}/{row['pages']} | "
+        f"{row['terminal_reason']}"
+        for row in details
+    )
+    (outputs / "full_library_terminal_state_summary.md").write_text(
+        "\n".join(terminal_lines) + "\n", encoding="utf-8"
+    )
     return report

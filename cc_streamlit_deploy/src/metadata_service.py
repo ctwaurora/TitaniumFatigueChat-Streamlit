@@ -33,7 +33,19 @@ def is_valid_title(value: object) -> bool:
         "elsevier editorial system", "researchgate", "materials research, vol.",
         "a sheffield hallam university thesis",
         "microsoft word - ", "type of the paper ",
+        "nii-electronic library service", "n a s a contractor report",
+        "nasa contractor report",
+        "international journal of minerals, metallurgy and materials",
+        "paper title (use style: paper title)",
     )):
+        return False
+    if "nii-electronic library service" in lowered:
+        return False
+    if lowered.startswith("copyright") or "講演論文集" in title:
+        return False
+    if title.startswith("「材料」") or lowered.startswith("j. soc"):
+        return False
+    if re.fullmatch(r"(?:vol(?:ume)?\.?\s*)?\d+(?:\s*[,;:]\s*\d+)?", lowered):
         return False
     if lowered.endswith((".doc", ".docx", ".pdf")):
         return False

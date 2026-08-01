@@ -726,6 +726,19 @@ def deep_read_all(
     resume: bool = typer.Option(False, "--resume"),
     retry_failed: bool = typer.Option(False, "--retry-failed"),
     only_unread: bool = typer.Option(False, "--only-unread"),
+    include_review: bool = typer.Option(
+        False,
+        "--include-review",
+        help="Re-open NEEDS_HUMAN_REVIEW tasks for one repair/deep-read attempt.",
+    ),
+    only_incomplete: bool = typer.Option(
+        False,
+        "--only-incomplete",
+        help=(
+            "Process only papers without a final A-D classification or without "
+            "the requested DeepSeek semantic enhancement."
+        ),
+    ),
     limit: int = typer.Option(None, "--limit", min=1),
     concurrency: int = typer.Option(1, "--concurrency", min=1, max=2),
     dry_run: bool = typer.Option(False, "--dry-run"),
@@ -759,6 +772,10 @@ def deep_read_all(
             and str(task.get("status") or "") in {"FAILED_RETRYABLE", "PAUSED"}
         )
         or (
+            include_review
+            and str(task.get("status") or "") == "NEEDS_HUMAN_REVIEW"
+        )
+        or (
             not only_unread
             and use_deepseek
             and str(task.get("status") or "") == "COMPLETED"
@@ -790,7 +807,8 @@ def deep_read_all(
         return
     result = run_full_library_queue(
         pdf_dir, base_dir=BASE_DIR, resume=resume,
-        retry_failed=retry_failed, only_unread=only_unread, limit=limit,
+        retry_failed=retry_failed, only_unread=only_unread,
+        include_review=include_review, only_incomplete=only_incomplete, limit=limit,
         concurrency=concurrency, stop_after_pages=stop_after_pages,
         use_deepseek=use_deepseek,
     )
@@ -814,6 +832,7 @@ def deep_read_all(
         "deepseek_prompt_tokens": result["deepseek_usage"]["prompt_tokens"],
         "deepseek_completion_tokens": result["deepseek_usage"]["completion_tokens"],
         "deepseek_total_tokens": result["deepseek_usage"]["total_tokens"],
+        "terminal_state_counts": result.get("terminal_counts") or {},
         "report": str((BASE_DIR / "outputs" / "full_library_deep_read_report.json").resolve()),
     })
 

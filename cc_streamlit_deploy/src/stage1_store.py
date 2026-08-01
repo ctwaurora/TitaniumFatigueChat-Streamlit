@@ -186,8 +186,19 @@ def _looks_like_scholarly_title(value: object) -> bool:
     if lower.startswith((
         "university of ", "materials research, vol.", "accepted manuscript",
         "microsoft word - ", "type of the paper ",
-        "arxiv:", "proceedings of ",
+        "arxiv:", "proceedings of ", "nii-electronic library service",
+        "n a s a contractor report", "nasa contractor report",
+        "international journal of minerals, metallurgy and materials",
+        "paper title (use style: paper title)",
     )) or lower.endswith((".doc", ".docx", ".pdf")):
+        return False
+    if "nii-electronic library service" in lower:
+        return False
+    if lower.startswith("copyright") or "講演論文集" in title:
+        return False
+    if title.startswith("「材料」") or lower.startswith("j. soc"):
+        return False
+    if re.fullmatch(r"(?:vol(?:ume)?\.?\s*)?\d+(?:\s*[,;:]\s*\d+)?", lower):
         return False
     if re.match(r"^(?:metals|materials|fatigue|journal)\s+20\d{2}\s*,\s*\d+", lower):
         return False
@@ -356,8 +367,33 @@ def load_duplicate_records(base_dir: Path = BASE_DIR) -> List[Dict[str, Any]]:
     return _read_jsonl(stage1_paths(base_dir)["duplicate_records"])
 
 
-def _stable_paper_id(doi: str, title: str, file_hash: str) -> str:
-    identity = normalize_doi(doi) or normalize_title(title) or file_hash
+def _metadata_identity(title: str, authors: str, publication_date: str) -> str:
+    """Return a conservative title/year/first-author identity.
+
+    A title alone is not sufficient: publisher headers such as ``NII-Electronic
+    Library Service`` previously collapsed unrelated PDFs into one canonical row.
+    """
+    if not _looks_like_scholarly_title(title):
+        return ""
+    year_match = re.search(r"\b(?:19|20)\d{2}\b", str(publication_date or ""))
+    first_author = normalize_title(re.split(r"[;,]", str(authors or ""))[0])
+    if not year_match or not first_author:
+        return ""
+    return f"{normalize_title(title)}|{year_match.group(0)}|{first_author}"
+
+
+def _stable_paper_id(
+    doi: str,
+    title: str,
+    file_hash: str,
+    authors: str = "",
+    publication_date: str = "",
+) -> str:
+    identity = (
+        normalize_doi(doi)
+        or _metadata_identity(title, authors, publication_date)
+        or file_hash
+    )
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16].upper()
     return f"PAPER_{digest}"
 
@@ -367,9 +403,11 @@ def _find_duplicate(
     doi: str,
     title: str,
     file_hash: str,
+    authors: str = "",
+    publication_date: str = "",
 ) -> Tuple[Optional[Dict[str, Any]], str, str]:
     normalized_doi = normalize_doi(doi)
-    normalized_title = normalize_title(title)
+    metadata_identity = _metadata_identity(title, authors, publication_date)
     # Exact file identity is stronger than metadata identity.  Checking it
     # first prevents a local PDF that already has Stage-2/3 state from being
     # attached to an older metadata-only DOI record.
@@ -381,10 +419,15 @@ def _find_duplicate(
         for row in records:
             if normalize_doi(row.get("doi", "")) == normalized_doi:
                 return row, "DOI_EXACT", normalized_doi
-    if normalized_title:
+    if metadata_identity:
         for row in records:
-            if normalize_title(row.get("title", "")) == normalized_title:
-                return row, "TITLE_EXACT", normalized_title
+            row_identity = _metadata_identity(
+                str(row.get("title") or ""),
+                str(row.get("authors") or ""),
+                str(row.get("publication_date") or ""),
+            )
+            if row_identity == metadata_identity:
+                return row, "TITLE_YEAR_AUTHOR_EXACT", metadata_identity
     return None, "", ""
 
 
@@ -457,7 +500,7 @@ def register_pdf_bytes(
 
     records = load_paper_manifest(base_dir)
     duplicate, match_level, match_value = _find_duplicate(
-        records, doi, title, file_hash
+        records, doi, title, file_hash, authors, publication_date
     )
     now = utc_now()
     semantic_candidates = semantic_duplicate_candidates(title, records)
@@ -534,7 +577,9 @@ def register_pdf_bytes(
                 duplicate_rows.append(duplicate_record)
                 _write_jsonl(paths["duplicate_records"], duplicate_rows)
     else:
-        paper_id = _stable_paper_id(doi, title, file_hash)
+        paper_id = _stable_paper_id(
+            doi, title, file_hash, authors, publication_date
+        )
         duplicate_status = (
             "POSSIBLE_DUPLICATE" if semantic_candidates else "UNIQUE"
         )
@@ -644,7 +689,12 @@ def register_metadata_record(
         metadata.get("file_hash_sha256") or metadata.get("file_hash") or ""
     )
     existing, match_level, match_value = _find_duplicate(
-        records, doi, title, file_hash
+        records,
+        doi,
+        title,
+        file_hash,
+        str(metadata.get("authors") or ""),
+        str(metadata.get("publication_date") or metadata.get("year") or ""),
     )
     now = utc_now()
     if existing:
@@ -713,7 +763,13 @@ def register_metadata_record(
             "match_level": match_level,
         }
 
-    paper_id = _stable_paper_id(doi, title, file_hash or source_record_id)
+    paper_id = _stable_paper_id(
+        doi,
+        title,
+        file_hash or source_record_id,
+        str(metadata.get("authors") or ""),
+        str(metadata.get("publication_date") or metadata.get("year") or ""),
+    )
     semantic_candidates = semantic_duplicate_candidates(title, records)
     record = PaperRecord(
         paper_id=paper_id,
