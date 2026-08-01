@@ -415,6 +415,7 @@ def register_pdf_bytes(
     source_path: str = "",
     source_type: str = "USER_UPLOAD",
     metadata_override: Optional[Dict[str, str]] = None,
+    canonical_path_override: Optional[Path] = None,
     base_dir: Path = BASE_DIR,
 ) -> Dict[str, Any]:
     """Validate, copy, deduplicate, and register one PDF without deep reading."""
@@ -441,7 +442,17 @@ def register_pdf_bytes(
     authors = metadata.get("authors", "")
     publication_date = metadata.get("publication_date", "")
     canonical_path = paths["canonical_pdf_dir"] / f"PDF_{file_hash[:20].upper()}.pdf"
-    if not canonical_path.exists():
+    if canonical_path_override is not None:
+        candidate = Path(canonical_path_override).resolve()
+        canonical_root = paths["canonical_pdf_dir"].resolve()
+        try:
+            candidate.relative_to(canonical_root)
+        except ValueError as exc:
+            raise ValueError("canonical_path_override must stay inside paper/pdfs") from exc
+        if not candidate.is_file() or sha256_file(candidate) != file_hash:
+            raise ValueError("canonical_path_override does not match the registered PDF")
+        canonical_path = candidate
+    elif not canonical_path.exists():
         canonical_path.write_bytes(content)
 
     records = load_paper_manifest(base_dir)
@@ -759,12 +770,20 @@ def register_pdf_path(
     metadata_override: Optional[Dict[str, str]] = None,
     base_dir: Path = BASE_DIR,
 ) -> Dict[str, Any]:
+    resolved_path = path.resolve()
+    canonical_root = ensure_stage1_dirs(base_dir)["canonical_pdf_dir"].resolve()
+    try:
+        resolved_path.relative_to(canonical_root)
+        canonical_path_override: Optional[Path] = resolved_path
+    except ValueError:
+        canonical_path_override = None
     return register_pdf_bytes(
-        path.read_bytes(),
-        path.name,
-        source_path=str(path.resolve()),
+        resolved_path.read_bytes(),
+        resolved_path.name,
+        source_path=str(resolved_path),
         source_type=source_type,
         metadata_override=metadata_override,
+        canonical_path_override=canonical_path_override,
         base_dir=base_dir,
     )
 
