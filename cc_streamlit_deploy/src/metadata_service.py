@@ -20,6 +20,12 @@ def is_valid_title(value: object) -> bool:
     lowered = title.lower()
     if lowered in PLACEHOLDER_TITLES or len(title) < 4:
         return False
+    if re.match(r"^(?:https?://)?(?:dx\.)?doi\.org/10\.", lowered):
+        return False
+    if re.fullmatch(r"(?:doi\s*:\s*)?10\.\d{4,9}/\S+", lowered):
+        return False
+    if lowered.startswith(("http://", "https://", "www.")):
+        return False
     if re.fullmatch(r"[a-z]{0,5}\d{5,}[a-z0-9._-]*", lowered):
         return False
     if lowered.startswith((

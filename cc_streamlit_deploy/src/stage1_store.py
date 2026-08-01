@@ -175,6 +175,12 @@ def _looks_like_scholarly_title(value: object) -> bool:
     lower = title.lower()
     if lower in {"", "nan", "none", "null", "unknown", "untitled"}:
         return False
+    if re.match(r"^(?:https?://)?(?:dx\.)?doi\.org/10\.", lower):
+        return False
+    if re.fullmatch(r"(?:doi\s*:\s*)?10\.\d{4,9}/\S+", lower):
+        return False
+    if lower.startswith(("http://", "https://", "www.")):
+        return False
     if re.fullmatch(r"[a-z]{0,5}\d{5,}[a-z0-9._-]*", lower):
         return False
     if lower.startswith((

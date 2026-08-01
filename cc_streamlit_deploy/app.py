@@ -753,12 +753,14 @@ def deep_read_all(
     states = Counter(str(task.get("status") or "PENDING") for task in built.get("tasks", []))
     completed = states["COMPLETED"]
     pending_unique = sum(
-        (
-            str(task.get("status") or "PENDING")
-            not in {"COMPLETED", "SKIPPED_DUPLICATE", "NEEDS_HUMAN_REVIEW"}
+        str(task.get("status") or "PENDING") == "PENDING"
+        or (
+            retry_failed
+            and str(task.get("status") or "") in {"FAILED_RETRYABLE", "PAUSED"}
         )
         or (
-            use_deepseek
+            not only_unread
+            and use_deepseek
             and str(task.get("status") or "") == "COMPLETED"
             and not bool(task.get("deepseek_enhancement_applied"))
         )

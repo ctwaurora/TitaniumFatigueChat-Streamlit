@@ -465,9 +465,11 @@ def run_full_library_queue(
     for snapshot in list(load_full_library_queue(base_dir).get("tasks") or []):
         task_id = snapshot["task_id"]
         task = next(row for row in load_full_library_queue(base_dir)["tasks"] if row["task_id"] == task_id)
+        if task["status"] == "COMPLETED" and only_unread:
+            continue
         if (
             task["status"] == "COMPLETED"
-            and (resume or only_unread)
+            and resume
             and (
                 not use_deepseek
                 or bool(task.get("deepseek_enhancement_applied"))
@@ -746,20 +748,31 @@ def audit_full_library_metadata(*, base_dir: Path = BASE_DIR) -> Dict[str, Any]:
 def generate_full_library_report(*, base_dir: Path = BASE_DIR) -> Dict[str, Any]:
     inventory = _read_json(queue_paths(base_dir)["inventory"], {})
     queue = load_full_library_queue(base_dir)
-    manifests = {str(row.get("paper_id") or ""): row for row in load_paper_manifest(base_dir)}
+    # Report the same canonical statuses shown by the library page. Raw Stage-1
+    # rows can retain an older FORMAL flag after metadata/scope validation has
+    # quarantined or downgraded the record.
+    from src.literature_library import canonical_library_records
+
+    manifests = {
+        str(row.get("paper_id") or ""): row
+        for row in canonical_library_records(base_dir)
+    }
     evidence = load_trusted_evidence_rows(base_dir)
     evidence_by_paper: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
     for row in evidence:
         evidence_by_paper[str(row.get("paper_id") or "")].append(row)
     details = []
     formula_count = visual_count = 0
+    artifact_paper_ids: set[str] = set()
     for task in queue.get("tasks") or []:
         paper_id = str(task.get("canonical_paper_id") or "")
         paper = manifests.get(paper_id) or {}
         status = _read_json(deep_read_paths(base_dir, paper_id)["status"], {}) if paper_id else {}
         extras = _postprocess_artifacts(base_dir, paper_id, str(paper.get("title") or task.get("canonical_title") or "")) if paper_id and status.get("deep_read_complete") else {"formula_count": 0, "visual_review_count": 0}
-        formula_count += extras["formula_count"]
-        visual_count += extras["visual_review_count"]
+        if paper_id and paper_id not in artifact_paper_ids:
+            formula_count += extras["formula_count"]
+            visual_count += extras["visual_review_count"]
+            artifact_paper_ids.add(paper_id)
         paper_evidence = evidence_by_paper.get(paper_id, [])
         directness = Counter(str(row.get("directness") or "") for row in paper_evidence)
         details.append({
@@ -810,12 +823,7 @@ def generate_full_library_report(*, base_dir: Path = BASE_DIR) -> Dict[str, Any]
                 (task.get("deepseek_usage") or {}).get("total_tokens") or 0
             ),
         })
-    directness_total = Counter()
-    for row in details:
-        directness_total["DIRECT"] += row["direct_count"]
-        directness_total["INDIRECT"] += row["indirect_count"]
-        directness_total["INFERRED"] += row["inferred_count"]
-        directness_total["MENTION_ONLY"] += row["mention_only_count"]
+    directness_total = Counter(str(row.get("directness") or "") for row in evidence)
     total_pages = sum(row["pages"] for row in details)
     completed_pages = sum(row["processed_pages"] if row["page_coverage_ratio"] == 1.0 else 0 for row in details)
     report = {
@@ -831,13 +839,22 @@ def generate_full_library_report(*, base_dir: Path = BASE_DIR) -> Dict[str, Any]
         "completed_paper_count": sum(row["page_coverage_ratio"] == 1.0 for row in details),
         "failed_paper_count": sum(row["task_status"] == "FAILED_RETRYABLE" for row in details),
         "needs_human_review_count": sum(row["task_status"] == "NEEDS_HUMAN_REVIEW" for row in details),
-        "evidence_record_count": sum(row["evidence_count"] for row in details),
+        "evidence_record_count": len(evidence),
         "direct_count": directness_total["DIRECT"], "indirect_count": directness_total["INDIRECT"],
         "inferred_count": directness_total["INFERRED"], "mention_only_count": directness_total["MENTION_ONLY"],
         "formula_record_count": formula_count, "needs_visual_review_count": visual_count,
-        "formal_paper_count": sum(row["library_status"] == "FORMAL" for row in details),
-        "indexed_paper_count": sum(row["rag_status"] == "INDEXED_STAGE3_UNIFIED" for row in details),
-        "out_of_scope_count": sum(row["domain_scope"] == OUT_OF_SCOPE for row in details),
+        "formal_paper_count": len({
+            row["canonical_paper_id"] for row in details
+            if row["canonical_paper_id"] and row["library_status"] == "FORMAL"
+        }),
+        "indexed_paper_count": len({
+            row["canonical_paper_id"] for row in details
+            if row["canonical_paper_id"] and row["rag_status"] == "INDEXED_STAGE3_UNIFIED"
+        }),
+        "out_of_scope_count": len({
+            row["canonical_paper_id"] for row in details
+            if row["canonical_paper_id"] and row["domain_scope"] == OUT_OF_SCOPE
+        }),
         "deepseek_enhanced_paper_count": sum(
             row["deepseek_enhancement_applied"] for row in details
         ),
