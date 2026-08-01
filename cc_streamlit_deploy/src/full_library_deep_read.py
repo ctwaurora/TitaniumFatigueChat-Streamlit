@@ -442,12 +442,18 @@ def run_full_library_queue(
     limit: Optional[int] = None,
     concurrency: int = 1,
     stop_after_pages: Optional[int] = None,
+    use_deepseek: bool = False,
+    deepseek_client: Optional[Any] = None,
 ) -> Dict[str, Any]:
     if concurrency not in {1, 2}:
         raise ValueError("concurrency must be 1 or 2")
     # Canonical manifest and unified RAG are atomically rewritten shared stores;
     # process tasks serially even when a future caller allows two extraction workers.
     built = build_full_library_queue(pdf_dir, base_dir=base_dir, resume=resume)
+    if use_deepseek and deepseek_client is None:
+        from src.deepseek_client import DeepSeekClient
+
+        deepseek_client = DeepSeekClient()
     set_queue_control("RUN", base_dir=base_dir)
     tasks = built["tasks"]
     if retry_failed:
@@ -459,7 +465,14 @@ def run_full_library_queue(
     for snapshot in list(load_full_library_queue(base_dir).get("tasks") or []):
         task_id = snapshot["task_id"]
         task = next(row for row in load_full_library_queue(base_dir)["tasks"] if row["task_id"] == task_id)
-        if task["status"] == "COMPLETED" and (resume or only_unread):
+        if (
+            task["status"] == "COMPLETED"
+            and (resume or only_unread)
+            and (
+                not use_deepseek
+                or bool(task.get("deepseek_enhancement_applied"))
+            )
+        ):
             continue
         if task["status"] == "SKIPPED_DUPLICATE":
             continue
@@ -548,6 +561,8 @@ def run_full_library_queue(
             result = deep_read_pdf(
                 Path(task["primary_pdf_path"]), paper_id=paper_id, title=title,
                 base_dir=base_dir, progress_callback=progress, should_stop=stop,
+                use_deepseek=use_deepseek,
+                deepseek_client=deepseek_client,
             )
             if result.get("status") == "INTERRUPTED":
                 _save_task(base_dir, task_id, status="PAUSED", processed_pages=result.get("processed_page_count", 0), last_error="CONTROLLED_INTERRUPTION")
@@ -557,7 +572,22 @@ def run_full_library_queue(
                 state = "FAILED_RETRYABLE" if retry < 3 else "NEEDS_HUMAN_REVIEW"
                 _save_task(base_dir, task_id, status=state, retry_count=retry, last_error=str(result.get("error") or "DEEP_READ_INCOMPLETE"))
                 continue
-            _save_task(base_dir, task_id, status="PAGE_EXTRACTION_COMPLETE", processed_pages=result.get("processed_page_count", 0))
+            _save_task(
+                base_dir,
+                task_id,
+                status="PAGE_EXTRACTION_COMPLETE",
+                processed_pages=result.get("processed_page_count", 0),
+                deepseek_enhancement_enabled=bool(
+                    result.get("deepseek_enhancement_enabled")
+                ),
+                deepseek_enhancement_applied=bool(
+                    result.get("deepseek_enhancement_applied")
+                ),
+                deepseek_enriched_record_count=int(
+                    result.get("deepseek_enriched_record_count") or 0
+                ),
+                deepseek_usage=dict(result.get("deepseek_usage") or {}),
+            )
             _save_task(base_dir, task_id, status="DEEP_READING")
             extras = _postprocess_artifacts(base_dir, paper_id, title)
             _save_task(base_dir, task_id, status="EVIDENCE_AUDITING", **extras)
@@ -599,7 +629,22 @@ def run_full_library_queue(
         if _control(base_dir) == "STOP_AFTER_CURRENT":
             break
     report = generate_full_library_report(base_dir=base_dir)
-    return {"processed_tasks": processed_tasks, "concurrency": concurrency, "report": report}
+    usage = (
+        deepseek_client.usage_snapshot()
+        if use_deepseek and deepseek_client is not None
+        else {
+            "api_call_count": 0, "success_count": 0, "failure_count": 0,
+            "retry_count": 0, "prompt_tokens": 0, "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+    )
+    return {
+        "processed_tasks": processed_tasks,
+        "concurrency": concurrency,
+        "deepseek_enabled": bool(use_deepseek),
+        "deepseek_usage": usage,
+        "report": report,
+    }
 
 
 def queue_summary(*, base_dir: Path = BASE_DIR) -> Dict[str, Any]:
@@ -734,6 +779,36 @@ def generate_full_library_report(*, base_dir: Path = BASE_DIR) -> Dict[str, Any]
             "task_status": task.get("status"), "failure_reason": task.get("last_error") or "",
             "elapsed_seconds": task.get("elapsed_seconds") or 0,
             "formula_count": extras["formula_count"], "visual_review_count": extras["visual_review_count"],
+            "deepseek_enhancement_enabled": bool(
+                task.get("deepseek_enhancement_enabled")
+            ),
+            "deepseek_enhancement_applied": bool(
+                task.get("deepseek_enhancement_applied")
+            ),
+            "deepseek_enriched_record_count": int(
+                task.get("deepseek_enriched_record_count") or 0
+            ),
+            "deepseek_api_call_count": int(
+                (task.get("deepseek_usage") or {}).get("api_call_count") or 0
+            ),
+            "deepseek_success_count": int(
+                (task.get("deepseek_usage") or {}).get("success_count") or 0
+            ),
+            "deepseek_failure_count": int(
+                (task.get("deepseek_usage") or {}).get("failure_count") or 0
+            ),
+            "deepseek_retry_count": int(
+                (task.get("deepseek_usage") or {}).get("retry_count") or 0
+            ),
+            "deepseek_prompt_tokens": int(
+                (task.get("deepseek_usage") or {}).get("prompt_tokens") or 0
+            ),
+            "deepseek_completion_tokens": int(
+                (task.get("deepseek_usage") or {}).get("completion_tokens") or 0
+            ),
+            "deepseek_total_tokens": int(
+                (task.get("deepseek_usage") or {}).get("total_tokens") or 0
+            ),
         })
     directness_total = Counter()
     for row in details:
@@ -763,6 +838,20 @@ def generate_full_library_report(*, base_dir: Path = BASE_DIR) -> Dict[str, Any]
         "formal_paper_count": sum(row["library_status"] == "FORMAL" for row in details),
         "indexed_paper_count": sum(row["rag_status"] == "INDEXED_STAGE3_UNIFIED" for row in details),
         "out_of_scope_count": sum(row["domain_scope"] == OUT_OF_SCOPE for row in details),
+        "deepseek_enhanced_paper_count": sum(
+            row["deepseek_enhancement_applied"] for row in details
+        ),
+        "deepseek_api_call_count": sum(
+            row["deepseek_api_call_count"] for row in details
+        ),
+        "deepseek_success_count": sum(row["deepseek_success_count"] for row in details),
+        "deepseek_failure_count": sum(row["deepseek_failure_count"] for row in details),
+        "deepseek_retry_count": sum(row["deepseek_retry_count"] for row in details),
+        "deepseek_prompt_tokens": sum(row["deepseek_prompt_tokens"] for row in details),
+        "deepseek_completion_tokens": sum(
+            row["deepseek_completion_tokens"] for row in details
+        ),
+        "deepseek_total_tokens": sum(row["deepseek_total_tokens"] for row in details),
         "papers": details,
     }
     outputs = base_dir / "outputs"

@@ -729,15 +729,54 @@ def deep_read_all(
     limit: int = typer.Option(None, "--limit", min=1),
     concurrency: int = typer.Option(1, "--concurrency", min=1, max=2),
     dry_run: bool = typer.Option(False, "--dry-run"),
+    use_deepseek: bool = typer.Option(
+        False,
+        "--use-deepseek",
+        help=(
+            "Enable real DeepSeek semantic enrichment for structure, evidence "
+            "relations, conditions, mechanisms, and formula context."
+        ),
+    ),
     stop_after_pages: int = typer.Option(None, "--stop-after-pages", min=1, hidden=True),
 ):
     """Deep-read every unique valid local PDF with durable page checkpoints."""
+    from collections import Counter
+
+    from src.api_keys import get_deepseek_settings
     from src.full_library_deep_read import build_full_library_queue, run_full_library_queue
 
+    settings = get_deepseek_settings(project_root=BASE_DIR)
+    built = build_full_library_queue(
+        pdf_dir, base_dir=BASE_DIR, resume=resume, dry_run=dry_run
+    )
+    inventory = built["inventory"]
+    states = Counter(str(task.get("status") or "PENDING") for task in built.get("tasks", []))
+    completed = states["COMPLETED"]
+    pending_unique = sum(
+        (
+            str(task.get("status") or "PENDING")
+            not in {"COMPLETED", "SKIPPED_DUPLICATE", "NEEDS_HUMAN_REVIEW"}
+        )
+        or (
+            use_deepseek
+            and str(task.get("status") or "") == "COMPLETED"
+            and not bool(task.get("deepseek_enhancement_applied"))
+        )
+        for task in built.get("tasks", [])
+    )
+    console.print_json(data={
+        "deepseek_key": "FOUND" if settings.configured else "MISSING",
+        "deepseek_config_source": settings.source,
+        "deepseek_enhancement_enabled": use_deepseek,
+        "pending_unique_papers": pending_unique,
+        "completed_papers": completed,
+        "duplicate_files_skipped": inventory["exact_duplicate_count"],
+    })
+    if use_deepseek and not settings.configured:
+        console.print("[red]--use-deepseek requires a detected DEEPSEEK_API_KEY.[/red]")
+        raise typer.Exit(code=2)
+
     if dry_run:
-        inventory = build_full_library_queue(
-            pdf_dir, base_dir=BASE_DIR, resume=resume, dry_run=True
-        )["inventory"]
         console.print_json(data={
             "dry_run": True,
             "pdf_file_count": inventory["pdf_file_count"],
@@ -751,6 +790,7 @@ def deep_read_all(
         pdf_dir, base_dir=BASE_DIR, resume=resume,
         retry_failed=retry_failed, only_unread=only_unread, limit=limit,
         concurrency=concurrency, stop_after_pages=stop_after_pages,
+        use_deepseek=use_deepseek,
     )
     report = result["report"]
     console.print_json(data={
@@ -764,8 +804,37 @@ def deep_read_all(
         "indexed_paper_count": report["indexed_paper_count"],
         "failed_paper_count": report["failed_paper_count"],
         "needs_human_review_count": report["needs_human_review_count"],
+        "deepseek_enhancement_enabled": result["deepseek_enabled"],
+        "deepseek_api_call_count": result["deepseek_usage"]["api_call_count"],
+        "deepseek_success_count": result["deepseek_usage"]["success_count"],
+        "deepseek_failure_count": result["deepseek_usage"]["failure_count"],
+        "deepseek_retry_count": result["deepseek_usage"]["retry_count"],
+        "deepseek_prompt_tokens": result["deepseek_usage"]["prompt_tokens"],
+        "deepseek_completion_tokens": result["deepseek_usage"]["completion_tokens"],
+        "deepseek_total_tokens": result["deepseek_usage"]["total_tokens"],
         "report": str((BASE_DIR / "outputs" / "full_library_deep_read_report.json").resolve()),
     })
+
+
+@app.command("config-check")
+def config_check():
+    """Diagnose DeepSeek configuration without printing any credential text."""
+    from src.api_keys import get_deepseek_settings
+    from src.deepseek_client import DeepSeekClient
+
+    settings = get_deepseek_settings(project_root=BASE_DIR)
+    ready = False
+    if settings.configured:
+        try:
+            DeepSeekClient(settings)
+            ready = True
+        except Exception:
+            ready = False
+    console.print(
+        f"DEEPSEEK_API_KEY: {'FOUND' if settings.configured else 'MISSING'}"
+    )
+    console.print(f"source: {settings.source}")
+    console.print(f"deepseek_client_ready: {str(ready).lower()}")
 
 
 # ── Health check ─────────────────────────────────────────────────────────
@@ -782,15 +851,12 @@ def check():
     console.print(f"  Python: {sys.version}")
 
     # DeepSeek API key
-    from src.api_keys import get_deepseek_api_key, get_deepseek_base_url, get_deepseek_model
+    from src.api_keys import get_deepseek_settings
 
-    key = get_deepseek_api_key()
-    if key:
-        console.print("  [OK] DeepSeek API Key: [green]已通过环境变量或 secrets 配置[/green]")
-    else:
-        console.print("  [WARN] DeepSeek API Key: [yellow]未配置 DEEPSEEK_API_KEY[/yellow]")
-    console.print(f"  DeepSeek endpoint: {get_deepseek_base_url()}")
-    console.print(f"  DeepSeek model: {get_deepseek_model()}")
+    settings = get_deepseek_settings(project_root=BASE_DIR)
+    detected = "已检测" if settings.configured else "未检测"
+    console.print(f"  DeepSeek配置: {detected}")
+    console.print(f"  配置来源: {settings.source}")
 
     # Dependencies
     deps = {"typer": "typer", "rich": "rich", "fitz": "PyMuPDF", "pandas": "pandas", "requests": "requests"}

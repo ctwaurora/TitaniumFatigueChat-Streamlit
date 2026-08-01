@@ -2323,12 +2323,14 @@ with st.sidebar:
     render_logout_control(st)
     deepseek_settings = get_deepseek_settings()
     if deepseek_settings.configured:
-        st.caption(f"DeepSeek: {deepseek_settings.model}")
+        st.caption("DeepSeek配置：已检测")
+        st.caption(f"配置来源：{deepseek_settings.source}")
     else:
         st.warning(
             "未配置 DEEPSEEK_API_KEY。文献浏览和本地规则功能可用，"
             "需要模型的功能将回退或不可用。"
         )
+        st.caption("配置来源：none")
     st.divider()
 
     # ── 普通前台导航 ──

@@ -1,4 +1,4 @@
-"""Minimal DeepSeek chat client with secret-safe errors."""
+"""Minimal DeepSeek chat client with secret-safe usage accounting."""
 
 from __future__ import annotations
 
@@ -22,13 +22,35 @@ class DeepSeekClient:
     def __init__(self, settings: Optional[DeepSeekSettings] = None):
         self.settings = settings or get_deepseek_settings()
         if not self.settings.api_key:
-            raise DeepSeekConfigurationError(
-                "未配置 DEEPSEEK_API_KEY，请在 Streamlit Secrets 或环境变量中设置。"
-            )
+            raise DeepSeekConfigurationError("DEEPSEEK_API_KEY is not configured.")
+        self._usage: Dict[str, int] = {
+            "api_call_count": 0,
+            "success_count": 0,
+            "failure_count": 0,
+            "retry_count": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+        }
+        self._direct_session = requests.Session()
+        self._direct_session.trust_env = False
+        self._bypass_broken_proxy = False
 
     @property
     def endpoint(self) -> str:
         return f"{self.settings.base_url.rstrip('/')}/chat/completions"
+
+    def usage_snapshot(self) -> Dict[str, int]:
+        """Return counters only; prompts, responses, and credentials are excluded."""
+        return dict(self._usage)
+
+    def _record_usage(self, payload: Any) -> None:
+        usage = payload if isinstance(payload, Mapping) else {}
+        for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+            try:
+                self._usage[key] += int(usage.get(key) or 0)
+            except (TypeError, ValueError):
+                continue
 
     def chat(
         self,
@@ -47,11 +69,19 @@ class DeepSeekClient:
             "max_tokens": max_tokens,
             "stream": False,
         }
-        response = None
+        response: Optional[requests.Response] = None
         last_error: Optional[BaseException] = None
-        for attempt in range(max(1, max_retries)):
+        bypass_broken_proxy = self._bypass_broken_proxy
+        attempts = max(1, max_retries)
+        for attempt in range(attempts):
+            if attempt:
+                self._usage["retry_count"] += 1
+            self._usage["api_call_count"] += 1
             try:
-                response = requests.post(
+                sender = (
+                    self._direct_session.post if bypass_broken_proxy else requests.post
+                )
+                response = sender(
                     self.endpoint,
                     headers={
                         "Authorization": f"Bearer {self.settings.api_key}",
@@ -68,22 +98,37 @@ class DeepSeekClient:
                     if retry_after.replace(".", "", 1).isdigit()
                     else 2 ** attempt
                 )
-                time.sleep(min(delay, 30.0))
+                if attempt + 1 < attempts:
+                    time.sleep(min(delay, 30.0))
+            except requests.exceptions.ProxyError as exc:
+                last_error = exc
+                response = None
+                bypass_broken_proxy = True
+                self._bypass_broken_proxy = True
+                if attempt + 1 < attempts:
+                    time.sleep(min(2 ** attempt, 30.0))
             except requests.RequestException as exc:
                 last_error = exc
-                if attempt + 1 >= max(1, max_retries):
-                    break
-                time.sleep(min(2 ** attempt, 30.0))
+                response = None
+                if attempt + 1 < attempts:
+                    time.sleep(min(2 ** attempt, 30.0))
+
         if response is None:
+            self._usage["failure_count"] += 1
             raise DeepSeekRequestError(
-                "DeepSeek API 请求失败，请检查网络和服务配置。"
+                "DeepSeek request failed; check network and service configuration."
             ) from last_error
         if response.status_code != 200:
+            self._usage["failure_count"] += 1
             raise DeepSeekRequestError(
-                f"DeepSeek API 返回状态码 {response.status_code}。"
+                f"DeepSeek API returned HTTP {response.status_code}."
             )
         try:
-            content = response.json()["choices"][0]["message"]["content"]
+            body = response.json()
+            content = body["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError, ValueError) as exc:
-            raise DeepSeekRequestError("DeepSeek API 返回了无法解析的响应。") from exc
+            self._usage["failure_count"] += 1
+            raise DeepSeekRequestError("DeepSeek API returned an invalid response.") from exc
+        self._record_usage(body.get("usage"))
+        self._usage["success_count"] += 1
         return str(content).strip()

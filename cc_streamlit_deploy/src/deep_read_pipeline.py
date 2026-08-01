@@ -302,6 +302,7 @@ def deep_read_paths(base_dir: Path, paper_id: str) -> Dict[str, Path]:
         "figures": root / "figure_captions.jsonl",
         "equations": root / "equations.jsonl",
         "audit": root / "audit_log.jsonl",
+        "semantic": root / "deepseek_semantic_enrichment.json",
         "status": root / "extraction_status.json",
         "page_checkpoint": root / "page_checkpoint.jsonl",
     }
@@ -1507,13 +1508,23 @@ def validate_evidence_provenance(
     return True
 
 
-def _load_cached_status(paths: Dict[str, Path], file_hash: str) -> Optional[Dict[str, Any]]:
+def _load_cached_status(
+    paths: Dict[str, Path], file_hash: str, *, require_deepseek: bool = False
+) -> Optional[Dict[str, Any]]:
     status = _read_json(paths["status"], {})
     required = ("pages", "windows", "sections", "scans", "audit")
     if (
         status.get("file_hash_sha256") == file_hash
         and status.get("pipeline_version") == PIPELINE_VERSION
         and status.get("deep_read_complete") is True
+        and (
+            not require_deepseek
+            or (
+                status.get("deepseek_enhancement_enabled") is True
+                and status.get("deepseek_enhancement_applied") is True
+                and paths["semantic"].exists()
+            )
+        )
         and all(paths[name].exists() for name in required)
     ):
         status["idempotent_reuse"] = True
@@ -1531,6 +1542,8 @@ def deep_read_pdf(
     checkpoint_path: Optional[Path] = None,
     progress_callback: Optional[Callable[[int, int, PageRecord], None]] = None,
     should_stop: Optional[Callable[[], bool]] = None,
+    use_deepseek: bool = False,
+    deepseek_client: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Run the complete Stage-2 loop for one real PDF."""
     source_path = Path(pdf_path).resolve()
@@ -1552,7 +1565,9 @@ def deep_read_pdf(
     file_hash = str(registered["file_hash_sha256"])
     paths = deep_read_paths(base_dir, paper_id)
     if not force:
-        cached = _load_cached_status(paths, file_hash)
+        cached = _load_cached_status(
+            paths, file_hash, require_deepseek=use_deepseek
+        )
         if cached:
             return cached
 
@@ -1595,6 +1610,28 @@ def deep_read_pdf(
     scans = run_variable_sweeps(pages, audit_complete=False)
     scans, audit_log = audit_full_paper_extraction(pages, scans)
     evidence = build_trusted_evidence(paper_id, title, total_pages, scans)
+    semantic_result: Dict[str, Any] = {
+        "enabled": bool(use_deepseek),
+        "applied": False,
+        "enriched_record_count": 0,
+        "semantic_success_count": 0,
+        "semantic_failure_count": 0,
+        "usage": {},
+    }
+    if use_deepseek:
+        if deepseek_client is None:
+            from src.deepseek_client import DeepSeekClient
+
+            deepseek_client = DeepSeekClient()
+        from src.deepseek_semantic_enrichment import enrich_evidence_with_deepseek
+
+        evidence, semantic_result = enrich_evidence_with_deepseek(
+            client=deepseek_client,
+            title=title,
+            pages=pages,
+            sections=sections,
+            evidence=evidence,
+        )
 
     real_page_count_valid = (
         total_pages == int(registered["real_page_count"])
@@ -1646,6 +1683,8 @@ def deep_read_pdf(
     _write_jsonl(paths["figures"], figures)
     _write_jsonl(paths["equations"], equations)
     _write_jsonl(paths["audit"], audit_log)
+    if use_deepseek:
+        _write_json(paths["semantic"], semantic_result)
     evidence_write = upsert_trusted_evidence(
         [record.to_dict() for record in evidence],
         paper_id=paper_id,
@@ -1714,6 +1753,18 @@ def deep_read_pdf(
         "variable_sweep_complete": variable_sweep_complete,
         "missing_audit_complete": missing_audit_complete,
         "evidence_provenance_valid": evidence_provenance_valid,
+        "deepseek_enhancement_enabled": bool(use_deepseek),
+        "deepseek_enhancement_applied": bool(semantic_result.get("applied")),
+        "deepseek_enriched_record_count": int(
+            semantic_result.get("enriched_record_count") or 0
+        ),
+        "deepseek_semantic_success_count": int(
+            semantic_result.get("semantic_success_count") or 0
+        ),
+        "deepseek_semantic_failure_count": int(
+            semantic_result.get("semantic_failure_count") or 0
+        ),
+        "deepseek_usage": dict(semantic_result.get("usage") or {}),
         "deep_read_complete": deep_read_complete,
         "page_record_path": str(paths["pages"].resolve()),
         "processed_at": _now(),
