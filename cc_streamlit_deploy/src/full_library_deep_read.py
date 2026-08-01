@@ -237,14 +237,11 @@ def refresh_terminal_states(*, base_dir: Path = BASE_DIR) -> Dict[str, int]:
             or status.get("deepseek_enhancement_applied")
             or int(status.get("deepseek_semantic_success_count") or 0) > 0
         )
-        current_status = str(task.get("status") or "PENDING")
-        normalized_status = current_status
-        if current_status in {"PENDING", "FAILED_RETRYABLE", "PAUSED"}:
-            normalized_status = (
-                "COMPLETED"
-                if final_state in {"FORMAL_INDEXED", "COMPLETE_NOT_INDEXED"}
-                else "NEEDS_HUMAN_REVIEW"
-            )
+        normalized_status = (
+            "COMPLETED"
+            if final_state in {"FORMAL_INDEXED", "COMPLETE_NOT_INDEXED"}
+            else "NEEDS_HUMAN_REVIEW"
+        )
         _save_task(
             base_dir,
             str(task.get("task_id") or ""),
