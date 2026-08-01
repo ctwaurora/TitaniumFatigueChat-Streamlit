@@ -451,16 +451,19 @@ def canonical_pdf_records(base_dir: Path = BASE_DIR) -> List[Dict[str, Any]]:
 def canonical_library_records(base_dir: Path = BASE_DIR) -> List[Dict[str, Any]]:
     """Build every library view from the single canonical paper manifest."""
     manifest = load_paper_manifest(base_dir)
-    pdf_by_id = {
-        str(row.get("paper_id") or ""): row
-        for row in canonical_pdf_records(base_dir)
-        if row.get("paper_id")
-    }
+    # The manifest already owns PDF/canonical identity.  Re-hashing every PDF
+    # just to render the first page made a cold library view take several
+    # seconds.  Only aggregate the trusted-evidence CSV here.
+    evidence_counts = Counter(
+        str(row.get("canonical_paper_id") or row.get("paper_id") or "")
+        for row in trusted_evidence_rows(base_dir)
+    )
     records: List[Dict[str, Any]] = []
     seen: set[str] = set()
     for source in manifest:
         paper_id = str(source.get("paper_id") or "")
-        row = {**source, **pdf_by_id.get(paper_id, {})}
+        row = dict(source)
+        row["evidence_count"] = evidence_counts.get(paper_id, 0)
         title = str(row.get("title") or "").strip()
         authors = " ".join(str(row.get("authors") or "").split())
         publication_date = str(
@@ -491,7 +494,7 @@ def canonical_library_records(base_dir: Path = BASE_DIR) -> List[Dict[str, Any]]
             and authors
             and authors.lower() not in {"nan", "none", "unknown"}
             and year
-            and (doi or trusted_url)
+            and (doi or trusted_url or row.get("doi_status") == "NOT_AVAILABLE_VERIFIED")
             and metadata_source
         )
         library_status = str(row.get("library_status") or "CANDIDATE")
@@ -505,7 +508,9 @@ def canonical_library_records(base_dir: Path = BASE_DIR) -> List[Dict[str, Any]]
             and row.get("rag_status") == "INDEXED_STAGE3_UNIFIED"
             and scope["domain_scope"] != OUT_OF_SCOPE
         )
-        if (
+        if row.get("duplicate_status") == "RELATED_VERSION":
+            library_status = "COMPLETE_NOT_INDEXED"
+        elif (
             (not metadata_valid and not formal_ready)
             or row.get("duplicate_status") not in {
             "", "UNIQUE", None
@@ -558,7 +563,7 @@ def canonical_library_records(base_dir: Path = BASE_DIR) -> List[Dict[str, Any]]
                 "evidence_count": int(row.get("evidence_count") or 0),
                 "rag_status": str(row.get("rag_status") or "NOT_INDEXED"),
                 "selectable": bool(
-                    library_status == "FORMAL" and row.get("selectable")
+                    library_status == "FORMAL" and formal_ready
                 ),
                 "type_code": str(row.get("paper_type_primary") or "other"),
             }
@@ -574,19 +579,24 @@ def canonical_library_records(base_dir: Path = BASE_DIR) -> List[Dict[str, Any]]
 
 
 def library_statistics(base_dir: Path = BASE_DIR) -> Dict[str, int]:
+    from src.corpus_statistics import statistics_counts
+
     records = canonical_library_records(base_dir)
+    corpus = statistics_counts(base_dir)
     result = {
-        "unique_literature": sum(
-            row.get("library_status") != QUARANTINED for row in records
-        ),
+        "unique_literature": corpus["acquired_logical_literature_count"],
+        "canonical_paper_records": corpus["canonical_paper_record_count"],
+        "pdf_files": corpus["pdf_file_count"],
+        "unique_pdf_sha256": corpus["unique_pdf_sha256_count"],
+        "pdf_assets": corpus["pdf_asset_count"],
+        "related_versions": corpus["related_version_count"],
         "candidate_metadata": sum(
             row.get("library_status") not in {"FORMAL", QUARANTINED}
             for row in records
         ),
-        "pdf_acquired": sum(bool(row.get("pdf_valid")) for row in records),
-        "deep_read_complete": sum(
-            bool(row.get("deep_read_complete")) for row in records
-        ),
+        "pdf_acquired": corpus["pdf_valid_logical_count"],
+        "pdf_not_acquired": corpus["pdf_not_acquired_count"],
+        "deep_read_complete": corpus["deep_read_complete_count"],
         "evidence_pending": sum(
             bool(row.get("evidence_count"))
             and row.get("evidence_status")
@@ -597,14 +607,8 @@ def library_statistics(base_dir: Path = BASE_DIR) -> Dict[str, int]:
             row.get("evidence_status") in {"AUTO_VALIDATED", HUMAN_CONFIRMED}
             for row in records
         ),
-        "rag_indexed": sum(
-            row.get("rag_status") == "INDEXED_STAGE3_UNIFIED"
-            for row in records
-        ),
-        "pending_or_failed": sum(
-            row.get("library_status") not in {"FORMAL", "ARCHIVED"}
-            for row in records
-        ),
+        "rag_indexed": corpus["rag_paper_count"],
+        "pending_or_failed": corpus["pending_or_failed_acquired_count"],
         "invalid_metadata": sum(
             row.get("library_status") == QUARANTINED for row in records
         ),

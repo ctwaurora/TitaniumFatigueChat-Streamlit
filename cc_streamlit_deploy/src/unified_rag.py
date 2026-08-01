@@ -8,10 +8,12 @@ are retained, but are never loaded by this module.
 from __future__ import annotations
 
 import csv
+import functools
 import hashlib
 import json
 import math
 import re
+import sqlite3
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass
@@ -31,6 +33,7 @@ from src.stage1_store import BASE_DIR, load_paper_manifest, update_paper_rag_sta
 RAG_SCHEMA_VERSION = "stage3.0"
 ALLOWED_DIRECTNESS = {"DIRECT", "INDIRECT", "MENTION_ONLY", "INFERRED"}
 FORBIDDEN_REVIEW = {"QUARANTINED_TITLE_DERIVED"}
+REFERENCE_SECTION_NAMES = {"reference", "references", "bibliography"}
 INDEX_FILES = {
     "page": "page_documents.jsonl",
     "section": "section_documents.jsonl",
@@ -40,16 +43,31 @@ INDEX_FILES = {
 }
 
 CONDITION_FIELDS = (
-    "material",
-    "process",
-    "surface_state",
-    "heat_treatment",
-    "stress_ratio_R",
-    "fatigue_regime",
-    "temperature",
-    "sample_geometry",
-    "testing_method",
-    "characterization_method",
+    "alloy_grade", "manufacturing_process", "build_orientation", "layer_thickness",
+    "laser_power", "scan_speed", "energy_density", "relative_density", "heat_treatment",
+    "hip", "surface_treatment", "defect_type", "defect_size", "defect_morphology",
+    "defect_distance_to_surface", "porosity", "defect_location", "defect_distribution",
+    "stress_amplitude", "maximum_stress", "stress_ratio_R", "frequency", "cycle_count",
+    "fatigue_regime", "loading_mode", "environment", "temperature", "specimen_geometry",
+    "surface_roughness", "ct_resolution", "sem", "ebsd", "crack_detection_method",
+    "fatigue_life", "fatigue_limit", "crack_initiation_location", "da_dN", "delta_K",
+    "fracture_mechanism", "mechanism_dominance_direction",
+)
+
+# Coverage is measured over ten scientific condition families rather than all
+# optional schema fields. A record can satisfy a family through a legacy alias
+# or its canonical ConditionEvidenceRecord name.
+SUFFICIENCY_CONDITION_GROUPS = (
+    ("alloy_grade", "material"),
+    ("manufacturing_process", "process"),
+    ("surface_treatment", "surface_state", "surface_roughness"),
+    ("heat_treatment", "hip"),
+    ("stress_ratio_R",),
+    ("fatigue_regime",),
+    ("temperature",),
+    ("specimen_geometry", "sample_geometry"),
+    ("loading_mode", "testing_method"),
+    ("sem", "ebsd", "ct_resolution", "characterization_method"),
 )
 
 QUERY_EXPANSIONS = {
@@ -102,6 +120,9 @@ def rag_paths(base_dir: Path = BASE_DIR) -> Dict[str, Path]:
         "status": root / "index_status.json",
         "bm25_dir": root / "bm25",
         "bm25": root / "bm25" / "index.json",
+        "bm25_cache": root / "bm25" / "index.joblib",
+        "document_cache": root / "search_documents.joblib",
+        "document_lookup": root / "search_documents.sqlite3",
         "vector_dir": root / "vector",
         "vector_model": root / "vector" / "model.joblib",
         "vector_embeddings": root / "vector" / "embeddings.npy",
@@ -133,14 +154,15 @@ def _atomic_jsonl(path: Path, rows: Iterable[Dict[str, Any]]) -> None:
 
 def _replace_with_windows_retry(temp: Path, target: Path) -> None:
     """Tolerate short-lived antivirus/indexer handles on Windows."""
-    for attempt in range(8):
+    attempts = 20
+    for attempt in range(attempts):
         try:
             temp.replace(target)
             return
         except PermissionError:
-            if attempt == 7:
+            if attempt == attempts - 1:
                 raise
-            time.sleep(0.08 * (attempt + 1))
+            time.sleep(min(0.15 * (attempt + 1), 1.0))
 
 
 def _read_json(path: Path, default: Any) -> Any:
@@ -167,6 +189,20 @@ def _read_jsonl(path: Path) -> List[Dict[str, Any]]:
 
 def _norm(text: str) -> str:
     return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def _is_reference_page(page: Dict[str, Any]) -> bool:
+    """Return True only for pages classified wholly as a reference list."""
+    section = str(page.get("section_title") or "").strip().casefold()
+    page_type = str(page.get("page_type") or "").strip().casefold()
+    return section in REFERENCE_SECTION_NAMES or page_type in REFERENCE_SECTION_NAMES
+
+
+def _trim_reference_tail(text: str) -> str:
+    """Keep body text before a standalone References heading on a mixed page."""
+    clean = str(text or "")
+    match = re.search(r"(?im)^\s*references\s*$", clean)
+    return clean[: match.start()].rstrip() if match else clean
 
 
 def _norm_key(text: str) -> str:
@@ -407,14 +443,25 @@ def _build_documents(
         )
         page_by_number = {int(row["page_number"]): row for row in pages}
         accepted_papers.append(paper_id)
+        retrievable_pages: List[Dict[str, Any]] = []
         for page in pages:
+            if _is_reference_page(page):
+                excluded["reference_page_not_retrievable"] += 1
+                continue
+            retrievable_text = _trim_reference_tail(page.get("cleaned_text") or "")
+            if not _norm(retrievable_text):
+                excluded["empty_page_after_reference_trim"] += 1
+                continue
+            retrievable_page = dict(page)
+            retrievable_page["cleaned_text"] = retrievable_text
+            retrievable_pages.append(retrievable_page)
             page_number = int(page["page_number"])
             output["page"].append(
                 _doc(
                     doc_id=f"PAGE_{paper_id}_{page_number:04d}",
                     index_type="page",
                     paper=paper,
-                    text=page.get("cleaned_text") or "",
+                    text=retrievable_text,
                     page_number=page_number,
                     section=page.get("section_title") or "",
                     directness="",
@@ -424,7 +471,7 @@ def _build_documents(
                 )
             )
         grouped: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
-        for page in pages:
+        for page in retrievable_pages:
             grouped[str(page.get("section_title") or "unclassified")].append(page)
         for section, section_pages in grouped.items():
             text = "\n\n".join(str(row.get("cleaned_text") or "") for row in section_pages)
@@ -490,7 +537,10 @@ def _build_documents(
                 source_method=str(row.get("source_method") or ""),
             )
             output["evidence"].append(evidence_doc)
-            if any(evidence_doc["experimental_conditions"].values()):
+            if any(
+                value not in (None, "", [], {}, "NOT_REPORTED")
+                for value in evidence_doc["experimental_conditions"].values()
+            ):
                 condition_doc = dict(evidence_doc)
                 condition_doc["doc_id"] = f"COND_{evidence_doc['doc_id']}"
                 condition_doc["index_type"] = "condition"
@@ -499,6 +549,9 @@ def _build_documents(
             page_number = int(equation.get("page_number") or 0)
             if page_number not in page_by_number:
                 excluded["formula_bad_page"] += 1
+                continue
+            if _is_reference_page(page_by_number[page_number]):
+                excluded["formula_on_reference_page"] += 1
                 continue
             text = _norm(equation.get("original_text") or "")
             if not text:
@@ -555,6 +608,7 @@ def _build_bm25(documents: Sequence[Dict[str, Any]], path: Path) -> None:
         "b": 0.75,
     }
     _atomic_json(path, payload)
+    joblib.dump(payload, path.with_suffix(".joblib"), compress=0)
 
 
 def _build_vector(documents: Sequence[Dict[str, Any]], paths: Dict[str, Path]) -> None:
@@ -588,6 +642,23 @@ def _build_vector(documents: Sequence[Dict[str, Any]], paths: Dict[str, Path]) -
     _atomic_json(paths["vector_ids"], [doc["doc_id"] for doc in documents])
 
 
+def _build_document_lookup(documents: Sequence[Dict[str, Any]], path: Path) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    if temporary.exists():
+        temporary.unlink()
+    connection = sqlite3.connect(temporary)
+    try:
+        connection.execute("CREATE TABLE documents (doc_id TEXT PRIMARY KEY, payload TEXT NOT NULL)")
+        connection.executemany(
+            "INSERT INTO documents(doc_id, payload) VALUES (?, ?)",
+            ((str(row["doc_id"]), json.dumps(row, ensure_ascii=False)) for row in documents),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    _replace_with_windows_retry(temporary, path)
+
+
 def build_unified_rag(
     paper_ids: Sequence[str],
     *,
@@ -602,6 +673,8 @@ def build_unified_rag(
     all_documents = [
         row for index_type in INDEX_FILES for row in documents[index_type]
     ]
+    joblib.dump(all_documents, paths["document_cache"], compress=0)
+    _build_document_lookup(all_documents, paths["document_lookup"])
     _build_bm25(all_documents, paths["bm25"])
     _build_vector(all_documents, paths)
     counts = {key: len(value) for key, value in documents.items()}
@@ -614,6 +687,9 @@ def build_unified_rag(
         },
         "paper_ids": build_info["accepted_paper_ids"],
         "document_counts": counts,
+        "corpus_statistics_source": str(
+            (base_dir / "data" / "system" / "corpus_statistics.json").resolve()
+        ),
         "legacy_sources": _legacy_inventory(base_dir),
         "legacy_direct_access_allowed": False,
         "built_at": _now(),
@@ -646,6 +722,15 @@ def load_unified_documents(base_dir: Path = BASE_DIR) -> List[Dict[str, Any]]:
         or manifest.get("legacy_direct_access_allowed") is not False
     ):
         raise RuntimeError("Stage-3 unified RAG manifest is missing or invalid")
+    version = str(manifest.get("built_at") or paths["manifest"].stat().st_mtime_ns)
+    return _load_unified_documents_cached(str(Path(base_dir).resolve()), version)
+
+
+@functools.lru_cache(maxsize=4)
+def _load_unified_documents_cached(base_dir_text: str, version: str) -> List[Dict[str, Any]]:
+    paths = rag_paths(Path(base_dir_text))
+    if paths["document_cache"].exists():
+        return joblib.load(paths["document_cache"])
     return [
         row
         for index_type in INDEX_FILES
@@ -653,8 +738,51 @@ def load_unified_documents(base_dir: Path = BASE_DIR) -> List[Dict[str, Any]]:
     ]
 
 
+@functools.lru_cache(maxsize=4)
+def _load_bm25_cached(base_dir_text: str, version: str) -> Dict[str, Any]:
+    paths = rag_paths(Path(base_dir_text))
+    if paths["bm25_cache"].exists():
+        return joblib.load(paths["bm25_cache"])
+    return _read_json(paths["bm25"], {})
+
+
+@functools.lru_cache(maxsize=4)
+def _load_vector_cached(base_dir_text: str, version: str) -> Tuple[Any, np.ndarray, List[str]]:
+    paths = rag_paths(Path(base_dir_text))
+    return (
+        joblib.load(paths["vector_model"]),
+        np.load(paths["vector_embeddings"]),
+        _read_json(paths["vector_ids"], []),
+    )
+
+
+def _rag_version(base_dir: Path) -> str:
+    manifest = _read_json(rag_paths(base_dir)["manifest"], {})
+    return str(manifest.get("built_at") or "missing")
+
+
+def _load_documents_by_ids(base_dir: Path, document_ids: Sequence[str]) -> List[Dict[str, Any]]:
+    wanted = list(dict.fromkeys(str(value) for value in document_ids if value))
+    lookup = rag_paths(base_dir)["document_lookup"]
+    if not wanted or not lookup.exists():
+        return [row for row in load_unified_documents(base_dir) if row.get("doc_id") in set(wanted)]
+    rows: List[Dict[str, Any]] = []
+    with sqlite3.connect(f"file:{lookup}?mode=ro", uri=True) as connection:
+        for start in range(0, len(wanted), 500):
+            chunk = wanted[start : start + 500]
+            placeholders = ",".join("?" for _ in chunk)
+            for payload, in connection.execute(
+                f"SELECT payload FROM documents WHERE doc_id IN ({placeholders})", chunk
+            ):
+                try:
+                    rows.append(json.loads(payload))
+                except json.JSONDecodeError:
+                    continue
+    return rows
+
+
 def _bm25_scores(query: str, base_dir: Path) -> Dict[str, float]:
-    payload = _read_json(rag_paths(base_dir)["bm25"], {})
+    payload = _load_bm25_cached(str(Path(base_dir).resolve()), _rag_version(base_dir))
     terms = _tokens(expand_question(query))
     n_docs = len(payload.get("document_ids") or [])
     avgdl = float(payload.get("average_document_length") or 1.0)
@@ -682,10 +810,9 @@ def _bm25_scores(query: str, base_dir: Path) -> Dict[str, float]:
 
 
 def _vector_scores(query: str, base_dir: Path) -> Dict[str, float]:
-    paths = rag_paths(base_dir)
-    model = joblib.load(paths["vector_model"])
-    embeddings = np.load(paths["vector_embeddings"])
-    ids = _read_json(paths["vector_ids"], [])
+    model, embeddings, ids = _load_vector_cached(
+        str(Path(base_dir).resolve()), _rag_version(base_dir)
+    )
     sparse = model["vectorizer"].transform([expand_question(query)])
     dense = model["svd"].transform(sparse) if model["svd"] is not None else sparse.toarray()
     dense = model["normalizer"].transform(dense)
@@ -738,9 +865,23 @@ def retrieve_research_evidence(
     *,
     base_dir: Path = BASE_DIR,
 ) -> Dict[str, Any]:
-    documents = load_unified_documents(base_dir)
-    bm25 = _bm25_scores(question, base_dir)
-    vector = _vector_scores(question, base_dir)
+    started = time.perf_counter()
+    errors = []
+    try:
+        bm25 = _bm25_scores(question, base_dir)
+        bm25_executed = True
+    except Exception as exc:
+        bm25, bm25_executed = {}, False
+        errors.append(f"BM25:{type(exc).__name__}:{exc}")
+    try:
+        vector = _vector_scores(question, base_dir)
+        vector_executed = True
+    except Exception as exc:
+        vector, vector_executed = {}, False
+        errors.append(f"VECTOR:{type(exc).__name__}:{exc}")
+    candidate_ids = [key for key, _ in sorted(bm25.items(), key=lambda item: item[1], reverse=True)[:1000]]
+    candidate_ids.extend(key for key, _ in sorted(vector.items(), key=lambda item: item[1], reverse=True)[:1000])
+    documents = _load_documents_by_ids(base_dir, candidate_ids)
     max_bm25 = max(bm25.values(), default=1.0)
     variables = list(required_variables or identify_variables(question))
     candidates = []
@@ -806,11 +947,15 @@ def retrieve_research_evidence(
         "task_type": task_type,
         "required_variables": variables,
         "condition_filters": condition_filters or {},
-        "bm25_executed": True,
-        "vector_executed": True,
+        "bm25_executed": bm25_executed,
+        "vector_executed": vector_executed,
         "metadata_filter_executed": True,
         "reranker_executed": True,
         "duplicate_removed": removed,
+        "retrieved_paper_count": len({row.get("paper_id") for row in results if row.get("paper_id")}),
+        "elapsed_seconds": round(time.perf_counter() - started, 4),
+        "errors": errors,
+        "degraded_mode": "BM25_ONLY" if bm25_executed and not vector_executed else "VECTOR_ONLY" if vector_executed and not bm25_executed else "NONE",
         "results": results,
     }
 
@@ -939,12 +1084,16 @@ def evaluate_evidence_sufficiency(
         key
         for row in all_rows
         for key, value in (row.get("experimental_conditions") or {}).items()
-        if value
+        if value not in (None, "", [], {}, "NOT_REPORTED")
     }
     variable_coverage = (
         len(covered_vars) / len(set(required_variables)) if required_variables else 1.0
     )
-    condition_coverage = len(condition_fields) / len(CONDITION_FIELDS)
+    covered_condition_groups = sum(
+        any(alias in condition_fields for alias in aliases)
+        for aliases in SUFFICIENCY_CONDITION_GROUPS
+    )
+    condition_coverage = covered_condition_groups / len(SUFFICIENCY_CONDITION_GROUPS)
     page_traceability = traced / len(all_rows) if all_rows else 0.0
     direct_rate = direct / len(all_rows) if all_rows else 0.0
     duplicate_rate = duplicate_removed / (len(all_rows) + duplicate_removed) if (all_rows or duplicate_removed) else 0.0
@@ -1037,6 +1186,10 @@ def answer_research_question(
                 "vector_executed",
                 "metadata_filter_executed",
                 "reranker_executed",
+                "elapsed_seconds",
+                "errors",
+                "degraded_mode",
+                "retrieved_paper_count",
             )
         },
     }

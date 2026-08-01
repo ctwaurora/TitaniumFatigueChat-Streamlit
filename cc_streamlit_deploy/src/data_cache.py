@@ -321,55 +321,33 @@ def build_pdf_duplicate_inventory(base_dir: Path = BASE_DIR) -> Dict[str, Any]:
 
 
 def get_canonical_literature_counts(base_dir: Path = BASE_DIR) -> Dict[str, Any]:
-    inventory = build_pdf_duplicate_inventory(base_dir)
-    groups = inventory["groups"]
-    deep_read_ids = set()
-    deep_root = base_dir / "data" / "deep_read"
-    if deep_root.exists():
-        for status_path in deep_root.glob("*/extraction_status.json"):
-            status = _read_json(status_path)
-            if status.get("deep_read_complete") and status.get("paper_id"):
-                deep_read_ids.add(str(status["paper_id"]))
-    rag_manifest = _read_json(base_dir / "data" / "rag" / "manifest.json")
-    indexed_ids = {
-        str(value) for value in rag_manifest.get("paper_ids") or [] if value
-    }
-    # Each status layer already uses canonical paper_id and must not be
-    # down-counted merely because older manifest rows lack a file hash.
-    completed_count = len(deep_read_ids)
-    indexed_count = len(indexed_ids)
-    fully_processed_count = len(deep_read_ids & indexed_ids)
-    pending_count = max(
-        0, int(inventory["unique_literature_count"]) - fully_processed_count
-    )
+    from src.corpus_statistics import read_corpus_statistics_snapshot
+
+    snapshot = read_corpus_statistics_snapshot(base_dir)
+    counts = dict(snapshot.get("counts") or {})
     return {
-        **{
-            key: value
-            for key, value in inventory.items()
-            if key not in {"groups", "hash_to_group"}
-        },
-        "deep_read_complete_count": completed_count,
-        "indexed_count": indexed_count,
-        "pending_or_failed_count": pending_count,
+        "local_pdf_file_count": counts["pdf_file_count"],
+        "unique_pdf_sha256_count": counts["unique_pdf_sha256_count"],
+        # Backward-compatible field now has one precise meaning: acquired
+        # logical works after version grouping, never physical files or SHA.
+        "unique_literature_count": counts["acquired_logical_literature_count"],
+        "duplicate_pdf_count": counts["duplicate_pdf_file_count"],
+        "pdf_asset_count": counts["pdf_asset_count"],
+        "canonical_paper_record_count": counts["canonical_paper_record_count"],
+        "related_version_count": counts["related_version_count"],
+        "deep_read_complete_count": counts["deep_read_complete_count"],
+        "indexed_count": counts["rag_paper_count"],
+        "pending_or_failed_count": counts["pending_or_failed_acquired_count"],
+        "duplicate_relationships": list(
+            (snapshot.get("validation") or {}).get("duplicate_pdf_relationships") or []
+        ),
     }
 
 
 def _stats_signature(base_dir: Path = BASE_DIR) -> str:
-    paths = [
-        base_dir / "data" / "paper_manifest.jsonl",
-        base_dir / "data" / "rag" / "manifest.json",
-        base_dir / "data" / "evidence" / "trusted_evidence.csv",
-    ]
-    for root in (
-        base_dir / "paper" / "pdfs",
-        base_dir / "papers",
-        base_dir / "early_papers",
-        base_dir / "followup_papers",
-        base_dir / "data" / "deep_read",
-    ):
-        if root.exists():
-            paths.extend(root.rglob("*.pdf"))
-            paths.extend(root.glob("*/extraction_status.json"))
+    # Constant-time cache key: expensive crawls are reserved for explicit
+    # refresh commands that rewrite this durable snapshot.
+    paths = [base_dir / "data" / "system" / "corpus_statistics.json"]
     payload = []
     for path in paths:
         try:
@@ -383,30 +361,44 @@ def _stats_signature(base_dir: Path = BASE_DIR) -> str:
 @st.cache_data
 def _get_system_stats_cached(signature: str) -> Dict[str, Any]:
     """Read canonical literature counts; signature invalidates cross-process writes."""
-    lit = load_literature_database()
-    candidates = load_candidate_papers()
-    evidence = load_evidence_snippets()
-    vr = load_variable_relations()
-    hyp = load_hypothesis_dataset()
-    gaps = load_research_gap_dataset()
-    bm = load_benchmark_results()
-    eq = load_equation_library()
-
     canonical = get_canonical_literature_counts(BASE_DIR)
     return {
         # Backward-compatible name now points to canonical unique literature.
         "n_papers": canonical["unique_literature_count"],
         **canonical,
-        "legacy_csv_row_count": len(lit),
-        "n_candidates": len(candidates),
-        "ev_count": len(evidence),
-        "vm_count": len(vr),
-        "hypothesis_count": len(hyp),
-        "gap_count": len(gaps),
-        "benchmark_count": len(bm),
-        "equation_count": len(eq),
-        "primary_count": sum(1 for _, r in lit.iterrows() if str(r.get("paper_type_primary", "")).strip()),
+        "legacy_csv_row_count": 0,
+        "n_candidates": 0,
+        "ev_count": 0,
+        "vm_count": 0,
+        "hypothesis_count": 0,
+        "gap_count": 0,
+        "benchmark_count": 0,
+        "equation_count": 0,
+        "primary_count": 0,
     }
+
+
+def _file_version(*paths: Path) -> str:
+    payload = []
+    for path in paths:
+        try:
+            stat = path.stat(); payload.append(f"{path}:{stat.st_size}:{stat.st_mtime_ns}")
+        except OSError:
+            payload.append(f"{path}:missing")
+    return hashlib.sha256("|".join(payload).encode()).hexdigest()
+
+
+def literature_formula_version(base_dir: Path = BASE_DIR) -> str:
+    snapshot = base_dir / "data/system/corpus_statistics.json"
+    manifest = base_dir / "data/paper_manifest.jsonl"
+    return _file_version(snapshot, manifest)
+
+
+@st.cache_data(show_spinner="加载公式索引…")
+def load_literature_formulas_cached(base_dir_text: str, dataset_version: str):
+    from src.literature_formula_library import load_literature_formulas
+
+    return load_literature_formulas(Path(base_dir_text))
 
 
 def get_system_stats_cached() -> Dict[str, Any]:

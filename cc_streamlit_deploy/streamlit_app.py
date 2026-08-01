@@ -2084,9 +2084,13 @@ def generate_comprehensive_answer(
     if answer_mode == "popular_science":
         answer = generate_popular_science_answer(question, ind_var, dep_var, var_class)
     else:
-        # 页面优先路由
-        from src.page_answers import generate_page_answer
-        answer = generate_page_answer(question, page_context=answer_mode)
+        # Expensive retrieval/LLM work occurs only after the user clicks the
+        # analysis button.  Local evidence remains visible if vector or LLM
+        # services are unavailable.
+        from src.smart_search import run_smart_search
+        smart_result = run_smart_search(question, base_dir=BASE_DIR, use_llm=True)
+        st.session_state["smart_search_result"] = smart_result
+        answer = smart_result["answer"]
 
     # ── Step 4-8: 无需额外追加 ──
     if depth != "paper_level":
@@ -3195,7 +3199,6 @@ elif current_page == "formula_explain":
         formula_summary,
         formula_to_table_row,
         filter_literature_formulas,
-        load_literature_formulas,
         load_system_model_registry,
     )
 
@@ -3206,7 +3209,10 @@ elif current_page == "formula_explain":
     )
     st.divider()
 
-    literature_formulas = load_literature_formulas(BASE_DIR)
+    from src.data_cache import load_literature_formulas_cached, literature_formula_version
+    literature_formulas = load_literature_formulas_cached(
+        str(BASE_DIR), literature_formula_version(BASE_DIR)
+    )
     paper_options = {
         f"{row['paper_title']} [{row['paper_id']}]": row["paper_id"]
         for row in literature_formulas

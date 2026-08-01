@@ -45,6 +45,7 @@ from src.literature_library import (
     valid_candidate_records,
 )
 from src.storage_adapter import CLOUD_TEMPORARY, detect_storage_backend
+from src.library_management import reconcile_persistent_selection
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -68,7 +69,7 @@ def paper_type_cn(code: str) -> str:
     return PAPER_TYPE_CN.get(str(code or ""), str(code or "") or "待分类")
 
 
-@st.fragment(run_every=5.0)
+@st.fragment
 def _render_full_read_status(base_dir: Path) -> None:
     from src.full_library_deep_read import queue_summary
 
@@ -773,6 +774,21 @@ def _normal_library_rows(base_dir: Path) -> List[Dict[str, Any]]:
     ]
 
 
+def _library_dataset_version(base_dir: Path) -> str:
+    values = []
+    for path in (base_dir / "data/paper_manifest.jsonl", base_dir / "data/stage3_5/candidate_metadata.jsonl"):
+        try:
+            stat = path.stat(); values.append(f"{stat.st_size}:{stat.st_mtime_ns}")
+        except OSError:
+            values.append("missing")
+    return hashlib.sha256("|".join(values).encode()).hexdigest()
+
+
+@st.cache_data(show_spinner="加载文献摘要…")
+def _normal_library_rows_cached(base_dir_text: str, dataset_version: str) -> List[Dict[str, Any]]:
+    return _normal_library_rows(Path(base_dir_text))
+
+
 def _render_evidence_table(evidence: Sequence[Dict[str, Any]]) -> None:
     if not evidence:
         st.info("该文献暂无可信 EvidenceRecord。")
@@ -995,6 +1011,71 @@ def render_batch_operations(
             "以下记录已自动排除：" + json.dumps(gate["rejected"], ensure_ascii=False)
         )
     st.markdown(f"**已选 {len(selected_ids)} 条；科研操作可用 {len(eligible)} 篇。**")
+    from src.library_management import (
+        add_to_formal, archive as archive_records, audit_selected_evidence,
+        export_records, rebuild_current_formal_rag, remove_from_formal, set_scope,
+    )
+    operation_reason = st.text_input(
+        "操作原因（写入审计日志）", value="USER_LIBRARY_MANAGEMENT",
+        key="batch_operation_reason",
+    )
+    manage1 = st.columns(4)
+    rematch_clicked = manage1[0].button("重新匹配PDF", key="batch_rematch_pdf", width="stretch")
+    retry_read_clicked = manage1[1].button("重试深读", key="batch_retry_read", width="stretch")
+    reaudit_clicked = manage1[2].button("重新审计证据", key="batch_reaudit", width="stretch")
+    add_formal_clicked = manage1[3].button("加入正式库", key="batch_add_formal", width="stretch")
+    manage2 = st.columns(4)
+    remove_formal_clicked = manage2[0].button("移出正式库", key="batch_remove_formal", width="stretch")
+    add_rag_clicked = manage2[1].button("加入RAG", key="batch_add_rag", width="stretch")
+    remove_rag_clicked = manage2[2].button("移出RAG", key="batch_remove_rag", width="stretch")
+    context_clicked = manage2[3].button("标记CONTEXT", key="batch_context", width="stretch")
+    manage3 = st.columns(3)
+    out_scope_clicked = manage3[0].button("标记OUT_OF_SCOPE", key="batch_out_scope", width="stretch")
+    archive_clicked = manage3[1].button("归档（推荐）", key="batch_archive_safe", width="stretch")
+    manage3[2].download_button(
+        "导出选中文献", data=export_records(selected_ids, base_dir=base_dir),
+        file_name="selected_titanium_fatigue_papers.json", mime="application/json",
+        key="batch_export_selected", width="stretch",
+    )
+
+    if rematch_clicked:
+        from src.pdf_rematcher import audit_pdf_not_acquired
+        with st.spinner("按资产ID、SHA、DOI、题名、作者年份与PDF首页重新匹配…"):
+            results = [row for row in audit_pdf_not_acquired(base_dir) if row["canonical_paper_id"] in set(selected_ids)]
+        st.session_state["library_rematch_result"] = results
+    if retry_read_clicked:
+        from src.deep_read_pipeline import deep_read_pdf
+        by_id = {row["paper_id"]: row for row in canonical_library_records(base_dir)}
+        results = []
+        for paper_id in selected_ids:
+            row = by_id.get(paper_id) or {}
+            path = Path(str(row.get("canonical_pdf_path") or ""))
+            if not path.is_file():
+                results.append({"paper_id": paper_id, "status": "SKIPPED", "reason": "PDF_MISSING"}); continue
+            results.append(deep_read_pdf(path, paper_id=paper_id, title=row.get("title") or "", base_dir=base_dir, force=False))
+        st.session_state["library_retry_read_result"] = results
+    if reaudit_clicked:
+        st.session_state["library_reaudit_result"] = audit_selected_evidence(selected_ids, base_dir=base_dir)
+    if add_formal_clicked or add_rag_clicked:
+        result = add_to_formal(selected_ids, reason=operation_reason, base_dir=base_dir)
+        if add_rag_clicked and result.get("updated"):
+            result["rag"] = rebuild_current_formal_rag(base_dir)
+        st.session_state["library_membership_result"] = result; _clear_library_cache(); st.rerun()
+    if remove_formal_clicked or remove_rag_clicked:
+        result = remove_from_formal(selected_ids, reason=operation_reason, base_dir=base_dir)
+        result["rag"] = rebuild_current_formal_rag(base_dir)
+        st.session_state["library_membership_result"] = result; _clear_library_cache(); st.rerun()
+    if context_clicked:
+        st.session_state["library_scope_result"] = set_scope(selected_ids, "CONTEXT", reason=operation_reason, base_dir=base_dir); _clear_library_cache(); st.rerun()
+    if out_scope_clicked:
+        result = set_scope(selected_ids, "OUT_OF_SCOPE", reason=operation_reason, base_dir=base_dir)
+        result["rag"] = rebuild_current_formal_rag(base_dir)
+        st.session_state["library_scope_result"] = result; _clear_library_cache(); st.rerun()
+    if archive_clicked:
+        result = archive_records(selected_ids, reason=operation_reason, base_dir=base_dir)
+        result["rag"] = rebuild_current_formal_rag(base_dir)
+        st.session_state["library_archive_result"] = result; _clear_library_cache(); st.rerun()
+
     gap_col, hyp_col, experiment_col = st.columns(3)
     with gap_col:
         run_gap = st.button(
@@ -1032,93 +1113,46 @@ def render_batch_operations(
             width="stretch",
         )
     with archive_col:
-        run_archive = st.button(
-            "归档",
-            key="batch_archive_btn",
+        run_full = st.button(
+            "生成完整科研推理任务",
+            key="batch_full_reasoning_btn",
             disabled=not eligible,
             width="stretch",
         )
     with delete_col:
         confirm_delete = st.checkbox(
-            "确认彻底删除",
+            "第一步：确认彻底删除",
             key="batch_delete_confirm",
             disabled=not eligible,
+        )
+        delete_phrase = st.text_input(
+            f"第二步：输入 DELETE {len(selected_ids)} RECORDS",
+            key="batch_delete_phrase", disabled=not eligible,
         )
         run_delete = st.button(
             "彻底删除",
             key="batch_delete_btn",
-            disabled=not eligible or not confirm_delete,
+            disabled=not eligible or not confirm_delete or delete_phrase.strip() != f"DELETE {len(selected_ids)} RECORDS",
             width="stretch",
         )
 
-    if run_gap:
-        from src.research_gap_service import analyze_research_gaps
-
-        with st.spinner("正在基于可信正文证据和真实页码分析…"):
-            result = analyze_research_gaps(eligible, base_dir=base_dir)
-        st.session_state["library_gap_result"] = result
-    if run_hyp:
-        from src.hypothesis_service import generate_hypotheses
-
-        with st.spinner("正在通过正式证据门禁生成候选假设…"):
-            result = generate_hypotheses(eligible, base_dir=base_dir)
-        st.session_state["library_hypothesis_result"] = result
-    if run_experiment:
-        from src.hypothesis_service import generate_hypotheses
-
-        with st.spinner("正在基于可追溯正文证据生成可证伪实验设计…"):
-            hypotheses = generate_hypotheses(
-                eligible, base_dir=base_dir, persist=False
+    if run_gap or run_hyp or run_experiment or run_full:
+        from src.research_reasoning import run_selected_research_workflow
+        with st.spinner("正在生成证据矩阵、反证检索、空白、假设、实验、公式与机制图…"):
+            workflow = run_selected_research_workflow(
+                eligible,
+                question="L-PBF Ti-6Al-4V fatigue mechanism transition under selected conditions",
+                base_dir=base_dir,
             )
-            designs = [
-                {
-                    "hypothesis_id": hypothesis.get("hypothesis_id"),
-                    "objective": hypothesis.get("hypothesis"),
-                    "independent_variables": hypothesis.get(
-                        "independent_variables", []
-                    ),
-                    "dependent_variables": hypothesis.get(
-                        "dependent_variables", []
-                    ),
-                    "control_variables": hypothesis.get(
-                        "control_variables", []
-                    ),
-                    "moderating_variables": hypothesis.get(
-                        "moderating_variables", []
-                    ),
-                    "support_criteria": hypothesis.get(
-                        "support_criteria", []
-                    ),
-                    "falsification_criteria": hypothesis.get(
-                        "falsification_criteria", []
-                    ),
-                    "supporting_evidence": hypothesis.get(
-                        "supporting_evidence", []
-                    ),
-                    "status": "SYSTEM_PROPOSAL_REQUIRES_HUMAN_REVIEW",
-                }
-                for hypothesis in hypotheses.get("hypotheses") or []
-            ]
-            result = {
-                "status": (
-                    "GENERATED"
-                    if designs
-                    else hypotheses.get("status", "INSUFFICIENT_EVIDENCE")
-                ),
-                "experiment_designs": designs,
-                "rejected": hypotheses.get("rejected", {}),
-            }
-        st.session_state["library_experiment_result"] = result
+        if run_gap: st.session_state["library_gap_result"] = {"status": workflow["status"], "gaps": workflow["research_gaps"], "reverse_evidence_retrieval": workflow["reverse_evidence_retrieval"]}
+        if run_hyp: st.session_state["library_hypothesis_result"] = {"status": workflow["status"], "hypotheses": workflow["hypotheses"]}
+        if run_experiment: st.session_state["library_experiment_result"] = {"status": workflow["status"], "experiment_designs": workflow["experiment_designs"]}
+        if run_full: st.session_state["library_full_reasoning_result"] = workflow
     if run_rag:
         with st.spinner("正在调用统一 Stage-3 索引…"):
             result = rebuild_unified_rag(confirmed, base_dir=base_dir)
         st.session_state["library_rag_result"] = result
         _clear_library_cache()
-    if run_archive:
-        result = archive_canonical_records(eligible, base_dir=base_dir)
-        st.session_state["library_archive_result"] = result
-        _clear_library_cache()
-        st.rerun()
     if run_delete:
         result = permanently_delete_canonical_records(
             eligible, base_dir=base_dir
@@ -1128,9 +1162,15 @@ def render_batch_operations(
         st.rerun()
 
     for key, label in (
+        ("library_rematch_result", "PDF重新匹配结果"),
+        ("library_retry_read_result", "深读重试结果"),
+        ("library_reaudit_result", "证据重审结果"),
+        ("library_membership_result", "库/RAG状态结果"),
+        ("library_scope_result", "范围标记结果"),
         ("library_gap_result", "研究空白结果"),
         ("library_hypothesis_result", "候选假设结果"),
         ("library_experiment_result", "实验设计结果"),
+        ("library_full_reasoning_result", "完整科研推理结果"),
         ("library_rag_result", "RAG 结果"),
         ("library_archive_result", "归档结果"),
         ("library_delete_result", "彻底删除结果"),
@@ -1271,12 +1311,12 @@ def render_library_page() -> None:
     _render_statistics(base_dir)
     st.divider()
 
-    rows = _normal_library_rows(base_dir)
+    rows = _normal_library_rows_cached(str(base_dir), _library_dataset_version(base_dir))
     frame = pd.DataFrame(rows)
     st.subheader("文献列表")
     view_filter = st.radio(
         "文献视图",
-        ["全部文献", "正式库", "候选库", "异常记录"],
+        ["全部", "正式库", "完整但未索引", "待人工审核", "候选", "隔离", "OUT_OF_SCOPE", "归档"],
         horizontal=True,
         key="library_view_filter",
     )
@@ -1287,14 +1327,18 @@ def render_library_page() -> None:
 
     if view_filter == "正式库":
         frame = frame[frame["library_status"] == "FORMAL"]
-    elif view_filter == "候选库":
-        frame = frame[
-            ~frame["library_status"].isin(
-                ["FORMAL", "QUARANTINED", "ARCHIVED"]
-            )
-        ]
-    elif view_filter == "异常记录":
+    elif view_filter == "完整但未索引":
+        frame = frame[(frame["deep_read_complete"] == True) & (frame["library_status"] != "FORMAL") & (frame["domain_scope"] != "OUT_OF_SCOPE")]
+    elif view_filter == "待人工审核":
+        frame = frame[frame["evidence_status"].isin(["NEEDS_HUMAN_REVIEW", "PENDING_CONFIRMATION", "HUMAN_REVISION_REQUIRED"])]
+    elif view_filter == "候选":
+        frame = frame[frame["library_status"].isin(["CANDIDATE", "PDF_NOT_ACQUIRED"])]
+    elif view_filter == "隔离":
         frame = frame[frame["library_status"] == "QUARANTINED"]
+    elif view_filter == "OUT_OF_SCOPE":
+        frame = frame[frame["domain_scope"] == "OUT_OF_SCOPE"]
+    elif view_filter == "归档":
+        frame = frame[frame["library_status"] == "ARCHIVED"]
 
     filter_cols = st.columns([1, 2])
     with filter_cols[0]:
@@ -1320,9 +1364,10 @@ def render_library_page() -> None:
             )
         ]
 
+    persisted_before = set(st.session_state.get("library_selected_ids", []))
     display = pd.DataFrame(
         {
-            "选择": False,
+            "选择": frame["paper_id"].isin(persisted_before),
             "题名": frame["title"],
             "作者": frame["authors"].fillna(""),
             "年份": frame["year"].fillna(""),
@@ -1374,21 +1419,20 @@ def render_library_page() -> None:
         },
     )
     selected_indices = editor.index[editor["选择"] == True].tolist()
-    selected_ids = [
+    page_selected_ids = [
         str(page.loc[index, "_paper_id"])
         for index in selected_indices
-        if bool(page.loc[index, "_selectable"])
     ]
-    excluded_selection = [
-        str(page.loc[index, "_paper_id"])
-        for index in selected_indices
-        if not bool(page.loc[index, "_selectable"])
-    ]
-    if excluded_selection:
-        st.warning(
-            "以下元数据记录没有有效全文/深读证据，已自动排除："
-            + "、".join(excluded_selection)
-        )
+    page_ids = [str(value) for value in page["_paper_id"].tolist()]
+    selected_ids = reconcile_persistent_selection(
+        st.session_state.get("library_selected_ids", []), page_ids, page_selected_ids,
+    )
+    st.session_state["library_selected_ids"] = selected_ids
+    selection_cols = st.columns([3, 1])
+    selection_cols[0].caption(f"跨页持久选择：{len(selected_ids)} 篇")
+    if selection_cols[1].button("清空选择", key="clear_library_selection", disabled=not selected_ids):
+        st.session_state["library_selected_ids"] = []
+        st.rerun()
 
     canonical = [
         row

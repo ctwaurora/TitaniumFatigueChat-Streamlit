@@ -1,5 +1,5 @@
 TitaniumFatigueChat Streamlit deployment manifest
-file_count=111
+file_count=119
 
 .gitignore
 .streamlit/config.toml
@@ -51,8 +51,10 @@ src/auto_oa_pipeline.py
 src/baseline_ablation_report.py
 src/benchmark.py
 src/case_study.py
+src/condition_evidence.py
 src/condition_mechanism_map.py
 src/corpus_expansion.py
+src/corpus_statistics.py
 src/data_cache.py
 src/data_contracts.py
 src/debug_outputs.py
@@ -65,6 +67,7 @@ src/domain_scope.py
 src/equation_engine.py
 src/evidence_extraction.py
 src/evidence_gate.py
+src/evidence_quality.py
 src/evidence_trace.py
 src/exporter.py
 src/formula_comparison.py
@@ -78,6 +81,7 @@ src/hypothesis_split.py
 src/ingestion.py
 src/intent_router.py
 src/interactive_modules.py
+src/library_management.py
 src/library_page.py
 src/literature_agent.py
 src/literature_formula_library.py
@@ -86,12 +90,14 @@ src/literature_search_agent.py
 src/literature_support_fields.py
 src/literature_tasks.py
 src/local_pdf_import.py
+src/metadata_gate.py
 src/metadata_service.py
 src/oa_literature.py
 src/page_answers.py
 src/paper_classifier.py
 src/paper_collector.py
 src/paper_readiness.py
+src/pdf_rematcher.py
 src/pdf_upload_handler.py
 src/perf_log.py
 src/query_understanding.py
@@ -99,10 +105,12 @@ src/reproducibility.py
 src/research_gap_dataset.py
 src/research_gap_discovery.py
 src/research_gap_service.py
+src/research_reasoning.py
 src/retrospective_validation.py
 src/sci_export.py
 src/scientific_framework.py
 src/scorecard.py
+src/smart_search.py
 src/stage1_store.py
 src/storage_adapter.py
 src/unified_answer.py
