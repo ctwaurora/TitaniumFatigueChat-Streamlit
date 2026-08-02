@@ -347,6 +347,11 @@ def get_canonical_literature_counts(base_dir: Path = BASE_DIR) -> Dict[str, Any]
         "deep_read_complete_count": counts["deep_read_complete_count"],
         "indexed_count": counts["rag_paper_count"],
         "formal_indexed_count": counts["formal_indexed_count"],
+        "evidence_record_count": counts["evidence_record_count"],
+        "condition_evidence_record_count": counts[
+            "condition_evidence_record_count"
+        ],
+        "formula_record_count": counts["formula_record_count"],
         "complete_not_indexed_count": counts["complete_not_indexed_count"],
         "pending_processing_count": counts["pending_processing_count"],
         "processing_failed_count": counts["processing_failed_count"],

@@ -73,6 +73,10 @@ def _runtime_streamlit_secrets() -> Mapping[str, Any]:
     streamlit = sys.modules.get("streamlit")
     if streamlit is None:
         return {}
+    try:
+        return streamlit.secrets
+    except Exception:
+        return {}
 
 
 def _windows_persistent_environment(key: str) -> str:
@@ -100,10 +104,6 @@ def _windows_persistent_environment(key: str) -> str:
     except (ImportError, OSError):
         return ""
     return ""
-    try:
-        return streamlit.secrets
-    except Exception:
-        return {}
 
 
 def resolve_config_value(

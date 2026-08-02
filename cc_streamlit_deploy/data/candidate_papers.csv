@@ -1,1 +1,1 @@
-candidate_id,title,authors,year,journal,doi,url,source_database,abstract,keywords,is_open_access,pdf_url,matched_query,relevance_score,recommended_reason,status,full_text_status,added_time,last_updated,paper_type_primary,paper_type_secondary,research_topic,storage_folder,tags,is_review,is_experimental,is_fcgr,is_micro_ct,is_heat_treatment,is_surface_roughness,is_conflict_relevant,classification_reason,classification_confidence
+candidate_id,title,authors,year,doi,source_url,metadata_source,oa_status,pdf_status,validation_status

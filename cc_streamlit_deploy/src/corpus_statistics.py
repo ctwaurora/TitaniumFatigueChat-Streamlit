@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-SCHEMA_VERSION = "corpus-statistics-2.1"
+SCHEMA_VERSION = "corpus-statistics-2.2"
 PDF_ROOTS = ("paper/pdfs", "papers", "early_papers", "followup_papers")
 FINAL_STATES = (
     "FORMAL_INDEXED",
@@ -423,6 +423,9 @@ def compute_corpus_statistics(base_dir: Path) -> dict[str, Any]:
         "deep_read_complete_count": len(deep_ids),
         "rag_paper_count": len(rag_ids),
         "evidence_record_count": _trusted_evidence_count(base_dir),
+        "condition_evidence_record_count": _line_count(
+            base_dir / "data" / "evidence" / "condition_evidence_records.jsonl"
+        ),
         "formula_record_count": _artifact_count(base_dir, "equations.jsonl"),
         "visual_review_item_count": _artifact_count(base_dir, "visual_review_items.jsonl"),
         "formal_indexed_count": final_state_counts["FORMAL_INDEXED"],

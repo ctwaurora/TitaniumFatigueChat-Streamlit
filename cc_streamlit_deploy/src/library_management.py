@@ -199,3 +199,70 @@ def audit_selected_evidence(paper_ids: Sequence[str], *, base_dir: Path) -> dict
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     _append_log(base_dir, [{"timestamp": _now(), "paper_id": paper_id, "action": "REAUDIT_EVIDENCE", "old_state": {}, "new_state": {"audit_report": str(output)}, "reason": "USER_TRIGGERED_REAUDIT"} for paper_id in requested])
     return report
+
+
+def deletion_impact(paper_ids: Sequence[str], *, base_dir: Path) -> dict[str, Any]:
+    requested = {str(value) for value in paper_ids if value}
+    manifest = [
+        row for row in read_jsonl(base_dir / "data/paper_manifest.jsonl")
+        if str(row.get("paper_id") or "") in requested
+    ]
+    evidence_path = base_dir / "data/evidence/trusted_evidence.csv"
+    with evidence_path.open("r", encoding="utf-8-sig", newline="") as stream:
+        evidence = [
+            row for row in csv.DictReader(stream)
+            if str(row.get("canonical_paper_id") or row.get("paper_id") or "")
+            in requested
+        ]
+    formula_count = 0
+    for paper_id in requested:
+        for filename in ("equations.jsonl", "formula_records.jsonl"):
+            path = base_dir / "data/deep_read" / paper_id / filename
+            if path.exists():
+                formula_count += len(read_jsonl(path))
+                break
+    return {
+        "paper_count": len(manifest),
+        "titles": [str(row.get("title") or "题名未报告") for row in manifest],
+        "pdf_count": sum(
+            bool(row.get("canonical_pdf_path"))
+            and Path(str(row.get("canonical_pdf_path"))).is_file()
+            for row in manifest
+        ),
+        "evidence_count": len(evidence),
+        "formula_count": formula_count,
+    }
+
+
+def delete_formal_papers(
+    paper_ids: Sequence[str], *, confirmation: str, base_dir: Path
+) -> dict[str, Any]:
+    """Remove selected formal papers and send managed assets to Recycle Bin."""
+    if confirmation.strip() != "DELETE":
+        raise ValueError("删除确认文本必须为 DELETE")
+    requested = {str(value) for value in paper_ids if value}
+    whitelist_path = base_dir / "data/system/formal_rag_whitelist.json"
+    payload = json.loads(whitelist_path.read_text(encoding="utf-8"))
+    current = [str(value) for value in payload.get("paper_ids") or []]
+    unknown = requested - set(current)
+    if not requested or unknown:
+        raise ValueError("只能删除当前正式文献库中的有效选择")
+    impact = deletion_impact(requested, base_dir=base_dir)
+    retained = [paper_id for paper_id in current if paper_id not in requested]
+
+    from src.unified_rag import build_unified_rag
+    from scripts.finalize_formal_library import apply_plan, build_plan
+
+    rag = build_unified_rag(retained, base_dir=base_dir)
+    if int(rag.get("paper_count") or -1) != len(retained):
+        raise RuntimeError("删除中止：统一 RAG 未能安全重建")
+    payload["paper_ids"] = retained
+    payload["paper_count"] = len(retained)
+    payload["generated_at"] = _now()
+    temporary = whitelist_path.with_suffix(".json.tmp")
+    temporary.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    temporary.replace(whitelist_path)
+    cleanup = apply_plan(base_dir, build_plan(base_dir))
+    return {"status": "COMPLETED", "impact": impact, "rag": rag, "cleanup": cleanup}

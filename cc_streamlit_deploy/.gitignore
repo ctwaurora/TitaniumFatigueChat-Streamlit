@@ -21,6 +21,7 @@ __pycache__/
 htmlcov/
 dist/
 build/
+.artifact_build/
 .venv/
 venv/
 env/
@@ -40,7 +41,11 @@ data/migrations/
 data/rag/
 data/tasks/
 data/deep_read/
+data/system/pdf_watch_*.json
+data/system/dataset_version.json
 outputs/
+deliverables/
+backups/
 tmp/
 logs/
 *.log

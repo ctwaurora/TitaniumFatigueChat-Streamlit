@@ -126,6 +126,11 @@ def ingest(
         "--force-deep-read",
         help="忽略相同文件哈希的阶段2幂等缓存。",
     ),
+    base_dir: Path = typer.Option(
+        BASE_DIR,
+        "--base-dir",
+        help="阶段2产物目录；测试和隔离运行必须显式指定。",
+    ),
 ):
     """构建钛合金疲劳文献库
 
@@ -150,7 +155,9 @@ def ingest(
             path = Path(raw_path)
             if not path.is_absolute():
                 path = (stage2_config.parent / path).resolve()
-            result = deep_read_pdf(path, force=force_deep_read)
+            result = deep_read_pdf(
+                path, force=force_deep_read, base_dir=base_dir.resolve()
+            )
             results.append(result)
             console.print(
                 f"  {escape(path.name)}: {result.get('status')} | "
@@ -856,6 +863,47 @@ def config_check():
     )
     console.print(f"source: {settings.source}")
     console.print(f"deepseek_client_ready: {str(ready).lower()}")
+
+
+@app.command("watch-pdfs")
+def watch_pdfs(
+    once: bool = typer.Option(False, "--once", help="完成一次稳定扫描和队列处理后退出。"),
+    status: bool = typer.Option(False, "--status", help="仅显示简洁监听状态。"),
+    pause: bool = typer.Option(False, "--pause", help="暂停自动监听。"),
+    resume: bool = typer.Option(False, "--resume", help="恢复自动监听。"),
+    poll_interval: float = typer.Option(1.0, "--poll-interval", min=0.1),
+):
+    """监听 paper/pdfs，自动完成验证、精读、质量门禁和正式 RAG。"""
+    from src.pdf_watcher import (
+        ensure_background_watcher,
+        public_status,
+        run_watcher,
+        set_control,
+    )
+
+    selected = sum((status, pause, resume))
+    if selected > 1:
+        console.print("[red]--status、--pause 和 --resume 不能同时使用。[/red]")
+        raise typer.Exit(2)
+    if status:
+        console.print_json(data=public_status(BASE_DIR))
+        return
+    if pause:
+        set_control("PAUSE", base_dir=BASE_DIR)
+        console.print("PDF 自动监听已暂停。")
+        return
+    if resume:
+        set_control("RUN", base_dir=BASE_DIR)
+        started = ensure_background_watcher(BASE_DIR)
+        console.print("PDF 自动监听已恢复。" if started else "PDF 自动监听已设为运行。")
+        return
+    result = run_watcher(
+        base_dir=BASE_DIR,
+        once=once,
+        poll_interval=poll_interval,
+        stable_checks=3,
+    )
+    console.print_json(data=result)
 
 
 # ── Health check ─────────────────────────────────────────────────────────
