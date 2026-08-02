@@ -15,7 +15,11 @@ from typing import Iterable, List, Sequence, Tuple
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_OUTPUT_DIR = PROJECT_ROOT.parent / f"{PROJECT_ROOT.name}_streamlit_deploy"
+DEFAULT_OUTPUT_DIR = (
+    PROJECT_ROOT.parent
+    / "TitaniumFatigueChat-Streamlit-GitHub"
+    / "cc_streamlit_deploy"
+)
 
 ROOT_FILES = (
     "streamlit_app.py",
@@ -344,7 +348,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         type=Path,
         default=DEFAULT_OUTPUT_DIR,
-        help="部署副本输出目录，默认位于主项目同级。",
+        help="部署副本输出目录，默认位于 GitHub 工作副本内部。",
     )
     return parser
 

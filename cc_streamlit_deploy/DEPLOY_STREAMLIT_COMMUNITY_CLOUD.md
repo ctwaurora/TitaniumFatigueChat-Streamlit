@@ -17,11 +17,11 @@
 python scripts/export_streamlit_deploy.py
 ```
 
-默认输出到主项目同级目录 `cc_streamlit_deploy`。脚本采用白名单复制，会先安全清理旧的同名部署目录，再扫描禁止文件、疑似密钥、大文件和 Windows 绝对路径。扫描通过后生成 `DEPLOY_MANIFEST.txt`。
+默认输出到相邻 GitHub 工作副本 `TitaniumFatigueChat-Streamlit-GitHub` 内的 `cc_streamlit_deploy` 子目录。脚本采用白名单复制，会先安全清理该部署子目录，再扫描禁止文件、疑似密钥、大文件和 Windows 绝对路径。扫描通过后生成 `DEPLOY_MANIFEST.txt`。
 
 ## 3. GitHub 上传范围
 
-将 `cc_streamlit_deploy` 中的全部文件上传到用于部署的 GitHub 仓库。不要上传主项目中的 `.git` 历史、本地 PDF、`outputs`、运行索引、缓存、`.env` 或 `.streamlit/secrets.toml`。
+部署快照只生成到相邻 GitHub 工作副本的 `cc_streamlit_deploy` 子目录，不再创建桌面独立部署文件夹。上传该子目录；不要上传主项目中的 `.git` 历史、本地 PDF、`outputs`、运行索引、缓存、`.env` 或 `.streamlit/secrets.toml`。
 
 部署副本不会自动执行 `git init`，GitHub 仓库创建、remote 配置、提交和推送均需用户手动完成。
 
