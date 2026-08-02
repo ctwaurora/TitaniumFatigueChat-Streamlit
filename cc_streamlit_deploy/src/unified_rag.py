@@ -16,6 +16,7 @@ import re
 import sqlite3
 import time
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -709,7 +710,18 @@ def build_unified_rag(
         "built_at": manifest["built_at"],
     }
     _atomic_json(paths["status"], status)
-    for paper_id in build_info["accepted_paper_ids"]:
+    accepted_ids = set(build_info["accepted_paper_ids"])
+    for row in load_paper_manifest(base_dir):
+        paper_id = str(row.get("paper_id") or "")
+        if (
+            paper_id
+            and paper_id not in accepted_ids
+            and row.get("rag_status") == "INDEXED_STAGE3_UNIFIED"
+        ):
+            update_paper_rag_status(
+                paper_id, "NOT_INDEXED_CURRENT_WHITELIST", base_dir
+            )
+    for paper_id in accepted_ids:
         update_paper_rag_status(paper_id, "INDEXED_STAGE3_UNIFIED", base_dir)
     return status
 
@@ -789,11 +801,15 @@ def _bm25_scores(query: str, base_dir: Path) -> Dict[str, float]:
     dfs = payload.get("document_frequency") or {}
     k1, b = float(payload.get("k1") or 1.5), float(payload.get("b") or 0.75)
     scores: Dict[str, float] = {}
-    for doc_id, frequencies, dl in zip(
-        payload.get("document_ids") or [],
-        payload.get("term_frequencies") or [],
-        payload.get("document_lengths") or [],
+    for index, (doc_id, frequencies, dl) in enumerate(
+        zip(
+            payload.get("document_ids") or [],
+            payload.get("term_frequencies") or [],
+            payload.get("document_lengths") or [],
+        )
     ):
+        if index and index % 500 == 0:
+            time.sleep(0)
         score = 0.0
         for term in terms:
             tf = float(frequencies.get(term) or 0)
@@ -866,26 +882,32 @@ def retrieve_research_evidence(
     base_dir: Path = BASE_DIR,
 ) -> Dict[str, Any]:
     started = time.perf_counter()
+    normalized_question = expand_question(question)
+    normalization_complete = time.perf_counter()
     errors = []
     try:
-        bm25 = _bm25_scores(question, base_dir)
+        bm25 = _bm25_scores(normalized_question, base_dir)
         bm25_executed = True
     except Exception as exc:
         bm25, bm25_executed = {}, False
         errors.append(f"BM25:{type(exc).__name__}:{exc}")
+    bm25_complete = time.perf_counter()
     try:
-        vector = _vector_scores(question, base_dir)
+        vector = _vector_scores(normalized_question, base_dir)
         vector_executed = True
     except Exception as exc:
         vector, vector_executed = {}, False
         errors.append(f"VECTOR:{type(exc).__name__}:{exc}")
+    vector_complete = time.perf_counter()
     candidate_ids = [key for key, _ in sorted(bm25.items(), key=lambda item: item[1], reverse=True)[:1000]]
     candidate_ids.extend(key for key, _ in sorted(vector.items(), key=lambda item: item[1], reverse=True)[:1000])
     documents = _load_documents_by_ids(base_dir, candidate_ids)
     max_bm25 = max(bm25.values(), default=1.0)
     variables = list(required_variables or identify_variables(question))
     candidates = []
-    for doc in documents:
+    for index, doc in enumerate(documents):
+        if index and index % 100 == 0:
+            time.sleep(0)
         if doc["doc_id"] not in bm25 and doc["doc_id"] not in vector:
             continue
         if not _matches_filters(doc, condition_filters or {}):
@@ -942,6 +964,7 @@ def retrieve_research_evidence(
     retrieval_window = candidates[: max(top_k * 5, 20)]
     deduped, removed = _deduplicate(retrieval_window)
     results = deduped[: max(0, int(top_k))]
+    rerank_complete = time.perf_counter()
     return {
         "question": question,
         "task_type": task_type,
@@ -954,6 +977,12 @@ def retrieve_research_evidence(
         "duplicate_removed": removed,
         "retrieved_paper_count": len({row.get("paper_id") for row in results if row.get("paper_id")}),
         "elapsed_seconds": round(time.perf_counter() - started, 4),
+        "phase_seconds": {
+            "normalization_complete": round(normalization_complete - started, 6),
+            "bm25_complete": round(bm25_complete - started, 6),
+            "vector_complete": round(vector_complete - started, 6),
+            "rerank_complete": round(rerank_complete - started, 6),
+        },
         "errors": errors,
         "degraded_mode": "BM25_ONLY" if bm25_executed and not vector_executed else "VECTOR_ONLY" if vector_executed and not bm25_executed else "NONE",
         "results": results,
@@ -1002,19 +1031,21 @@ def generate_counter_targets(question: str) -> List[str]:
 def retrieve_counter_evidence(
     question: str, *, top_k: int = 10, base_dir: Path = BASE_DIR
 ) -> List[Dict[str, Any]]:
+    targets = generate_counter_targets(question)
+    combined_target = " ; ".join(targets)
+    result = retrieve_research_evidence(
+        combined_target,
+        "counter_target",
+        required_variables=identify_variables(question),
+        top_k=max(20, top_k * 3),
+        base_dir=base_dir,
+    )
     pooled = []
-    for target in generate_counter_targets(question):
-        result = retrieve_research_evidence(
-            target,
-            "counter_target",
-            required_variables=identify_variables(question),
-            top_k=max(3, top_k),
-            base_dir=base_dir,
-        )
-        for row in result["results"]:
-            item = dict(row)
-            item["counter_target"] = target
-            pooled.append(item)
+    for row in result["results"]:
+        item = dict(row)
+        item["counter_target"] = targets[0] if targets else combined_target
+        item["counter_targets"] = targets
+        pooled.append(item)
     pooled.sort(key=lambda row: row["rerank_score"], reverse=True)
     deduped, _ = _deduplicate(pooled)
     return deduped[:top_k]
@@ -1149,13 +1180,41 @@ def answer_research_question(
     *,
     top_k: int = 10,
     base_dir: Path = BASE_DIR,
+    include_counter: bool = True,
 ) -> Dict[str, Any]:
-    base = retrieve_research_evidence(question, top_k=top_k, base_dir=base_dir)
-    supporting = retrieve_supporting_evidence(question, top_k=top_k, base_dir=base_dir)
-    counter = retrieve_counter_evidence(question, top_k=top_k, base_dir=base_dir)
-    conditional = retrieve_condition_dependent_evidence(
-        question, top_k=top_k, base_dir=base_dir
-    )
+    started = time.perf_counter()
+    # A single enlarged primary window supplies both supporting and
+    # condition-dependent evidence.  This preserves the retrieval pool while
+    # avoiding three identical corpus scans for the same question.
+    if include_counter:
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            base_future = executor.submit(
+                retrieve_research_evidence,
+                question,
+                top_k=max(30, top_k * 3),
+                base_dir=base_dir,
+            )
+            counter_future = executor.submit(
+                retrieve_counter_evidence,
+                question,
+                top_k=top_k,
+                base_dir=base_dir,
+            )
+            base = base_future.result()
+            counter = counter_future.result()
+    else:
+        base = retrieve_research_evidence(
+            question,
+            top_k=max(30, top_k * 3),
+            base_dir=base_dir,
+        )
+        counter = []
+    supporting = list(base["results"][:top_k])
+    conditional = [
+        row
+        for row in base["results"]
+        if any((row.get("experimental_conditions") or {}).values())
+    ][:top_k]
     sufficiency = evaluate_evidence_sufficiency(
         supporting,
         counter,
@@ -1192,4 +1251,6 @@ def answer_research_question(
                 "retrieved_paper_count",
             )
         },
+        "retrieval_phase_seconds": dict(base.get("phase_seconds") or {}),
+        "first_evidence_ready_seconds": round(time.perf_counter() - started, 6),
     }

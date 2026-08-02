@@ -21,6 +21,21 @@ from src.unified_rag import generate_counter_targets, retrieve_research_evidence
 
 
 NOT_REPORTED = "NOT_REPORTED"
+CONDITION_LABELS = {
+    "alloy_grade": "材料",
+    "material": "材料",
+    "manufacturing_process": "工艺",
+    "process": "工艺",
+    "heat_treatment": "热处理",
+    "surface_treatment": "表面状态",
+    "surface_state": "表面状态",
+    "loading_mode": "载荷",
+    "stress_ratio_R": "应力比",
+    "fatigue_regime": "疲劳区间",
+    "environment": "环境",
+    "crack_detection_method": "检测方法",
+    "characterization_method": "检测方法",
+}
 RELEVANCE_PATTERNS = (
     r"surface roughness|\bRa\b|\bRz\b|as-built|machined|polished",
     r"near[- ]surface|subsurface|distance (?:to|from) (?:the )?surface|depth",
@@ -57,18 +72,40 @@ def _role(row: dict[str, Any]) -> str:
     return "SUPPORT"
 
 
+def normalize_ui_value(value: Any) -> Any:
+    """Remove nested JSON/string quoting before values enter reports or UI."""
+    if isinstance(value, dict):
+        return {str(key): normalize_ui_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [normalize_ui_value(item) for item in value]
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    for _ in range(3):
+        if len(text) < 2 or text[0] not in {'"', "'"} or text[-1] != text[0]:
+            break
+        try:
+            decoded = json.loads(text) if text[0] == '"' else text[1:-1]
+        except json.JSONDecodeError:
+            decoded = text[1:-1]
+        if not isinstance(decoded, str):
+            return normalize_ui_value(decoded)
+        text = decoded.strip()
+    return text
+
+
 def _reference(row: dict[str, Any], title: str, conditions: dict[str, Any]) -> dict[str, Any]:
     return {
         "canonical_paper_id": row.get("canonical_paper_id") or row.get("paper_id"),
-        "title": title,
+        "title": normalize_ui_value(title),
         "evidence_id": row.get("evidence_id") or row.get("doc_id"),
-        "original_text": row.get("original_text"),
-        "claim": row.get("claim"),
+        "original_text": normalize_ui_value(row.get("original_text")),
+        "claim": normalize_ui_value(row.get("claim")),
         "page_number": int(float(row.get("page_number") or 0)),
-        "section": row.get("section") or NOT_REPORTED,
+        "section": normalize_ui_value(row.get("section") or NOT_REPORTED),
         "directness": row.get("directness") or NOT_REPORTED,
         "evidence_role": _role(row),
-        "experimental_conditions": conditions,
+        "experimental_conditions": normalize_ui_value(conditions),
         "source_hash": row.get("source_hash") or NOT_REPORTED,
     }
 
@@ -212,7 +249,20 @@ def run_selected_research_workflow(paper_ids: Sequence[str], *, question: str = 
         paper_id = str(row.get("canonical_paper_id") or row.get("paper_id") or "")
         cond = condition_by_evidence.get(str(row.get("evidence_id") or ""), {})
         clean_conditions = {key: value for key, value in cond.items() if key not in {"original_text", "claim"}}
-        evidence.append(_reference(row, str(manifest.get(paper_id, {}).get("title") or NOT_REPORTED), clean_conditions))
+        reference = _reference(
+            row,
+            str(manifest.get(paper_id, {}).get("title") or NOT_REPORTED),
+            clean_conditions,
+        )
+        reference["authors"] = normalize_ui_value(
+            manifest.get(paper_id, {}).get("authors") or NOT_REPORTED
+        )
+        reference["year"] = normalize_ui_value(
+            manifest.get(paper_id, {}).get("publication_date")
+            or manifest.get(paper_id, {}).get("year")
+            or NOT_REPORTED
+        )
+        evidence.append(reference)
     support = [row for row in evidence if row["evidence_role"] == "SUPPORT"]
     counter_selected = [row for row in evidence if row["evidence_role"] == "COUNTER"]
     conditional = [row for row in evidence if row["evidence_role"] == "CONDITION_DEPENDENT"]
@@ -223,15 +273,100 @@ def run_selected_research_workflow(paper_ids: Sequence[str], *, question: str = 
     condition_fields = sorted({key for row in evidence for key, value in row["experimental_conditions"].items() if value not in (None, "", [], {}, NOT_REPORTED)})
     effective_question = question or "What relationship remains untested under matched fatigue conditions in the selected papers?"
     reverse = _counter_search(effective_question, base_dir) if allowed else {"completed": False, "queries": [], "results": [], "counts": {}}
-    covered = {key: sorted({json.dumps(row["experimental_conditions"].get(key), ensure_ascii=False, sort_keys=True) for row in evidence if row["experimental_conditions"].get(key) not in (None, "", [], {}, NOT_REPORTED)}) for key in condition_fields}
+    for row in reverse.get("results", []):
+        paper_id = str(row.get("canonical_paper_id") or "")
+        row["authors"] = normalize_ui_value(
+            manifest.get(paper_id, {}).get("authors") or NOT_REPORTED
+        )
+        row["year"] = normalize_ui_value(
+            manifest.get(paper_id, {}).get("publication_date")
+            or manifest.get(paper_id, {}).get("year")
+            or NOT_REPORTED
+        )
+    reverse_counter = [
+        row for row in reverse.get("results", [])
+        if row.get("classification") == "COUNTER"
+    ]
+    support_ids = {str(row.get("evidence_id") or "") for row in support}
+    counter_all = []
+    conditional_ids = {str(row.get("evidence_id") or "") for row in conditional}
+    for row in [*counter_selected, *reverse_counter]:
+        evidence_id = str(row.get("evidence_id") or "")
+        if evidence_id in support_ids:
+            if evidence_id not in conditional_ids:
+                converted = dict(row)
+                converted["evidence_role"] = "CONDITION_DEPENDENT"
+                converted["classification_explanation"] = (
+                    "同一 Evidence ID 不能同时作为支持与反驳，已降级为条件依赖证据。"
+                )
+                conditional.append(converted)
+                conditional_ids.add(evidence_id)
+            continue
+        if evidence_id and evidence_id not in {
+            str(item.get("evidence_id") or "") for item in counter_all
+        }:
+            counter_all.append(row)
+    covered = {
+        key: sorted(
+            {
+                json.dumps(
+                    normalize_ui_value(row["experimental_conditions"].get(key)),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+                for row in evidence
+                if row["experimental_conditions"].get(key)
+                not in (None, "", [], {}, NOT_REPORTED)
+            }
+        )
+        for key in condition_fields
+    }
     mandatory = ["defect_size", "defect_distance_to_surface", "surface_roughness", "stress_ratio_R", "fatigue_regime", "heat_treatment", "hip"]
     uncovered = [key for key in mandatory if key not in covered]
-    evidence_sufficiency = "HIGH" if len({row["canonical_paper_id"] for row in support}) >= 5 and reverse.get("completed") and reverse.get("results") else "MEDIUM" if evidence else "INSUFFICIENT"
+    support_papers = {str(row["canonical_paper_id"]) for row in support}
+    counter_papers = {str(row["canonical_paper_id"]) for row in counter_all}
+    threshold_met = (
+        len(allowed) >= 3
+        and len(support_papers) >= 2
+        and bool(reverse.get("completed"))
+    )
+    evidence_sufficiency = (
+        "HIGH"
+        if threshold_met and len(support_papers) >= 5 and bool(counter_all)
+        else "MEDIUM"
+        if threshold_met and evidence
+        else "LOW"
+    )
+    dual_role_explanations = []
+    for paper_id in sorted(support_papers & counter_papers):
+        support_rows = [row for row in support if row["canonical_paper_id"] == paper_id]
+        counter_rows = [row for row in counter_all if row["canonical_paper_id"] == paper_id]
+        if {row["evidence_id"] for row in support_rows}.isdisjoint(
+            {row["evidence_id"] for row in counter_rows}
+        ):
+            dual_role_explanations.append(
+                {
+                    "paper_id": paper_id,
+                    "explanation": "同一论文中的不同原文证据在不同实验条件下方向不同，因此分别列为支持与可能反驳。",
+                    "supporting_evidence_ids": [row["evidence_id"] for row in support_rows],
+                    "refuting_evidence_ids": [row["evidence_id"] for row in counter_rows],
+                }
+            )
     gap = {
         "gap_id": "GAP_" + hashlib.sha256(("|".join(allowed) + effective_question).encode()).hexdigest()[:16].upper(),
-        "description": "Selected evidence does not establish a matched-condition, independently validated transition boundary across surface roughness and pore geometry.",
-        "supporting_papers": sorted({row["canonical_paper_id"] for row in support}),
-        "possibly_refuting_papers": sorted({row["canonical_paper_id"] for row in counter_selected} | {row["canonical_paper_id"] for row in reverse.get("results", []) if row.get("classification") == "COUNTER"}),
+        "title_cn": "匹配疲劳条件下的机制边界仍缺乏独立验证",
+        "description": "当前正式文献已覆盖表面状态、缺陷几何、应力比及部分后处理条件，但尚未建立在应力、组织和试验环境一致时可独立复现的机制转换边界。",
+        "description_paragraphs_cn": [
+            "当前选中文献已经研究了表面粗糙度、缺陷尺寸与位置、应力比以及疲劳区间对裂纹起裂和寿命的影响。现有证据说明这些因素可能相互竞争，而不是由单一变量在所有条件下主导。",
+            "已覆盖条件分散在不同论文和不同试验方案中，缺少同一材料批次、相同组织与载荷条件下对表面严重度和临界缺陷几何的成组比较，因此无法给出可迁移的转换边界。",
+            "这构成的是条件组合与独立验证层面的研究空白。由于本地检索范围有限，仍可能存在尚未纳入的论文已经部分解决该问题，结论必须与补充检索共同使用。",
+        ],
+        "supporting_papers": sorted(support_papers),
+        "possibly_refuting_papers": sorted(counter_papers),
+        "supporting_evidence": support[:20],
+        "refuting_evidence": counter_all[:20],
+        "condition_dependent_evidence": conditional[:20],
+        "dual_role_explanations": dual_role_explanations,
         "studied_conditions": covered, "uncovered_conditions": uncovered,
         "possible_retrieval_omission": True,
         "missing_evidence": ["paired roughness–defect distance–defect size data", "matched R/HCF-VHCF/post-processing cohorts", "independent validation boundary"],
@@ -239,25 +374,31 @@ def run_selected_research_workflow(paper_ids: Sequence[str], *, question: str = 
         "continued_search_keywords": reverse.get("queries", []),
         "counter_search_completed": reverse.get("completed", False),
         "confidence": "HIGH" if evidence_sufficiency == "HIGH" else "NOT_HIGH_CONFIDENCE",
+        "reliable_gap_threshold_met": threshold_met,
+        "threshold_message": "" if threshold_met else "当前选中文献不足以可靠判定研究空白。",
+        "importance_cn": "该空白影响疲劳寿命模型对起裂机制转换的表达，并关系到表面处理、HIP 和缺陷验收标准的工程选择，值得通过匹配条件实验验证。",
+        "testability_cn": "可使用 micro-CT、三维轮廓测量、受控疲劳试验和 SEM 断口定位验证。最低成本方案是复用现有试样完成表面测量与起裂源复核；主要困难是缺陷空间分辨率和跨批次组织差异。",
+        "search_keywords_cn": ["钛合金 疲劳 表面粗糙度 缺陷位置 起裂机制", "匹配应力比 热处理 条件边界"],
+        "search_keywords_en": reverse.get("queries", []),
     }
     hypothesis = {
         "hypothesis_id": "HYP_" + gap["gap_id"].split("_")[-1],
         "statement": "At matched stress and microstructure, the crack-initiation mechanism changes from surface-controlled to pore-controlled as surface severity falls relative to the effective severity of the nearest critical pore.",
         "status": "SYSTEM_DERIVED_FALSIFIABLE_CANDIDATE",
         "supporting_evidence_ids": [row["evidence_id"] for row in support[:20]],
-        "counter_evidence_ids": [row["evidence_id"] for row in (counter_selected + reverse.get("results", []))[:20]],
+        "counter_evidence_ids": [row["evidence_id"] for row in counter_all[:20]],
         "falsification_standard": "No reproducible mechanism switch after matched-condition adjustment, or a reproducible opposite switch.",
     }
     formulas = build_formula_comparison(allowed, manifest, base_dir)
     dominance = build_dominance_map(evidence)
     experiment = _experiment_design(hypothesis, evidence)
-    conflicts = [{"topic": "same mechanism under differing conditions", "support": support[:5], "counter": (counter_selected + reverse.get("results", []))[:5]}] if counter_selected or reverse.get("counts", {}).get("COUNTER") else []
+    conflicts = [{"topic": "same mechanism under differing conditions", "support": support[:5], "counter": counter_all[:5]}] if counter_all else []
     return {
-        "generated_at": _now(), "status": "GENERATED" if evidence else "INSUFFICIENT_EVIDENCE",
+        "generated_at": _now(), "status": "GENERATED" if evidence and threshold_met else "INSUFFICIENT_EVIDENCE",
         "selected_paper_ids": selected, "eligible_paper_ids": allowed, "rejected": rejected,
         "evidence_matrix": evidence, "condition_matrix": [{"evidence_id": row["evidence_id"], "paper_id": row["canonical_paper_id"], **row["experimental_conditions"]} for row in evidence],
         "mechanism_comparison": dict(mechanisms), "formula_comparison": formulas,
-        "supporting_evidence": support, "counter_evidence": counter_selected,
+        "supporting_evidence": support, "counter_evidence": counter_all,
         "condition_dependent_evidence": conditional, "literature_conflicts": conflicts,
         "research_gaps": [gap], "hypotheses": [hypothesis], "experiment_designs": [experiment],
         "reverse_evidence_retrieval": reverse, "condition_mechanism_dominance_map": dominance,

@@ -584,12 +584,18 @@ def library_statistics(base_dir: Path = BASE_DIR) -> Dict[str, int]:
     records = canonical_library_records(base_dir)
     corpus = statistics_counts(base_dir)
     result = {
-        "unique_literature": corpus["acquired_logical_literature_count"],
+        "unique_literature": corpus["current_logical_literature_count"],
+        "acquired_logical_literature": corpus["acquired_logical_literature_count"],
         "canonical_paper_records": corpus["canonical_paper_record_count"],
         "pdf_files": corpus["pdf_file_count"],
         "unique_pdf_sha256": corpus["unique_pdf_sha256_count"],
         "pdf_assets": corpus["pdf_asset_count"],
         "related_versions": corpus["related_version_count"],
+        "archived": corpus["archived_count"],
+        "alias_old_ids": corpus["alias_old_id_count"],
+        "historical_pre_cleanup_acquired_primary": corpus[
+            "historical_pre_cleanup_acquired_primary_count"
+        ],
         "candidate_metadata": sum(
             row.get("library_status") not in {"FORMAL", QUARANTINED}
             for row in records
@@ -608,7 +614,14 @@ def library_statistics(base_dir: Path = BASE_DIR) -> Dict[str, int]:
             for row in records
         ),
         "rag_indexed": corpus["rag_paper_count"],
-        "pending_or_failed": corpus["pending_or_failed_acquired_count"],
+        "formal_indexed": corpus["formal_indexed_count"],
+        "complete_not_indexed": corpus["complete_not_indexed_count"],
+        "pending_processing": corpus["pending_processing_count"],
+        "processing_failed": corpus["processing_failed_count"],
+        "needs_human_review": corpus["needs_human_review_count"],
+        "related_versions": corpus["related_version_count"],
+        "out_of_scope": corpus["out_of_scope_count"],
+        "deleted": corpus["deleted_count"],
         "invalid_metadata": sum(
             row.get("library_status") == QUARANTINED for row in records
         ),
@@ -642,7 +655,7 @@ def eligible_paper_ids(
         row = records.get(paper_id)
         reasons: List[str] = []
         if row is None:
-            reasons.append("CANONICAL_PAPER_NOT_FOUND")
+            reasons.append("STALE_OR_DELETED_SELECTION_REMOVED")
         else:
             if row.get("snapshot_read_only"):
                 reasons.append("RUNTIME_ARTIFACTS_UNAVAILABLE")

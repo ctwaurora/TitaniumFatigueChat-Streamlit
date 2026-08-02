@@ -25,6 +25,53 @@ def reconcile_persistent_selection(
     return sorted(persisted)
 
 
+def load_canonical_aliases(base_dir: Path) -> dict[str, str]:
+    aliases: dict[str, str] = {}
+    root = Path(base_dir) / "data" / "deep_read_aliases"
+    if not root.exists():
+        return aliases
+    for path in root.glob("*/MIGRATION.json"):
+        try:
+            row = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        alias = str(row.get("alias_paper_id") or "")
+        canonical = str(row.get("canonical_paper_id") or "")
+        if alias and canonical and alias != canonical:
+            aliases[alias] = canonical
+    return aliases
+
+
+def migrate_persistent_selection(
+    persisted_ids: Sequence[str],
+    valid_ids: Sequence[str],
+    aliases: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Resolve old IDs and remove selections that are no longer selectable."""
+    valid = {str(value) for value in valid_ids if value}
+    mapping = dict(aliases or {})
+    migrated: dict[str, str] = {}
+    removed: list[str] = []
+    selected: set[str] = set()
+    for raw in dict.fromkeys(str(value) for value in persisted_ids if value):
+        resolved = raw
+        visited: set[str] = set()
+        while resolved in mapping and resolved not in visited:
+            visited.add(resolved)
+            resolved = mapping[resolved]
+        if resolved in valid:
+            selected.add(resolved)
+            if resolved != raw:
+                migrated[raw] = resolved
+        else:
+            removed.append(raw)
+    return {
+        "selected_ids": sorted(selected),
+        "migrated": migrated,
+        "removed": sorted(removed),
+    }
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -101,7 +148,31 @@ def archive(paper_ids: Sequence[str], *, reason: str, base_dir: Path) -> dict[st
 def rebuild_current_formal_rag(base_dir: Path) -> dict[str, Any]:
     from src.unified_rag import build_unified_rag
     rows = read_jsonl(base_dir / "data/paper_manifest.jsonl")
-    ids = [row["paper_id"] for row in rows if row.get("library_status") == "FORMAL" and row.get("deep_read_complete") and row.get("evidence_status") in {"AUTO_VALIDATED", "HUMAN_CONFIRMED"}]
+    by_id = {str(row.get("paper_id") or ""): row for row in rows}
+    whitelist_path = base_dir / "data/system/formal_rag_whitelist.json"
+    try:
+        whitelist_payload = json.loads(whitelist_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        whitelist_payload = {}
+    confirmed = {
+        str(value) for value in whitelist_payload.get("paper_ids") or [] if value
+    }
+    newly_qualified = {
+        str(row.get("paper_id") or "")
+        for row in rows
+        if row.get("library_status") == "FORMAL"
+        and row.get("deep_read_complete")
+        and row.get("evidence_status") in {"AUTO_VALIDATED", "HUMAN_CONFIRMED"}
+    }
+    requested = confirmed if confirmed else newly_qualified
+    ids = [
+        paper_id
+        for paper_id in sorted(requested)
+        if (row := by_id.get(paper_id))
+        and row.get("library_status") == "FORMAL"
+        and row.get("deep_read_complete")
+        and row.get("domain_scope") != "OUT_OF_SCOPE"
+    ]
     return build_unified_rag(ids, base_dir=base_dir)
 
 

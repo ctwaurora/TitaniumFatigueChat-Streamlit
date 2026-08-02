@@ -45,7 +45,11 @@ from src.literature_library import (
     valid_candidate_records,
 )
 from src.storage_adapter import CLOUD_TEMPORARY, detect_storage_backend
-from src.library_management import reconcile_persistent_selection
+from src.library_management import (
+    load_canonical_aliases,
+    migrate_persistent_selection,
+    reconcile_persistent_selection,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -69,13 +73,25 @@ def paper_type_cn(code: str) -> str:
     return PAPER_TYPE_CN.get(str(code or ""), str(code or "") or "待分类")
 
 
+def _change_library_page(page_key: str, delta: int, total_pages: int) -> None:
+    st.session_state["library_pagination_t1_epoch_ms"] = time.time_ns() / 1_000_000
+    st.session_state["library_pagination_event_id"] = int(
+        st.session_state.get("library_pagination_event_id", 0)
+    ) + 1
+    current = int(st.session_state.get(page_key, 1))
+    st.session_state[page_key] = min(max(1, current + delta), total_pages)
+
+
 @st.fragment
 def _render_full_read_status(base_dir: Path) -> None:
     from src.full_library_deep_read import queue_summary
 
     summary = queue_summary(base_dir=base_dir)
     metrics = st.columns(6)
-    labels = ("唯一文献", "已完成", "处理中", "待处理", "失败", "待人工审核")
+    labels = (
+        "队列逻辑任务", "队列已终结", "队列处理中",
+        "队列待处理", "队列失败", "队列人工审核",
+    )
     values = (
         summary["logical_document_count"], summary["completed"], summary["running"],
         summary["pending"], summary["failed"], summary["needs_human_review"],
@@ -84,7 +100,7 @@ def _render_full_read_status(base_dir: Path) -> None:
         column.metric(label, value)
     page_cols = st.columns(5)
     for column, label, value in zip(page_cols, (
-        "总页数", "已读页数", "EvidenceRecord", "已入RAG", "当前控制",
+        "队列总页数", "队列已读页数", "队列EvidenceRecord", "队列历史入RAG", "当前控制",
     ), (
         summary["total_pages"], summary["completed_pages"], summary["evidence_count"],
         summary["indexed"], summary["control"],
@@ -109,6 +125,11 @@ def _render_full_library_deep_read(base_dir: Path, mode: str) -> None:
     with st.expander("全库精读状态与控制", expanded=False):
         if mode == CLOUD_TEMPORARY:
             st.info("该功能仅在本地运行：Streamlit Cloud 无法读取用户电脑 C 盘中的 paper/pdfs。")
+            return
+        if st.button("加载精读队列状态", key="load_full_read_status"):
+            st.session_state["show_full_read_status"] = True
+        if not st.session_state.get("show_full_read_status"):
+            st.caption("队列与PDF清单只在点击后读取。")
             return
         from src.full_library_deep_read import (
             build_full_library_queue, inventory_pdfs, set_queue_control,
@@ -190,30 +211,31 @@ def paginate_dataframe(
     st.session_state[page_key] = page
     start = (page - 1) * page_size
     end = min(start + page_size, total)
+
     left, center, right, count = st.columns([1, 3, 1, 2])
     with left:
-        if st.button(
+        st.button(
             "◀ 上一页",
             disabled=page <= 1,
             key=f"{page_key}_prev",
             width="stretch",
-        ):
-            st.session_state[page_key] = page - 1
-            st.rerun()
+            on_click=_change_library_page,
+            args=(page_key, -1, total_pages),
+        )
     with center:
         st.markdown(
             f"<div style='text-align:center;'>第 <b>{page}</b>/{total_pages} 页</div>",
             unsafe_allow_html=True,
         )
     with right:
-        if st.button(
+        st.button(
             "下一页 ▶",
             disabled=page >= total_pages,
             key=f"{page_key}_next",
             width="stretch",
-        ):
-            st.session_state[page_key] = page + 1
-            st.rerun()
+            on_click=_change_library_page,
+            args=(page_key, 1, total_pages),
+        )
     with count:
         st.caption(f"显示 {start + 1 if total else 0}-{end} / 共 {total} 条")
     return df.iloc[start:end]
@@ -642,6 +664,11 @@ def _render_local_pdf_scan(base_dir: Path) -> None:
     )
 
     with st.expander("扫描本地PDF并批量导入文献库", expanded=False):
+        if st.button("加载本地PDF目录摘要", key="load_local_pdf_summary"):
+            st.session_state["show_local_pdf_summary"] = True
+        if not st.session_state.get("show_local_pdf_summary"):
+            st.caption("本地PDF目录只在点击后扫描。")
+            return
         directory_rows = local_pdf_directory_summary(base_dir)
         st.dataframe(
             pd.DataFrame(directory_rows),
@@ -744,16 +771,44 @@ def _render_local_pdf_scan(base_dir: Path) -> None:
 def _render_statistics(base_dir: Path) -> None:
     stats = library_statistics(base_dir)
     labels = [
-        ("唯一文献", "unique_literature"),
-        ("PDF 已获取", "pdf_acquired"),
-        ("深读完成", "deep_read_complete"),
-        ("已入统一 RAG", "rag_indexed"),
-        ("待处理/失败", "pending_or_failed"),
+        ("当前逻辑文献", "unique_literature"),
+        ("正式 RAG", "formal_indexed"),
+        ("完成但未索引", "complete_not_indexed"),
+        ("未处理", "pending_processing"),
+        ("处理失败", "processing_failed"),
+        ("待人工复核", "needs_human_review"),
+        ("无全文", "pdf_not_acquired"),
+        ("关联版本", "related_versions"),
+        ("范围外", "out_of_scope"),
     ]
-    columns = st.columns(5)
-    for column, (label, key) in zip(columns, labels):
-        with column:
-            st.metric(label, stats[key])
+    for start in range(0, len(labels), 3):
+        columns = st.columns(3)
+        for column, (label, key) in zip(columns, labels[start : start + 3]):
+            with column:
+                st.metric(label, stats[key])
+    active_state_keys = (
+        "formal_indexed",
+        "complete_not_indexed",
+        "pending_processing",
+        "processing_failed",
+        "needs_human_review",
+        "pdf_not_acquired",
+        "out_of_scope",
+    )
+    state_sum = sum(stats[key] for key in active_state_keys)
+    st.caption(
+        f"互斥终态合计 {state_sum} = 当前逻辑文献 {stats['unique_literature']}；"
+        f"已获取且完成版本归并的逻辑文献为 {stats['acquired_logical_literature']}。"
+    )
+    st.caption(
+        f"非活跃记录另列：关联版本 {stats['related_versions']}；"
+        f"归档 {stats['archived']}；已删除审计 {stats['deleted']}；"
+        f"alias 旧 ID {stats['alias_old_ids']}。"
+    )
+    st.caption(
+        f"历史 225 口径为清理前已获取主文献；移除 8 条无用记录后，"
+        f"当前已获取主文献为 {stats['acquired_logical_literature']}。"
+    )
 
 
 def _normal_library_rows(base_dir: Path) -> List[Dict[str, Any]]:
@@ -807,6 +862,101 @@ def _render_evidence_table(evidence: Sequence[Dict[str, Any]]) -> None:
         if column in display.columns
     ]
     st.dataframe(display[columns], hide_index=True, width="stretch")
+
+
+def _render_gap_evidence(rows: Sequence[Dict[str, Any]], *, refuting: bool) -> None:
+    from src.research_reasoning import normalize_ui_value
+
+    if not rows:
+        st.info("本地正式库中尚未找到可追溯证据。")
+        return
+    for row in rows:
+        title = normalize_ui_value(row.get("title") or "题名未报告")
+        authors = normalize_ui_value(row.get("authors") or "作者未报告")
+        year = normalize_ui_value(row.get("year") or "年份未报告")
+        st.markdown(f"- **{title}**（{authors}，{year}）")
+        st.markdown(
+            f"  - 原文：{normalize_ui_value(row.get('original_text') or '原文未报告')}"
+        )
+        st.markdown(
+            f"  - 页码：{row.get('page_number') or '未报告'}；"
+            f"章节：{normalize_ui_value(row.get('section') or '未报告')}；"
+            f"Evidence ID：`{normalize_ui_value(row.get('evidence_id') or '未报告')}`"
+        )
+        conditions = normalize_ui_value(row.get("experimental_conditions") or {})
+        if conditions:
+            st.markdown(
+                "  - 实验条件："
+                + json.dumps(conditions, ensure_ascii=False, sort_keys=True)
+            )
+        if refuting:
+            st.markdown(
+                "  - 可能反驳原因：该证据显示结论可能随实验条件改变，"
+                "不能把当前空白表述为无条件成立。"
+            )
+        else:
+            st.markdown(f"  - 证据角色：{row.get('evidence_role') or 'SUPPORT'}")
+
+
+def _render_research_gap_result(result: Dict[str, Any]) -> None:
+    from src.research_reasoning import CONDITION_LABELS, normalize_ui_value
+
+    gaps = result.get("gaps") or result.get("research_gaps") or []
+    if result.get("status") == "INSUFFICIENT_EVIDENCE":
+        st.warning("当前选中文献不足以可靠判定研究空白。")
+    for index, gap in enumerate(gaps, 1):
+        st.markdown(
+            f"### 研究空白{index}：{normalize_ui_value(gap.get('title_cn') or '待核验研究空白')}"
+        )
+        st.markdown("**空白描述**")
+        paragraphs = gap.get("description_paragraphs_cn") or [gap.get("description")]
+        for paragraph in paragraphs:
+            if paragraph:
+                st.markdown(str(normalize_ui_value(paragraph)))
+
+        st.markdown("**已有支持证据**")
+        _render_gap_evidence(gap.get("supporting_evidence") or [], refuting=False)
+        st.markdown("**反向证据与可能反驳**")
+        _render_gap_evidence(gap.get("refuting_evidence") or [], refuting=True)
+        for explanation in gap.get("dual_role_explanations") or []:
+            st.info(
+                f"论文 `{explanation.get('paper_id')}` 同时提供双向证据："
+                f"{explanation.get('explanation')} 支持 Evidence："
+                f"{', '.join(explanation.get('supporting_evidence_ids') or [])}；"
+                f"反向 Evidence：{', '.join(explanation.get('refuting_evidence_ids') or [])}。"
+            )
+
+        st.markdown("**已覆盖条件**")
+        condition_rows = []
+        for key, values in (gap.get("studied_conditions") or {}).items():
+            label = CONDITION_LABELS.get(key, key)
+            normalized = []
+            for value in values if isinstance(values, list) else [values]:
+                normalized.append(str(normalize_ui_value(value)))
+            condition_rows.append({"条件": label, "已覆盖值": "；".join(normalized)})
+        if condition_rows:
+            st.dataframe(pd.DataFrame(condition_rows), hide_index=True, width="stretch")
+        else:
+            st.info("当前证据未报告足够的实验条件。")
+
+        st.markdown("**尚未覆盖条件**")
+        missing = gap.get("uncovered_conditions") or []
+        st.markdown("、".join(CONDITION_LABELS.get(key, key) for key in missing) or "未识别到明确缺失组合。")
+        st.markdown("**空白重要性**")
+        st.markdown(str(gap.get("importance_cn") or "需要更多正式证据评估科学与工程意义。"))
+        st.markdown("**可验证性**")
+        st.markdown(str(gap.get("testability_cn") or "需要根据变量与条件设计验证实验。"))
+        st.markdown("**证据充分度**")
+        st.markdown(f"`{gap.get('evidence_sufficiency') or 'LOW'}`")
+        st.markdown("**建议补充检索**")
+        st.markdown("中文关键词：" + "；".join(gap.get("search_keywords_cn") or []))
+        st.markdown("英文检索式：" + "；".join(gap.get("search_keywords_en") or []))
+
+    with st.expander("查看结构化原始数据", expanded=False):
+        if st.button("加载结构化原始数据", key="load_gap_raw_json"):
+            st.session_state["show_gap_raw_json"] = True
+        if st.session_state.get("show_gap_raw_json"):
+            st.json(result, expanded=False)
 
 
 def render_paper_detail(record: Dict[str, Any], base_dir: Path) -> None:
@@ -1001,11 +1151,11 @@ def render_batch_operations(
     selected_ids: List[str],
     base_dir: Path,
 ) -> None:
-    gate = eligible_paper_ids(selected_ids, base_dir=base_dir)
-    eligible = gate["eligible"]
     if not selected_ids:
         st.info("请先选择具有有效全文和可信证据的 canonical 文献。")
         return
+    gate = eligible_paper_ids(selected_ids, base_dir=base_dir)
+    eligible = gate["eligible"]
     if gate["rejected"]:
         st.warning(
             "以下记录已自动排除：" + json.dumps(gate["rejected"], ensure_ascii=False)
@@ -1178,9 +1328,12 @@ def render_batch_operations(
         result = st.session_state.get(key)
         if result:
             with st.expander(label, expanded=True):
-                if result.get("status") == "INSUFFICIENT_EVIDENCE":
-                    st.error("INSUFFICIENT_EVIDENCE")
-                st.json(result, expanded=True)
+                if key in {"library_gap_result", "library_full_reasoning_result"}:
+                    _render_research_gap_result(result)
+                else:
+                    if result.get("status") == "INSUFFICIENT_EVIDENCE":
+                        st.error("当前本地证据不足，不能生成可靠结论。")
+                    st.json(result, expanded=True)
 
 
 def render_invalid_metadata(base_dir: Path) -> None:
@@ -1260,6 +1413,11 @@ def render_invalid_metadata(base_dir: Path) -> None:
 
 def render_task_status(base_dir: Path) -> None:
     with st.expander("🧭 文献任务状态", expanded=False):
+        if st.button("加载历史任务", key="load_literature_tasks"):
+            st.session_state["show_literature_tasks"] = True
+        if not st.session_state.get("show_literature_tasks"):
+            st.caption("历史任务只在点击后读取。")
+            return
         from src.literature_tasks import list_literature_tasks
 
         tasks = list_literature_tasks(base_dir)
@@ -1289,8 +1447,142 @@ def _render_secondary_sections(base_dir: Path, mode: str) -> None:
     _render_system_status(base_dir, mode)
 
 
+@st.fragment
+def _render_library_results_fragment(
+    frame: pd.DataFrame,
+    valid_selection_ids: List[str],
+) -> None:
+    """Render pagination and selection without rerunning the full library page."""
+    fragment_started = time.perf_counter()
+    t2_epoch_ms = time.time_ns() / 1_000_000
+    st.session_state["library_fragment_execution_count"] = int(
+        st.session_state.get("library_fragment_execution_count", 0)
+    ) + 1
+    persisted_before = set(st.session_state.get("library_selected_ids", []))
+    page_size = 20
+    total = len(frame)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    current_page = min(
+        max(1, int(st.session_state.get("lib_table", 1))), total_pages
+    )
+    st.session_state["lib_table"] = current_page
+    start = (current_page - 1) * page_size
+    end = min(start + page_size, total)
+
+    left, center, right, count = st.columns([1, 3, 1, 2])
+    left.button(
+        "◀ 上一页",
+        disabled=current_page <= 1,
+        key="lib_table_prev",
+        width="stretch",
+        on_click=_change_library_page,
+        args=("lib_table", -1, total_pages),
+    )
+    center.markdown(
+        f"<div style='text-align:center;'>第 <b>{current_page}</b>/{total_pages} 页</div>",
+        unsafe_allow_html=True,
+    )
+    right.button(
+        "下一页 ▶",
+        disabled=current_page >= total_pages,
+        key="lib_table_next",
+        width="stretch",
+        on_click=_change_library_page,
+        args=("lib_table", 1, total_pages),
+    )
+    count.caption(f"显示 {start + 1 if total else 0}-{end} / 共 {total} 条")
+
+    page_source = frame.iloc[start:end]
+    page = pd.DataFrame(
+        {
+            "题名": page_source["title"],
+            "年份": page_source["year"].fillna(""),
+            "分类": page_source["type_cn"],
+            "PDF 状态": page_source["pdf_status"],
+            "证据状态": page_source["evidence_status"],
+            "RAG 状态": page_source["rag_status"],
+            "_paper_id": page_source["paper_id"],
+            "_selectable": page_source["selectable"],
+        }
+    ).reset_index(drop=True)
+    t3_epoch_ms = time.time_ns() / 1_000_000
+    payload_json = page.to_json(orient="records", force_ascii=False)
+    table_html = page[
+        ["题名", "年份", "分类", "PDF 状态", "证据状态", "RAG 状态"]
+    ].to_html(index=False, escape=True, classes="library-page-table")
+    t4_epoch_ms = time.time_ns() / 1_000_000
+    st.markdown(
+        "<div style='overflow-x:auto'>" + table_html + "</div>",
+        unsafe_allow_html=True,
+    )
+    t5_epoch_ms = time.time_ns() / 1_000_000
+    st.markdown(
+        f"<span data-library-page='{current_page}' "
+        f"data-library-event-id='{int(st.session_state.get('library_pagination_event_id', 0))}' "
+        f"data-library-t1-ms='{st.session_state.get('library_pagination_t1_epoch_ms', '')}' "
+        f"data-library-t2-ms='{t2_epoch_ms:.3f}' "
+        f"data-library-t3-ms='{t3_epoch_ms:.3f}' "
+        f"data-library-t4-ms='{t4_epoch_ms:.3f}' "
+        f"data-library-t5-ms='{t5_epoch_ms:.3f}' "
+        f"data-library-full-reruns='{int(st.session_state.get('library_full_rerun_count', 0))}' "
+        f"data-library-fragment-runs='{int(st.session_state.get('library_fragment_execution_count', 0))}' "
+        f"data-library-row-count='{len(page)}' "
+        f"data-library-json-bytes='{len(payload_json.encode('utf-8'))}' "
+        f"data-library-html-bytes='{len(table_html.encode('utf-8'))}' "
+        f"data-library-fragment-seconds='{time.perf_counter() - fragment_started:.4f}'></span>",
+        unsafe_allow_html=True,
+    )
+    page_ids = [str(value) for value in page["_paper_id"].tolist()]
+    valid_id_set = set(valid_selection_ids)
+    selectable_page_ids = [
+        str(row["_paper_id"])
+        for _, row in page.iterrows()
+        if bool(row["_selectable"]) and str(row["_paper_id"]) in valid_id_set
+    ]
+    titles_by_id = {
+        str(row["_paper_id"]): str(row["题名"])
+        for _, row in page.iterrows()
+    }
+    selected_ids = [value for value in persisted_before if value in valid_id_set]
+    with st.form(key=f"library_page_selection_form_{current_page}"):
+        page_selected_ids = st.multiselect(
+            "选择当前页文献",
+            options=selectable_page_ids,
+            default=[value for value in selectable_page_ids if value in persisted_before],
+            format_func=lambda value: titles_by_id.get(value, value),
+            help="表单内选择不会触发整页重跑；提交后持久保存到跨页选择。",
+        )
+        save_page_selection = st.form_submit_button("保存当前页选择")
+    if save_page_selection:
+        selected_ids = reconcile_persistent_selection(
+            st.session_state.get("library_selected_ids", []),
+            page_ids,
+            page_selected_ids,
+        )
+        selected_ids = [value for value in selected_ids if value in valid_id_set]
+        st.session_state["library_selected_ids"] = selected_ids
+    selection_cols = st.columns([3, 1, 1])
+    selection_cols[0].caption(f"跨页持久选择：{len(selected_ids)} 篇")
+    if selection_cols[1].button(
+        "清空选择", key="clear_library_selection", disabled=not selected_ids
+    ):
+        st.session_state["library_selected_ids"] = []
+        st.rerun()
+    if selection_cols[2].button(
+        "应用选择",
+        key="apply_library_selection",
+        type="primary",
+        disabled=not selected_ids,
+        help="将当前跨页选择提交到下方科研操作区。",
+    ):
+        st.rerun()
+
+
 def render_library_page() -> None:
     """Render the same complete library workflow locally and on cloud."""
+    st.session_state["library_full_rerun_count"] = int(
+        st.session_state.get("library_full_rerun_count", 0)
+    ) + 1
     backend = detect_storage_backend(PROJECT_ROOT)
     base_dir = backend.prepare()
 
@@ -1311,7 +1603,27 @@ def render_library_page() -> None:
     _render_statistics(base_dir)
     st.divider()
 
-    rows = _normal_library_rows_cached(str(base_dir), _library_dataset_version(base_dir))
+    dataset_version = _library_dataset_version(base_dir)
+    rows = _normal_library_rows_cached(str(base_dir), dataset_version)
+    valid_selection_ids = [
+        str(row["paper_id"]) for row in rows if row.get("selectable")
+    ]
+    selection_migration = migrate_persistent_selection(
+        st.session_state.get("library_selected_ids", []),
+        valid_selection_ids,
+        load_canonical_aliases(base_dir),
+    )
+    st.session_state["library_selected_ids"] = selection_migration["selected_ids"]
+    st.session_state["library_dataset_version"] = dataset_version
+    if selection_migration["migrated"] or selection_migration["removed"]:
+        st.info(
+            "数据版本变化后已迁移或清理过期选择："
+            f"迁移 {len(selection_migration['migrated'])}，"
+            f"清理 {len(selection_migration['removed'])}。"
+        )
+    active_detail = str(st.session_state.get("library_detail_id") or "")
+    if active_detail and active_detail not in {str(row["paper_id"]) for row in rows}:
+        st.session_state.pop("library_detail_id", None)
     frame = pd.DataFrame(rows)
     st.subheader("文献列表")
     view_filter = st.radio(
@@ -1364,83 +1676,24 @@ def render_library_page() -> None:
             )
         ]
 
-    persisted_before = set(st.session_state.get("library_selected_ids", []))
-    display = pd.DataFrame(
-        {
-            "选择": frame["paper_id"].isin(persisted_before),
-            "题名": frame["title"],
-            "作者": frame["authors"].fillna(""),
-            "年份": frame["year"].fillna(""),
-            "分类": frame["type_cn"],
-            "PDF 状态": frame["pdf_status"],
-            "深读状态": frame["deep_read_complete"].map(
-                {True: "COMPLETED", False: "PENDING"}
-            ),
-            "证据状态": frame["evidence_status"],
-            "RAG 状态": frame["rag_status"],
-            "DOI": frame["doi"].fillna(""),
-            "库状态": frame["library_status"],
-            "来源": frame["source"].map(
-                {
-                    "formal": "正式库",
-                    "candidate": "候选库",
-                    "quarantined": "异常记录",
-                    "archived": "已归档",
-                }
-            ),
-            "_paper_id": frame["paper_id"],
-            "_selectable": frame["selectable"],
-        }
-    ).reset_index(drop=True)
-    page = paginate_dataframe(display, page_size=20, page_key="lib_table")
-    editor = st.data_editor(
-        page.drop(columns=["_paper_id", "_selectable"]),
-        hide_index=True,
-        width="stretch",
-        num_rows="fixed",
-        disabled=[
-            "题名",
-            "作者",
-            "年份",
-            "分类",
-            "PDF 状态",
-            "深读状态",
-            "证据状态",
-            "RAG 状态",
-            "DOI",
-            "库状态",
-            "来源",
-        ],
-        key="lib_data_editor",
-        column_config={
-            "选择": st.column_config.CheckboxColumn("选择", default=False),
-            "题名": st.column_config.TextColumn("题名", width="large"),
-            "作者": st.column_config.TextColumn("作者", width="medium"),
-        },
+    _render_library_results_fragment(
+        frame,
+        valid_selection_ids,
     )
-    selected_indices = editor.index[editor["选择"] == True].tolist()
-    page_selected_ids = [
-        str(page.loc[index, "_paper_id"])
-        for index in selected_indices
+    selected_ids = [
+        value
+        for value in st.session_state.get("library_selected_ids", [])
+        if value in set(valid_selection_ids)
     ]
-    page_ids = [str(value) for value in page["_paper_id"].tolist()]
-    selected_ids = reconcile_persistent_selection(
-        st.session_state.get("library_selected_ids", []), page_ids, page_selected_ids,
-    )
-    st.session_state["library_selected_ids"] = selected_ids
-    selection_cols = st.columns([3, 1])
-    selection_cols[0].caption(f"跨页持久选择：{len(selected_ids)} 篇")
-    if selection_cols[1].button("清空选择", key="clear_library_selection", disabled=not selected_ids):
-        st.session_state["library_selected_ids"] = []
-        st.rerun()
-
-    canonical = [
-        row
-        for row in rows
-        if row.get("source") == "formal"
-        and row.get("validation_status") == VALID_METADATA
-    ]
-    if canonical:
+    if st.button("打开文献详情选择器", key="load_library_detail_selector"):
+        st.session_state["show_library_detail_selector"] = True
+    if st.session_state.get("show_library_detail_selector"):
+        canonical = [
+            row
+            for row in rows
+            if row.get("source") == "formal"
+            and row.get("validation_status") == VALID_METADATA
+        ]
         options = [row["paper_id"] for row in canonical]
         by_id = {row["paper_id"]: row for row in canonical}
         detail_id = st.selectbox(
@@ -1455,7 +1708,6 @@ def render_library_page() -> None:
         if active_detail in by_id:
             with st.container(border=True):
                 render_paper_detail(by_id[active_detail], base_dir)
-
     st.divider()
     st.subheader(f"⚙️ 批量科研操作（{len(selected_ids)} 篇有效文献）")
     render_batch_operations(selected_ids, base_dir)

@@ -12,9 +12,11 @@ streamlit_app.py — TitaniumFatigueChat AI Scientist (Search-Engine Style)
 """
 
 import hashlib
+import html
 import os
 import re
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -41,6 +43,34 @@ from src.app_auth import require_authentication
 
 if not require_authentication(st):
     st.stop()
+
+
+@st.cache_resource(show_spinner=False)
+def _start_search_index_prewarm(base_dir_text: str) -> threading.Thread:
+    """Warm read-only retrieval resources without blocking the first page."""
+    def worker() -> None:
+        try:
+            from src.unified_rag import retrieve_research_evidence
+
+            retrieve_research_evidence(
+                "titanium fatigue",
+                top_k=1,
+                base_dir=Path(base_dir_text),
+            )
+        except Exception:
+            # Search keeps its normal degraded-mode diagnostics if prewarm fails.
+            return
+
+    thread = threading.Thread(
+        target=worker,
+        name="smart-search-index-prewarm",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+_SEARCH_PREWARM_THREAD = _start_search_index_prewarm(str(BASE_DIR))
 
 from src.interactive_modules import (
     EvidenceRelationExplorer,
@@ -2051,6 +2081,8 @@ def generate_experiment_design_answer(
 def generate_comprehensive_answer(
     question: str,
     answer_mode: str,
+    progress_callback=None,
+    use_llm: bool = True,
 ) -> str:
     """
     根据 answer_mode 和 answer_depth 分派到不同深度的回答生成器。
@@ -2066,31 +2098,31 @@ def generate_comprehensive_answer(
     # Save to session for other uses
     st.session_state.variable_pair = (ind_var, dep_var, var_class)
 
-    # Analyze coverage
-    from src.interactive_modules import LiteratureSearchPlanner
-    planner = LiteratureSearchPlanner()
-    coverage_result = planner.analyze_question(question)
-    coverage_level = coverage_result["coverage_level"]
-
-    # ── Step 2: Build paper-level prefix ──
-    coverage_warning = ""
-    if coverage_result.get("topup_required"):
-        coverage_warning = (
-            "> ⚠️ **当前本地文献库不足以支持强假设生成**，"
-            "以下内容仅为 search-guided candidate 输出。\n\n"
-        )
-
-    # ── Step 3: Page-specific answer generation ──
+    # ── Step 2: Page-specific answer generation ──
     if answer_mode == "popular_science":
+        from src.interactive_modules import LiteratureSearchPlanner
+
+        coverage_result = LiteratureSearchPlanner().analyze_question(question)
         answer = generate_popular_science_answer(question, ind_var, dep_var, var_class)
     else:
         # Expensive retrieval/LLM work occurs only after the user clicks the
         # analysis button.  Local evidence remains visible if vector or LLM
         # services are unavailable.
         from src.smart_search import run_smart_search
-        smart_result = run_smart_search(question, base_dir=BASE_DIR, use_llm=True)
+        smart_result = run_smart_search(
+            question,
+            base_dir=BASE_DIR,
+            use_llm=use_llm,
+            progress_callback=progress_callback,
+        )
         st.session_state["smart_search_result"] = smart_result
         answer = smart_result["answer"]
+        research_result = smart_result.get("research_result") or {}
+        sufficiency = research_result.get("evidence_sufficiency") or {}
+        coverage_result = {
+            "topup_required": bool(research_result.get("insufficient")),
+            "evidence_status": sufficiency.get("status", "NOT_EVALUATED"),
+        }
 
     # ── Step 4-8: 无需额外追加 ──
     if depth != "paper_level":
@@ -2111,6 +2143,219 @@ def generate_comprehensive_answer(
         )
 
     return answer
+
+
+def _mark_smart_search_received() -> None:
+    st.session_state["smart_search_t1_epoch_ms"] = time.time_ns() / 1_000_000
+    st.session_state["smart_search_event_id"] = int(
+        st.session_state.get("smart_search_event_id", 0)
+    ) + 1
+
+
+def _first_stage_evidence_html(first_stage: dict[str, Any]) -> str:
+    rows = first_stage.get("preview_rows") or []
+    items = []
+    for row in rows:
+        title = html.escape(str(row.get("title") or "题名未报告"))
+        role = html.escape(str(row.get("role") or "证据"))
+        evidence_id = html.escape(str(row.get("evidence_id") or "NOT_REPORTED"))
+        page_number = html.escape(str(row.get("page_number") or "NOT_REPORTED"))
+        section = html.escape(str(row.get("section") or "NOT_REPORTED"))
+        preview = html.escape(str(row.get("preview") or ""))
+        items.append(
+            "<li style='margin:0 0 10px 0'>"
+            f"<strong>[{role}] {title}</strong><br>"
+            f"Evidence ID: {evidence_id}; 页码: {page_number}; 章节: {section}<br>"
+            f"<span>{preview}</span></li>"
+        )
+    return (
+        "<div class='smart-search-first-stage'>"
+        "<h2>检索结果</h2>"
+        f"<p>识别主题: {html.escape(str(first_stage.get('identified_topic') or 'general_explanation'))}; "
+        "检索边界: 当前正式可信 RAG (153 篇); "
+        f"召回文献数: {int(first_stage.get('retrieved_paper_count') or 0)}</p>"
+        "<h3>首批证据</h3><ol style='padding-left:22px'>"
+        + "".join(items)
+        + "</ol><p>完整综合正在生成。</p></div>"
+    )
+
+
+@st.fragment
+def _render_smart_search_analysis_fragment() -> None:
+    """Run and render the two-stage answer without rerunning the full app."""
+    st.session_state["smart_search_fragment_execution_count"] = int(
+        st.session_state.get("smart_search_fragment_execution_count", 0)
+    ) + 1
+    st.text_input(
+        "科研问题",
+        placeholder="请输入科研问题、变量组合或参数条件，例如：孔隙尺寸和疲劳寿命之间是什么关系？",
+        key="user_question",
+        label_visibility="collapsed",
+    )
+    action = st.columns([1, 2, 1])[1]
+    analyze_clicked = action.button(
+        "🔍 开始分析",
+        type="primary",
+        use_container_width=True,
+        key="run_analysis_fragment_btn",
+        on_click=_mark_smart_search_received,
+    )
+    if analyze_clicked:
+        current_question = st.session_state.get("user_question", "").strip()
+        current_mode = st.session_state.get("answer_mode", "research_analysis")
+        if not current_question:
+            st.warning("请输入科研问题。")
+        else:
+            sq = understand_user_query(current_question)
+            st.session_state.structured_query = sq
+            effective_question = sq.get("corrected_query") or current_question
+            from src.smart_search import PORE_PATTERN
+
+            if (
+                not PORE_PATTERN.search(current_question)
+                and PORE_PATTERN.search(effective_question)
+            ):
+                effective_question = current_question
+            answer_text = generate_comprehensive_answer(
+                effective_question,
+                current_mode,
+                use_llm=False,
+            )
+            st.session_state.answer = answer_text
+            st.session_state.last_question = current_question
+            st.session_state.last_mode = current_mode
+            st.session_state.analysis_done = True
+            st.session_state.answer_timestamp = time.time()
+            st.session_state["smart_search_pending_full_answer"] = {
+                "question": effective_question,
+                "mode": current_mode,
+            }
+
+    has_answer = bool(st.session_state.get("answer"))
+    smart_result = st.session_state.get("smart_search_result") or {}
+    smart_diagnostics = smart_result.get("diagnostics") or {}
+    first_stage_metrics = smart_result.get("first_stage") or {}
+    pending_full = st.session_state.get("smart_search_pending_full_answer")
+    last_mode = st.session_state.get("last_mode", st.session_state.get("answer_mode"))
+    mode_label = MODES.get(last_mode, {}).get("label", "")
+    st.markdown(f"<h3 style='text-align:center;'>📋 {mode_label}</h3>", unsafe_allow_html=True)
+    st.caption(f"**问题**: {st.session_state.get('last_question') or '等待输入'}")
+    answer_placeholder = st.empty()
+    if has_answer and pending_full:
+        answer_placeholder.markdown(
+            _first_stage_evidence_html(first_stage_metrics),
+            unsafe_allow_html=True,
+        )
+    else:
+        answer_placeholder.markdown(
+            st.session_state.get("answer")
+            or "输入科研问题后开始分析，系统会先显示本地检索证据。"
+        )
+    t7_epoch_ms = time.time_ns() / 1_000_000
+    stage_times = smart_diagnostics.get("stage_timestamps_epoch_ms") or {}
+    answer_bytes = len(str(st.session_state.get("answer") or "").encode("utf-8"))
+    st.markdown(
+        f"<span data-smart-search-evidence-ready='{'true' if has_answer else 'false'}' "
+        f"data-smart-search-event-id='{int(st.session_state.get('smart_search_event_id', 0))}' "
+        f"data-smart-search-t1-ms='{st.session_state.get('smart_search_t1_epoch_ms', '')}' "
+        f"data-smart-search-t2-ms='{stage_times.get('t2_normalization', '')}' "
+        f"data-smart-search-t3-ms='{stage_times.get('t3_bm25', '')}' "
+        f"data-smart-search-t4-ms='{stage_times.get('t4_vector', '')}' "
+        f"data-smart-search-t5-ms='{stage_times.get('t5_rerank', '')}' "
+        f"data-smart-search-t6-ms='{stage_times.get('t6_first_evidence_ready', '')}' "
+        f"data-smart-search-t7-ms='{t7_epoch_ms:.3f}' "
+        f"data-smart-search-fragment-runs='{int(st.session_state.get('smart_search_fragment_execution_count', 0))}' "
+        f"data-smart-search-full-reruns='{int(st.session_state.get('smart_search_full_rerun_count', 0))}' "
+        f"data-smart-search-payload-bytes='{answer_bytes}' "
+        f"data-smart-search-top-paper-count='{first_stage_metrics.get('preview_paper_count', 0)}' "
+        f"data-smart-search-evidence-count='{first_stage_metrics.get('preview_evidence_count', 0)}' "
+        f"data-smart-search-retrieval-seconds='{smart_diagnostics.get('retrieval_elapsed_seconds', '')}'></span>",
+        unsafe_allow_html=True,
+    )
+
+    first_stage = smart_result.get("first_stage") or {}
+    pending_area = st.empty()
+    with pending_area.container():
+        if pending_full:
+            st.info(
+                "首批证据已显示。当前步骤：跨文献综合；"
+                f"已召回 {first_stage.get('retrieved_paper_count', 0)} 篇文献，"
+                f"已使用 {first_stage.get('evidence_count', 0)} 条 Evidence；"
+                "剩余阶段：冲突检查和结论。"
+            )
+        else:
+            st.info("首批证据显示后，可在这里继续生成完整科研回答。")
+        continue_col, cancel_col = st.columns(2)
+        continue_full = continue_col.button(
+            "继续生成完整科研回答",
+            key="continue_smart_search_fragment",
+            type="primary",
+            use_container_width=True,
+            disabled=not bool(pending_full),
+        )
+        cancel_full = cancel_col.button(
+            "取消完整回答",
+            key="cancel_smart_search_fragment",
+            use_container_width=True,
+            disabled=not bool(pending_full),
+        )
+    if cancel_full:
+        st.session_state.pop("smart_search_pending_full_answer", None)
+        pending_area.empty()
+        st.warning("已取消模型综合，保留当前检索证据。")
+    elif continue_full and pending_full:
+        with st.spinner("正在生成支持、反向、条件依赖、公式与冲突综合..."):
+            full_answer = generate_comprehensive_answer(
+                pending_full["question"],
+                pending_full["mode"],
+                use_llm=True,
+            )
+        st.session_state.answer = full_answer
+        st.session_state.answer_timestamp = time.time()
+        st.session_state.pop("smart_search_pending_full_answer", None)
+        pending_area.empty()
+        answer_placeholder.markdown(full_answer)
+        final_diagnostics = (
+            st.session_state.get("smart_search_result") or {}
+        ).get("diagnostics") or {}
+        final_stages = final_diagnostics.get("stage_timestamps_epoch_ms") or {}
+        st.markdown(
+            "<span data-smart-search-final-complete='true' "
+            f"data-smart-search-t9-ms='{final_stages.get('t9_deepseek_start', '')}' "
+            f"data-smart-search-t10-ms='{final_stages.get('t10_final_answer', '')}'></span>",
+            unsafe_allow_html=True,
+        )
+        st.success("完整科研回答已生成。")
+
+    clear_col = st.columns([1, 2, 1])[1]
+    if clear_col.button(
+        "🔄 新问题",
+        key="clear_fragment_answer",
+        use_container_width=True,
+        disabled=not has_answer,
+    ):
+        for key in (
+            "answer", "smart_search_pending_full_answer", "smart_search_result",
+            "structured_query", "show_smart_search_download",
+        ):
+            st.session_state.pop(key, None)
+        st.session_state.analysis_done = False
+        st.rerun(scope="fragment")
+    if st.button(
+        "📥 准备导出回答",
+        key="prepare_smart_search_download",
+        use_container_width=True,
+        disabled=(not has_answer or bool(pending_full)),
+    ):
+        st.session_state["show_smart_search_download"] = True
+    if st.session_state.get("show_smart_search_download"):
+        st.download_button(
+            "下载回答文件",
+            data=st.session_state.get("answer") or "",
+            file_name="TitaniumFatigueChat_answer.md",
+            mime="text/markdown",
+            use_container_width=True,
+        )
 
 
 # ── Domain Research Assistant Summary Section ────────────────────────────────
@@ -2365,11 +2610,15 @@ with st.sidebar:
     stats = get_system_stats_cached()
     col1, col2 = st.columns(2)
     with col1:
-        st.metric("唯一文献", stats["unique_literature_count"])
-        st.metric("深读完成", stats["deep_read_complete_count"])
+        st.metric("当前逻辑文献", stats["unique_literature_count"])
+        st.metric("未处理", stats["pending_processing_count"])
+        st.metric("待人工复核", stats["needs_human_review_count"])
+        st.metric("关联版本", stats["related_version_count"])
     with col2:
-        st.metric("已入统一索引", stats["indexed_count"])
-        st.metric("待处理/失败", stats["pending_or_failed_count"])
+        st.metric("正式 RAG", stats["formal_indexed_count"])
+        st.metric("处理失败", stats["processing_failed_count"])
+        st.metric("无全文", stats["pdf_not_acquired_count"])
+        st.metric("完成未索引", stats["complete_not_indexed_count"])
     st.caption(
         f"本地PDF文件数：{stats['local_pdf_file_count']}（含目录副本）；"
         f"唯一SHA-256：{stats['unique_pdf_sha256_count']}"
@@ -2386,6 +2635,12 @@ with st.sidebar:
 # ═══════════════════════════════════════════════════════════════════════════
 
 if current_page == "search":
+    st.session_state["smart_search_full_rerun_count"] = int(
+        st.session_state.get("smart_search_full_rerun_count", 0)
+    ) + 1
+
+    if _SEARCH_PREWARM_THREAD.is_alive():
+        _SEARCH_PREWARM_THREAD.join(timeout=5.0)
 
     st.markdown(
         "<h1 style='text-align: center;'>🔬 TitaniumFatigueChat</h1>",
@@ -2401,13 +2656,7 @@ if current_page == "search":
     search_col1, search_col2, search_col3 = st.columns([1, 2, 1])
 
     with search_col2:
-        # ── Main search box ──
-        st.text_input(
-            "科研问题",
-            placeholder="请输入科研问题、变量组合或参数条件，例如：孔隙尺寸和疲劳寿命之间是什么关系？",
-            key="user_question",
-            label_visibility="collapsed",
-        )
+        _render_smart_search_analysis_fragment()
 
         # ── Mode selection buttons ──
         current_mode = st.session_state.answer_mode
@@ -2451,12 +2700,8 @@ if current_page == "search":
         # ── Analysis and explicitly separated literature actions ──
         action_cols = st.columns(3)
         with action_cols[0]:
-            analyze_clicked = st.button(
-                "🔍 开始分析",
-                type="primary",
-                use_container_width=True,
-                key="run_analysis_btn",
-            )
+            analyze_clicked = False
+            st.caption("下方提交后先显示本地证据")
         with action_cols[1]:
             refresh_metadata_clicked = st.button(
                 "刷新候选元数据",
@@ -2591,16 +2836,29 @@ if current_page == "search":
                     f"是否按这个理解分析？(置信度: {int(sq['overall_confidence']*100)}%)"
                 )
 
-            with st.spinner("正在分析问题，调用多模块生成综合回答..."):
+            with st.spinner("正在识别主题、召回并重排序本地证据..."):
                 # Use the corrected query and extracted variables for answer generation
                 effective_question = sq.get("corrected_query") or current_question
-                answer_text = generate_comprehensive_answer(effective_question, current_mode)
+                from src.smart_search import PORE_PATTERN
+                if (
+                    not PORE_PATTERN.search(current_question)
+                    and PORE_PATTERN.search(effective_question)
+                ):
+                    effective_question = current_question
+                answer_text = generate_comprehensive_answer(
+                    effective_question,
+                    current_mode,
+                    use_llm=False,
+                )
                 st.session_state.answer = answer_text
                 st.session_state.last_question = current_question
                 st.session_state.last_mode = current_mode
                 st.session_state.analysis_done = True
                 st.session_state.answer_timestamp = time.time()
-            st.rerun()
+                st.session_state["smart_search_pending_full_answer"] = {
+                    "question": effective_question,
+                    "mode": current_mode,
+                }
 
     # ── "Question changed" hint ──
     current_question = st.session_state.get("user_question", "").strip()
@@ -2609,8 +2867,16 @@ if current_page == "search":
         st.info("📝 检测到问题已修改，请点击「开始分析」生成新答案。")
 
     # ── Display answer ──
-    if st.session_state.get("answer"):
+    if False and st.session_state.get("answer"):
         st.divider()
+        smart_diagnostics = (
+            st.session_state.get("smart_search_result") or {}
+        ).get("diagnostics") or {}
+        st.markdown(
+            "<span data-smart-search-evidence-ready='true' "
+            f"data-smart-search-retrieval-seconds='{smart_diagnostics.get('retrieval_elapsed_seconds', '')}'></span>",
+            unsafe_allow_html=True,
+        )
         mode_label = MODES.get(st.session_state.last_mode, {}).get("label", "")
         st.markdown(f"<h3 style='text-align: center;'>📋 {mode_label}</h3>", unsafe_allow_html=True)
         display_question = st.session_state.last_question
@@ -2645,25 +2911,74 @@ if current_page == "search":
             st.markdown(vars_html, unsafe_allow_html=True)
         st.divider()
         # 答案仅渲染一次（方案 A：直接显示完整回答）
-        with st.container():
-            st.markdown(st.session_state.answer)
+        answer_placeholder = st.empty()
+        answer_placeholder.markdown(st.session_state.answer)
+
+        pending_full = st.session_state.get("smart_search_pending_full_answer")
+        if pending_full:
+            smart_result = st.session_state.get("smart_search_result") or {}
+            first_stage = smart_result.get("first_stage") or {}
+            pending_area = st.empty()
+            with pending_area.container():
+                st.info(
+                    "首批证据已显示。当前步骤：基于重排序后的关键证据生成完整科研回答；"
+                    f"已召回 {first_stage.get('retrieved_paper_count', 0)} 篇文献，"
+                    f"已使用 {first_stage.get('evidence_count', 0)} 条 Evidence；"
+                    "剩余阶段：跨文献综合、冲突检查和结论。"
+                    "检索证据在模型失败或超时时仍会保留。"
+                )
+                continue_col, cancel_col = st.columns(2)
+                continue_full = continue_col.button(
+                    "继续生成完整科研回答",
+                    key="continue_smart_search_full_answer",
+                    type="primary",
+                    use_container_width=True,
+                )
+                cancel_full = cancel_col.button(
+                    "取消完整回答",
+                    key="cancel_smart_search_full_answer",
+                    use_container_width=True,
+                )
+            if cancel_full:
+                st.session_state.pop("smart_search_pending_full_answer", None)
+                pending_area.empty()
+                st.warning("已取消模型综合，保留当前完整检索证据。")
+            if continue_full:
+                with st.spinner("正在生成支持、反向、条件依赖、公式与冲突综合..."):
+                    full_answer = generate_comprehensive_answer(
+                        pending_full["question"],
+                        pending_full["mode"],
+                        use_llm=True,
+                    )
+                    st.session_state.answer = full_answer
+                    st.session_state.answer_timestamp = time.time()
+                    st.session_state.pop("smart_search_pending_full_answer", None)
+                pending_area.empty()
+                answer_placeholder.markdown(full_answer)
+                st.success("完整科研回答已生成；如模型超时，页面仍保留全部本地检索证据。")
 
         # Collapsible evidence details
         with st.expander("📄 后台数据详情（点击展开）"):
-            st.markdown("#### 模块状态\n")
-            explorer = EvidenceRelationExplorer()
-            miner = EquationParameterMiner()
-            detector = ConflictDetector()
-            macro = MacroMicroLinkExplorer()
-            type_counts = explorer.get_relation_type_counts()
-            if type_counts:
-                st.markdown(f"**变量关系**: {sum(type_counts.values())} 条")
-            summ = miner.get_summary()
-            st.markdown(f"**方程参数**: {summ['total_extractions']} 条提取")
-            if detector.claims:
-                st.markdown(f"**冲突检测**: {len(detector.claims)} 个主题")
-            if macro.links:
-                st.markdown(f"**宏微观关联**: {len(macro.links)} 条")
+            load_diagnostics = st.button(
+                "加载后台模块状态",
+                key="load_answer_diagnostics",
+                help="只在需要查看诊断时加载完整证据、公式、冲突和宏微观索引。",
+            )
+            if load_diagnostics:
+                st.markdown("#### 模块状态\n")
+                explorer = EvidenceRelationExplorer()
+                miner = EquationParameterMiner()
+                detector = ConflictDetector()
+                macro = MacroMicroLinkExplorer()
+                type_counts = explorer.get_relation_type_counts()
+                if type_counts:
+                    st.markdown(f"**变量关系**: {sum(type_counts.values())} 条")
+                summ = miner.get_summary()
+                st.markdown(f"**方程参数**: {summ['total_extractions']} 条提取")
+                if detector.claims:
+                    st.markdown(f"**冲突检测**: {len(detector.claims)} 个主题")
+                if macro.links:
+                    st.markdown(f"**宏微观关联**: {len(macro.links)} 条")
             if st.session_state.get("literature_result"):
                 lit = st.session_state.literature_result
                 st.markdown("#### 自动文献检索\n")
@@ -2694,7 +3009,7 @@ if current_page == "search":
                 st.session_state.last_question = ""
                 st.rerun()
 
-    elif not st.session_state.get("answer"):
+    elif False and not st.session_state.get("answer"):
         st.divider()
         st.markdown(
             "<div style='text-align:center; padding:3rem 0; color:#888;'>"
@@ -3073,10 +3388,15 @@ elif current_page == "dashboard":
     stats = get_system_stats_cached()
 
     metric_cols = st.columns(4)
-    metric_cols[0].metric("唯一文献", stats["unique_literature_count"])
-    metric_cols[1].metric("深读完成", stats["deep_read_complete_count"])
-    metric_cols[2].metric("已入统一索引", stats["indexed_count"])
-    metric_cols[3].metric("待处理/失败", stats["pending_or_failed_count"])
+    metric_cols[0].metric("当前逻辑文献", stats["unique_literature_count"])
+    metric_cols[1].metric("正式 RAG", stats["formal_indexed_count"])
+    metric_cols[2].metric("未处理", stats["pending_processing_count"])
+    metric_cols[3].metric("处理失败", stats["processing_failed_count"])
+    secondary_metrics = st.columns(4)
+    secondary_metrics[0].metric("待人工复核", stats["needs_human_review_count"])
+    secondary_metrics[1].metric("无全文", stats["pdf_not_acquired_count"])
+    secondary_metrics[2].metric("完成未索引", stats["complete_not_indexed_count"])
+    secondary_metrics[3].metric("范围外", stats["out_of_scope_count"])
     st.caption(
         f"本地PDF文件数 {stats['local_pdf_file_count']}，其中唯一SHA-256 "
         f"{stats['unique_pdf_sha256_count']}；目录副本不重复计数。"
@@ -3225,6 +3545,7 @@ elif current_page == "formula_explain":
             ["全部文献", "指定文献"],
             key="formula_paper_scope",
         )
+
         selected_paper_id = None
         if paper_scope == "指定文献" and paper_options:
             selected_paper_label = st.selectbox(

@@ -297,12 +297,8 @@ def _selected_by_path(base_dir: Path) -> Dict[str, Dict[str, Any]]:
 
 
 def build_candidate_inventory(base_dir: Path = BASE_DIR) -> Dict[str, Any]:
-    """Create exactly 30 candidate rows and run the four dedup gates in order."""
+    """Create the current candidate inventory and run four dedup gates in order."""
     local_paths = sorted((base_dir / "papers").rglob("*.pdf"))
-    if len(local_paths) != 23:
-        raise RuntimeError(
-            f"Stage-3.5 inventory expected 23 local candidates, found {len(local_paths)}"
-        )
     selected = _selected_by_path(base_dir)
     rows: List[Dict[str, Any]] = []
     prior: List[Dict[str, Any]] = []
@@ -420,8 +416,6 @@ def build_candidate_inventory(base_dir: Path = BASE_DIR) -> Dict[str, Any]:
                 "failure_reason": str(remote.get("failure_reason") or ""),
             }
         )
-    if len(rows) != 30:
-        raise AssertionError(f"candidate inventory must contain 30 rows, got {len(rows)}")
     oa_rows = [row for row in rows if row.get("oa_available")]
     paths = stage35_paths(base_dir)
     _write_jsonl(paths["candidates"], rows)

@@ -328,16 +328,33 @@ def get_canonical_literature_counts(base_dir: Path = BASE_DIR) -> Dict[str, Any]
     return {
         "local_pdf_file_count": counts["pdf_file_count"],
         "unique_pdf_sha256_count": counts["unique_pdf_sha256_count"],
-        # Backward-compatible field now has one precise meaning: acquired
-        # logical works after version grouping, never physical files or SHA.
-        "unique_literature_count": counts["acquired_logical_literature_count"],
+        # Backward-compatible field now means active canonical primary records.
+        # It excludes related versions, archived/deleted records and aliases.
+        "unique_literature_count": counts["current_logical_literature_count"],
+        "active_canonical_primary_record_count": counts[
+            "active_canonical_primary_record_count"
+        ],
+        "acquired_logical_literature_count": counts["acquired_logical_literature_count"],
         "duplicate_pdf_count": counts["duplicate_pdf_file_count"],
         "pdf_asset_count": counts["pdf_asset_count"],
         "canonical_paper_record_count": counts["canonical_paper_record_count"],
         "related_version_count": counts["related_version_count"],
+        "archived_count": counts["archived_count"],
+        "alias_old_id_count": counts["alias_old_id_count"],
+        "historical_pre_cleanup_acquired_primary_count": counts[
+            "historical_pre_cleanup_acquired_primary_count"
+        ],
         "deep_read_complete_count": counts["deep_read_complete_count"],
         "indexed_count": counts["rag_paper_count"],
-        "pending_or_failed_count": counts["pending_or_failed_acquired_count"],
+        "formal_indexed_count": counts["formal_indexed_count"],
+        "complete_not_indexed_count": counts["complete_not_indexed_count"],
+        "pending_processing_count": counts["pending_processing_count"],
+        "processing_failed_count": counts["processing_failed_count"],
+        "needs_human_review_count": counts["needs_human_review_count"],
+        "pdf_not_acquired_count": counts["pdf_not_acquired_count"],
+        "related_version_count": counts["related_version_count"],
+        "out_of_scope_count": counts["out_of_scope_count"],
+        "deleted_count": counts["deleted_count"],
         "duplicate_relationships": list(
             (snapshot.get("validation") or {}).get("duplicate_pdf_relationships") or []
         ),

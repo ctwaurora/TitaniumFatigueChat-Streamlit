@@ -17,7 +17,7 @@
 python scripts/export_streamlit_deploy.py
 ```
 
-默认输出到相邻 GitHub 工作副本 `TitaniumFatigueChat-Streamlit-GitHub` 内的 `cc_streamlit_deploy` 子目录。脚本采用白名单复制，会先安全清理该部署子目录，再扫描禁止文件、疑似密钥、大文件和 Windows 绝对路径。扫描通过后生成 `DEPLOY_MANIFEST.txt`。
+默认输出到既有 GitHub 工作副本 `TitaniumFatigueChat-Streamlit-GitHub` 内的 `cc_streamlit_deploy` 子目录，不再创建桌面独立 `cc_streamlit_deploy`。脚本采用白名单复制，会先安全清理该部署子目录，再扫描禁止文件、疑似密钥、大文件和 Windows 绝对路径。扫描通过后生成 `DEPLOY_MANIFEST.txt`。
 
 ## 3. GitHub 上传范围
 
