@@ -35,6 +35,7 @@ from src.research_topics import (
     pore_is_dominant,
     query_mentions_pores,
 )
+from src.query_frame import parse_query_frame
 from src.stage1_store import BASE_DIR, load_paper_manifest, update_paper_rag_status
 
 
@@ -239,7 +240,7 @@ def identify_variables(question: str) -> List[str]:
 def _counter_signal(text: str) -> bool:
     return bool(re.search(
         r"\b(?:no significant|not significant|however|whereas|contrary|exception|"
-        r"depend(?:s|ed|ent)? on|limited to|did not|failed to)\b|"
+        r"depend(?:s|ed|ent)? on|limited to|did not|failed to|dominat(?:e|ed|es|ing)?|controlled by|governed by)\b|"
         r"无显著|并不显著|然而|相反|例外|取决于|仅适用于|未提高|未降低",
         str(text or ""),
         re.I,
@@ -908,7 +909,8 @@ def retrieve_research_evidence(
     base_dir: Path = BASE_DIR,
 ) -> Dict[str, Any]:
     started = time.perf_counter()
-    query_topics = identify_topics(question)
+    query_frame = parse_query_frame(question)
+    query_topics = query_frame.topic_labels
     normalized_question = expand_question(question)
     normalization_complete = time.perf_counter()
     errors = []
@@ -941,7 +943,7 @@ def retrieve_research_evidence(
             continue
         lexical = bm25.get(doc["doc_id"], 0.0) / max_bm25
         semantic = max(0.0, vector.get(doc["doc_id"], 0.0))
-        retrieval_score = 0.55 * lexical + 0.45 * semantic
+        retrieval_score = 0.50 * lexical + 0.50 * semantic
         lower = doc["text"].lower()
         coverage = sum(
             any(term in lower for term in VARIABLE_TERMS.get(variable, (variable,)))
@@ -963,7 +965,35 @@ def retrieve_research_evidence(
         }.get(doc.get("index_type"), 0.0)
         doc_topics = document_topics(doc.get("text") or "", doc.get("experimental_conditions") or {})
         topic_overlap = len(set(query_topics) & set(doc_topics))
-        topic_bonus = min(0.18, topic_overlap * 0.06)
+        topic_diversity_score = topic_overlap / max(1, len(set(query_topics)))
+        entity_match_score = coverage / max(1, len(variables)) if variables else 0.5
+        conditions = doc.get("experimental_conditions") or {}
+        frame_conditions = {
+            "alloy_grade": query_frame.alloy_grade,
+            "manufacturing_process": query_frame.manufacturing_process,
+            "stress_ratio_R": query_frame.stress_ratio,
+            "temperature": query_frame.temperature,
+            "environment": query_frame.environment,
+            "loading_mode": query_frame.loading_mode,
+        }
+        checked_conditions = [(key, value) for key, value in frame_conditions.items() if value]
+        condition_matches = 0
+        condition_conflicts = []
+        for key, expected in checked_conditions:
+            actual = conditions.get(key) or conditions.get("process" if key == "manufacturing_process" else key)
+            if not actual:
+                continue
+            actual_text = " ".join(str(item) for item in actual) if isinstance(actual, list) else str(actual)
+            if str(expected).casefold() in actual_text.casefold() or actual_text.casefold() in str(expected).casefold():
+                condition_matches += 1
+            else:
+                condition_conflicts.append({"field": key, "query": expected, "evidence": actual})
+        condition_match_score = condition_matches / max(1, len(checked_conditions)) if checked_conditions else 0.5
+        stage_terms = " ".join((query_frame.fatigue_stage, query_frame.crack_stage)).casefold()
+        fatigue_stage_match_score = 0.5 if not stage_terms.strip() else float(any(term.casefold() in lower or term in doc_topics for term in (query_frame.fatigue_stage, query_frame.crack_stage) if term))
+        formula_match_score = 1.0 if query_frame.requested_formulas and doc.get("index_type") == "formula" else 0.4 if doc.get("index_type") == "formula" else 0.0
+        source_quality_score = min(1.0, 0.55 * provenance + 0.30 * float(doc.get("directness") == "DIRECT") + 0.15 * float(doc.get("confidence") or 0.0))
+        contradiction_relevance_score = float(task_type == "counter_target" and _counter_signal(doc.get("text") or ""))
         unsolicited_pore_penalty = (
             0.30
             if not query_mentions_pores(question)
@@ -972,13 +1002,11 @@ def retrieve_research_evidence(
             else 0.0
         )
         rerank_score = (
-            retrieval_score
-            + min(0.15, coverage * 0.05)
-            + provenance * 0.03
-            + direct_bonus
-            + layer_bonus
-            + topic_bonus
-            - unsolicited_pore_penalty
+            0.20 * lexical + 0.20 * semantic + 0.14 * entity_match_score
+            + 0.14 * condition_match_score + 0.08 * fatigue_stage_match_score
+            + 0.06 * formula_match_score + 0.08 * source_quality_score
+            + 0.06 * contradiction_relevance_score + 0.04 * topic_diversity_score
+            + direct_bonus + layer_bonus - unsolicited_pore_penalty
         )
         item = {
             **doc,
@@ -987,6 +1015,16 @@ def retrieve_research_evidence(
             "source_index_type": doc["index_type"],
             "bm25_score": round(bm25.get(doc["doc_id"], 0.0), 6),
             "vector_score": round(vector.get(doc["doc_id"], 0.0), 6),
+            "semantic_score": round(semantic, 6),
+            "lexical_score": round(lexical, 6),
+            "entity_match_score": round(entity_match_score, 6),
+            "condition_match_score": round(condition_match_score, 6),
+            "fatigue_stage_match_score": round(fatigue_stage_match_score, 6),
+            "formula_match_score": round(formula_match_score, 6),
+            "source_quality_score": round(source_quality_score, 6),
+            "contradiction_relevance_score": round(contradiction_relevance_score, 6),
+            "topic_diversity_score": round(topic_diversity_score, 6),
+            "condition_conflicts": condition_conflicts,
             "matched_variables": [
                 variable
                 for variable in variables
@@ -1012,6 +1050,7 @@ def retrieve_research_evidence(
         "task_type": task_type,
         "required_variables": variables,
         "identified_topics": query_topics,
+        "query_frame": query_frame.as_dict(),
         "condition_filters": condition_filters or {},
         "bm25_executed": bm25_executed,
         "vector_executed": vector_executed,
@@ -1100,11 +1139,16 @@ def retrieve_counter_evidence(
     )
     pooled = []
     for row in result["results"]:
+        text = str(row.get("text") or row.get("original_text") or row.get("claim") or "")
+        if not _counter_signal(text):
+            continue
         item = dict(row)
         item["counter_target"] = targets[0] if targets else combined_target
         item["counter_targets"] = targets
+        item["counter_evidence_validated"] = True
+        item["counter_relation"] = "EXPLICIT_COUNTER_SIGNAL"
         pooled.append(item)
-    pooled.sort(key=lambda row: row["rerank_score"], reverse=True)
+    pooled.sort(key=lambda row: float(row.get("rerank_score") or 0.0), reverse=True)
     deduped, _ = _deduplicate(pooled)
     return deduped[:top_k]
 
@@ -1255,7 +1299,13 @@ def answer_research_question(
     )
     pool = list(base["results"])
     counter_candidates = [row for row in pool if _counter_signal(row.get("text") or row.get("claim") or "")]
-    counter = counter_candidates[:top_k] if include_counter else []
+    counter = []
+    if include_counter:
+        for row in counter_candidates[:top_k]:
+            item = dict(row)
+            item["counter_evidence_validated"] = True
+            item["counter_relation"] = "EXPLICIT_COUNTER_SIGNAL"
+            counter.append(item)
     counter_ids = {row.get("doc_id") for row in counter}
     supporting = [row for row in pool if row.get("doc_id") not in counter_ids][:top_k]
     conditional = [

@@ -1,5 +1,5 @@
 TitaniumFatigueChat Streamlit deployment manifest
-file_count=133
+file_count=134
 
 .gitignore
 .streamlit/config.toml
@@ -105,6 +105,7 @@ src/pdf_rematcher.py
 src/pdf_upload_handler.py
 src/pdf_watcher.py
 src/perf_log.py
+src/query_frame.py
 src/query_understanding.py
 src/reproducibility.py
 src/research_gap_dataset.py

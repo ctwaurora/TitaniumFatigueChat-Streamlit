@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.research_skills.common import base_quality_gate, bundle_prompt, entity_labels, missing_evidence, primary_citation, traceable_cards
+from src.research_skills.common import base_quality_gate, bundle_prompt, entity_labels, evidence_level_instruction, missing_evidence, primary_citation, query_variables, traceable_cards
 from src.research_skills.contracts import SkillInput, SkillOutput
 
 
@@ -15,6 +15,7 @@ def build_prompt(value: SkillInput) -> str:
     return f"""你正在独立执行 research_gap_skill。问题：{value.user_query}
 先核对EvidenceBundle中的COUNTER和CONDITION_DEPENDENT记录，判断问题是否已被部分或全部解决。不得为了产出空白而忽略反证。
 输出：具体研究空白标题；已有研究解决了什么；尚缺哪个由2-4个变量组成的匹配条件组合；为何现有研究不能直接比较；反证和可能取消空白的证据；证据缺口矩阵；1-3个具体研究问题；可证伪假设；最低成本验证；本地库覆盖不足项。
+必须将结论分类为CONFIRMED_GAP、CANDIDATE_GAP、LOCAL_LIBRARY_GAP、ALREADY_ADDRESSED或INSUFFICIENT_EVIDENCE，并用自然中文表达。{evidence_level_instruction()}
 正文不得报告证据数量。每项关键判断标 Evidence ID 和页码。用户未问孔隙时不得把孔隙设为主空白。
 EvidenceBundle：{bundle_prompt(value)}"""
 
@@ -34,7 +35,7 @@ def _fallback(value: SkillInput) -> tuple[str, str]:
     missing = cross.get("missing_conditions") or []
     formulas = bundle.get("formulas") or []
     if not consensus or not value.counter_evidence:
-        return "本地证据不足，不能把检索覆盖不足误报为研究空白。", "需要先补足直接证据、反向证据与匹配实验条件。"
+        return "当前只能判定为候选证据缺口，尚不足以确认为研究空白。", "当前正式文献库不足以判断该问题是否构成真实研究空白；需要补足直接证据、反向证据与匹配实验条件。"
     title = f"{iv or '所问变量'}与{dv or '疲劳结果'}在匹配材料-处理-载荷条件下的效应边界"
     support_cite = primary_citation(value)
     counter_cite = primary_citation(value, "COUNTER")
@@ -46,7 +47,7 @@ def _fallback(value: SkillInput) -> tuple[str, str]:
             f"页码：{formula['page_number']}；章节：{formula.get('section') or '未报告'}；"
             f"适用条件：{formula.get('applicable_conditions') or '原文未完整报告'}）"
         )
-    direct = f"可成立的空白不是泛称“多因素耦合”，而是：{title}。现有结果尚不能在同一实验空间内分离变量贡献。{support_cite}"
+    direct = f"当前只能判定为候选证据缺口：{title}。现有结果尚不能在同一实验空间内分离变量贡献，且反向检索要求进一步缩小空白边界。{support_cite}"
     reasoning = f"""### 具体研究空白标题
 {title}
 
@@ -83,7 +84,24 @@ def generate(value: SkillInput, synthesis: str = "") -> SkillOutput:
     gate = base_quality_gate(value, combined, skill_name=SKILL_NAME)
     gate["false_positive_guard"] = bool(value.counter_evidence)
     gate["passed"] = gate["passed"] and bool(value.support_evidence) and gate["false_positive_guard"]
-    return SkillOutput(SKILL_NAME, complete or direct, "" if complete else reasoning, "空白只在匹配条件内成立，反证覆盖后必须缩小或取消。", traceable_cards(value), gate, missing_evidence(value), {"complete_answer": complete, "quality_metrics": QUALITY_METRICS}, {"dataset_version": value.dataset_version, "previous_skill": getattr(value.previous_output, "skill_name", None), "rechecked_evidence_ids": [card["evidence_id"] for card in traceable_cards(value)]})
+    independent, dependent = query_variables(value)
+    cross = (value.evidence_bundle or {}).get("synthesis") or {}
+    gap_status = "CANDIDATE_GAP" if value.support_evidence and value.counter_evidence else "LOCAL_LIBRARY_GAP"
+    return SkillOutput(SKILL_NAME, complete or direct, "" if complete else reasoning, "空白只在匹配条件内成立，反证覆盖后必须缩小或取消。", traceable_cards(value), gate, missing_evidence(value), {
+        "complete_answer": complete, "quality_metrics": QUALITY_METRICS,
+        "gap_title": f"{' × '.join(independent[:2]) or '所问变量'}对{' / '.join(dependent[:1]) or '目标疲劳结果'}的匹配条件缺口",
+        "scientific_object": (value.query_frame or {}).get("alloy_grade") or (value.query_frame or {}).get("material"),
+        "target_outcome": dependent,
+        "core_variables": independent[:4],
+        "what_is_known": cross.get("consistent_findings") or [],
+        "what_has_been_tested": [paper.get("canonical_id") for paper in (value.evidence_bundle or {}).get("papers") or []],
+        "missing_matched_conditions": cross.get("missing_condition_combinations") or [],
+        "conflicting_evidence": cross.get("conflicting_findings") or [],
+        "counter_evidence_result": "真实反证已核验" if value.counter_evidence else "本地库未检得足够反证",
+        "gap_status": gap_status,
+        "gap_confidence": "MEDIUM" if gap_status == "CANDIDATE_GAP" else "LOW",
+        "minimum_validation": "同批材料、匹配表面和载荷条件的最小因子试验。",
+    }, {"dataset_version": value.dataset_version, "previous_skill": getattr(value.previous_output, "skill_name", None), "rechecked_evidence_ids": [card["evidence_id"] for card in traceable_cards(value)]})
 
 
 def render_output(output: SkillOutput) -> str:

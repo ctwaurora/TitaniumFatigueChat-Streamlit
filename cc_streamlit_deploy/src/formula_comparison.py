@@ -12,6 +12,7 @@ formula_comparison.py — 多模型对比分析模块
 """
 
 import re
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -20,6 +21,96 @@ from src.stage1_store import TRUSTED_EVIDENCE_PATH
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
+
+
+@dataclass(frozen=True)
+class StructuredFormulaRecord:
+    formula_id: str
+    canonical_id: str
+    equation_latex: str
+    dependent_variable: str = ""
+    independent_variables: tuple[str, ...] = ()
+    parameter_units: Dict[str, str] = field(default_factory=dict)
+    variable_units: Dict[str, str] = field(default_factory=dict)
+    material_scope: str = ""
+    process_scope: str = ""
+    fatigue_stage: str = ""
+    crack_stage: str = ""
+    stress_ratio_scope: str = ""
+    temperature_scope: str = ""
+    environment_scope: str = ""
+    page: int = 0
+    section: str = ""
+
+    @classmethod
+    def from_dict(cls, row: Dict[str, Any]) -> "StructuredFormulaRecord":
+        return cls(
+            formula_id=str(row.get("formula_id") or row.get("doc_id") or ""),
+            canonical_id=str(row.get("canonical_id") or row.get("paper_id") or ""),
+            equation_latex=str(row.get("equation_latex") or row.get("equation") or ""),
+            dependent_variable=str(row.get("dependent_variable") or ""),
+            independent_variables=tuple(str(item) for item in row.get("independent_variables") or []),
+            parameter_units=dict(row.get("parameter_units") or {}),
+            variable_units=dict(row.get("variable_units") or {}),
+            material_scope=str(row.get("material_scope") or ""),
+            process_scope=str(row.get("process_scope") or ""),
+            fatigue_stage=str(row.get("fatigue_stage") or ""),
+            crack_stage=str(row.get("crack_stage") or ""),
+            stress_ratio_scope=str(row.get("stress_ratio_scope") or ""),
+            temperature_scope=str(row.get("temperature_scope") or ""),
+            environment_scope=str(row.get("environment_scope") or ""),
+            page=int(row.get("page") or row.get("page_number") or 0),
+            section=str(row.get("section") or ""),
+        )
+
+
+@dataclass(frozen=True)
+class FormulaCompatibility:
+    compared_formula_ids: tuple[str, str]
+    same_prediction_target: bool
+    variable_definition_compatible: bool
+    units_compatible: bool
+    fatigue_stage_compatible: bool
+    material_compatible: bool
+    stress_ratio_compatible: bool
+    numerical_comparison_allowed: bool
+    reasons_for_difference: tuple[str, ...]
+
+    def as_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+def compare_structured_formulas(
+    left: StructuredFormulaRecord | Dict[str, Any],
+    right: StructuredFormulaRecord | Dict[str, Any],
+) -> FormulaCompatibility:
+    """Decide comparability before any numerical prediction is attempted."""
+    a = left if isinstance(left, StructuredFormulaRecord) else StructuredFormulaRecord.from_dict(left)
+    b = right if isinstance(right, StructuredFormulaRecord) else StructuredFormulaRecord.from_dict(right)
+
+    def compatible(first: str, second: str) -> bool:
+        return not first or not second or first.casefold() == second.casefold()
+
+    same_target = compatible(a.dependent_variable, b.dependent_variable)
+    variables = not a.independent_variables or not b.independent_variables or set(a.independent_variables) == set(b.independent_variables)
+    units = (not a.variable_units or not b.variable_units or a.variable_units == b.variable_units) and (not a.parameter_units or not b.parameter_units or a.parameter_units == b.parameter_units)
+    stage = compatible(a.fatigue_stage, b.fatigue_stage) and compatible(a.crack_stage, b.crack_stage)
+    material = compatible(a.material_scope, b.material_scope) and compatible(a.process_scope, b.process_scope)
+    ratio = compatible(a.stress_ratio_scope, b.stress_ratio_scope)
+    scope = compatible(a.temperature_scope, b.temperature_scope) and compatible(a.environment_scope, b.environment_scope)
+    reasons = []
+    for passed, reason in (
+        (same_target, "预测目标不同"), (variables, "变量定义不同"), (units, "变量或参数单位不兼容"),
+        (stage, "疲劳或裂纹阶段不同"), (material, "材料或制造状态不同"),
+        (ratio, "应力比范围不同"), (scope, "温度或环境范围不同"),
+    ):
+        if not passed:
+            reasons.append(reason)
+    allowed = all((same_target, variables, units, stage, material, ratio, scope))
+    return FormulaCompatibility(
+        (a.formula_id, b.formula_id), same_target, variables, units, stage,
+        material, ratio, allowed, tuple(reasons),
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════

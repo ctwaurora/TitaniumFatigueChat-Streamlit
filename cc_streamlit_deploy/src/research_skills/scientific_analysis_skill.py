@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.research_skills.common import base_quality_gate, bundle_prompt, entity_labels, missing_evidence, primary_citation, traceable_cards
+from src.research_skills.common import base_quality_gate, bundle_prompt, entity_labels, evidence_level_instruction, missing_evidence, primary_citation, query_variables, traceable_cards
 from src.research_skills.contracts import SkillInput, SkillOutput
 
 
@@ -17,6 +17,7 @@ def build_prompt(value: SkillInput) -> str:
 只能使用下方 EvidenceBundle。不得报告证据数量，不得使用模糊占位词，不得补造参数、阈值或文献。
 先直接回答，再依次写：具体机制；实验条件与适用边界；文献冲突与反向观点；公式或数学关系；当前不能确定；科研意义或验证建议。
 每个关键结论紧邻标注 Evidence ID 与页码。真实公式必须逐字显示 Formula ID、变量、单位和适用条件；没有可信公式时明确说明。
+{evidence_level_instruction()}
 用户未问孔隙时，孔隙只能作为有证据的次要混杂因素。参考文献由系统在答案末尾统一附加，不要自造参考文献。
 EvidenceBundle：
 {bundle_prompt(value)}"""
@@ -38,6 +39,7 @@ def _fallback(value: SkillInput) -> tuple[str, str]:
     conflicts = synthesis.get("conflicts") or []
     mismatches = synthesis.get("condition_mismatches") or []
     formulas = bundle.get("formulas") or []
+    frame = value.query_frame or bundle.get("query_frame") or {}
     if not consensus:
         return "本地正式证据不足，无法对该变量关系给出可追溯结论。", "当前缺少可核验的直接证据、条件与反向结果。"
     support_cite = primary_citation(value)
@@ -47,8 +49,14 @@ def _fallback(value: SkillInput) -> tuple[str, str]:
     if formulas:
         item = formulas[0]
         formula_text = f"{item['equation']}（Formula ID：{item['formula_id']}，页码：{item['page_number']}；适用条件：{item.get('applicable_conditions') or '原文未完整报告'}）"
+    mechanism = consensus[1] if len(consensus) > 1 else "证据未充分分离各机制贡献，不能把相关性写成单因素因果。"
+    if "residual_stress" in (frame.get("independent_variables") or []):
+        mechanism = "残余拉应力升高 → 局部平均应力与有效裂纹驱动力提高 → 裂纹闭合减弱 → 相同外加ΔK下ΔKeff提高 → 短裂纹da/dN可能升高；压缩残余应力的链条方向相反，但必须核对循环松弛。该链条包含跨文献综合和待直接验证环节。"
+    formula_boundary = ""
+    if frame.get("crack_stage") == "SHORT_CRACK" and formulas and any("paris" in str(item.get("equation") or "").casefold() for item in formulas):
+        formula_boundary = "该Paris类关系只能作为长裂纹基线，不能直接视为短裂纹定量模型。"
     reasoning = f"""### 具体机制
-{consensus[1] if len(consensus) > 1 else '证据未充分分离各机制贡献，不能把相关性写成单因素因果。'}
+{mechanism}
 
 ### 实验条件和适用边界
 {'；'.join(mismatches) if mismatches else '只能适用于证据卡中明确报告的材料、处理、表面和加载条件。'}
@@ -57,7 +65,7 @@ def _fallback(value: SkillInput) -> tuple[str, str]:
 {(conflicts[0] + ' ' + counter_cite) if conflicts else '当前检索结果未提供可明确复核的相反结论；这不等于不存在反向证据。'}
 
 ### 公式或数学关系
-{formula_text}
+{formula_text} {formula_boundary}
 
 ### 当前不能确定的内容
 {'；'.join(synthesis.get('unsupported_conclusions') or ['未报告条件下的效应方向和定量幅度不能确定。'])}
@@ -74,6 +82,8 @@ def generate(value: SkillInput, synthesis: str = "") -> SkillOutput:
     gate = base_quality_gate(value, combined, skill_name=SKILL_NAME)
     gate["evidence_sufficient"] = bool(value.support_evidence)
     gate["passed"] = gate["passed"] and gate["evidence_sufficient"]
+    independent, dependent = query_variables(value)
+    bundle = value.evidence_bundle or {}
     return SkillOutput(
         skill_name=SKILL_NAME,
         direct_answer=complete or direct,
@@ -82,7 +92,21 @@ def generate(value: SkillInput, synthesis: str = "") -> SkillOutput:
         evidence_cards=traceable_cards(value),
         quality_gate=gate,
         missing_evidence=missing_evidence(value),
-        specific_fields={"complete_answer": complete, "quality_metrics": QUALITY_METRICS},
+        specific_fields={
+            "complete_answer": complete,
+            "quality_metrics": QUALITY_METRICS,
+            "direct_answer": complete or direct,
+            "mechanism_chain": [item for paper in bundle.get("papers") or [] for item in paper.get("mechanisms") or []][:6],
+            "experimental_conditions": (bundle.get("synthesis") or {}).get("covered_conditions") or {},
+            "quantitative_relationships": [item for paper in bundle.get("papers") or [] for item in paper.get("quantitative_results") or []][:8],
+            "formula_analysis": bundle.get("formulas") or [],
+            "conflicting_evidence": (bundle.get("synthesis") or {}).get("conflicting_findings") or [],
+            "applicability_boundary": (bundle.get("synthesis") or {}).get("condition_mismatches") or [],
+            "unresolved_questions": (bundle.get("synthesis") or {}).get("unsupported_conclusions") or [],
+            "evidence_limitations": (bundle.get("synthesis") or {}).get("evidence_limitations") or [],
+            "independent_variables": independent,
+            "dependent_variables": dependent,
+        },
         trace={"dataset_version": value.dataset_version, "previous_skill": getattr(value.previous_output, "skill_name", None), "rechecked_evidence_ids": [card["evidence_id"] for card in traceable_cards(value)]},
     )
 

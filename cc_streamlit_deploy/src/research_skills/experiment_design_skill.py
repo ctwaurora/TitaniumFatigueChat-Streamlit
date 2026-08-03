@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.research_skills.common import base_quality_gate, bundle_prompt, entity_labels, missing_evidence, primary_citation, traceable_cards
+from src.research_skills.common import base_quality_gate, bundle_prompt, entity_labels, evidence_level_instruction, missing_evidence, primary_citation, query_variables, traceable_cards
 from src.research_skills.contracts import SkillInput, SkillOutput
 
 
@@ -15,6 +15,7 @@ def build_prompt(value: SkillInput) -> str:
     return f"""你正在独立执行 experiment_design_skill。问题：{value.user_query}
 必须重新核对EvidenceBundle，不得把任何上一步自然语言当作事实。输出：研究对象（具体材料/工艺/热处理/表面）；核心假设；自变量水平设计原则；因变量指标、单位和测量；控制变量；协变量；基准/处理/交互/阴性或阳性对照；预实验与正式样本量估计；加载条件；表征；数据与公式拟合；具体预测；至少两条推翻结果；最低成本方案；完整方案；风险混杂。
 不得随意给固定样本数或无来源阈值。每个证据约束标Evidence ID和页码，不报告证据数量。用户未问孔隙时不得自动设计孔隙实验。
+{evidence_level_instruction()}
 EvidenceBundle：{bundle_prompt(value)}"""
 
 
@@ -48,11 +49,11 @@ def _fallback(value: SkillInput) -> tuple[str, str, list[str]]:
 ### 核心假设
 {hypothesis}
 
-### 自变量
-{iv}设置基准、低、中、高或物理上有意义的离散水平；先由预实验响应范围冻结水平，不跨越不同失效机制混合拟合。
+### 自变量水平
+{iv}采用连续变量或低/中/高水平取决于工艺可控性；水平先从文献范围和设备能力取交集，再用预实验响应分布冻结。存在两个核心变量时优先全因子或响应面设计，并检查处理手段是否同时改变组织、表面或残余应力。
 
 ### 因变量
-{dv}；记录原始单位、测量分辨率和删失/run-out状态，采用相应疲劳试验、裂纹复制或原位监测测量。
+{dv}；记录原始单位、测量分辨率和删失/run-out状态。裂纹扩展问题采用裂纹复制、柔度法或原位成像按预注册裂纹长度区间计算da/dN；寿命问题记录起裂寿命、总寿命Nf和run-out，并保留仪器误差。
 
 ### 控制变量
 材料批次、制造窗口、试样几何、热处理、表面状态、应力比、频率、温度和环境全部固定或纳入模型。
@@ -61,7 +62,7 @@ def _fallback(value: SkillInput) -> tuple[str, str, list[str]]:
 按主题测量残余应力、组织尺度、建造方向、表面粗糙度及实际载荷；只纳入有物理依据且在试验前定义的协变量。
 
 ### 分组和对照
-同批次基准组；{iv}处理组；{iv}×关键条件交互组；保持处理流程但不改变{iv}的阴性对照，或采用已有有效处理的阳性对照。
+同批次基准组；{iv}处理组；{iv}×关键条件交互组；保持处理流程但不改变{iv}的阴性对照，或采用已有有效处理的阳性对照。试样在材料批次内区组化并随机分配，测试顺序随机化，操作者对组别盲法判定起裂位置。
 
 ### 样本建议
 预实验用于估计方差、删失率和最小有意义效应；正式样本量由目标功效、显著性水平、效应量、组数及失访/run-out率计算，不预填固定数量。
@@ -72,8 +73,8 @@ def _fallback(value: SkillInput) -> tuple[str, str, list[str]]:
 ### 表征方法
 根据假设选择XRD残余应力、EBSD组织、表面轮廓、裂纹复制/DIC、SEM断口；只有缺陷是问题变量时才加入micro-CT。
 
-### 数据分析和公式拟合
-{formula_note} 使用混合效应/生存模型估计主效应和交互项，报告置信区间、共线性、模型比较与独立验证。
+### 数据分析、统计模型和公式拟合
+{formula_note} 裂纹扩展采用含交互项的混合效应回归或Paris/Walker参数拟合；寿命含run-out时采用生存分析或删失Weibull模型。选择依据是因变量类型、重复测量结构和删失机制；报告置信区间、共线性、交叉验证与独立批次验证。
 
 ### 预测结果
 若假设成立，{iv}变化应同时引起预设中介指标和{dv}按同一条件化模型变化，而不是只出现未解释的组间差异。
@@ -97,7 +98,26 @@ def generate(value: SkillInput, synthesis: str = "") -> SkillOutput:
     gate["original_evidence_rechecked"] = bool(value.retrieved_evidence)
     gate["falsification_criteria_count"] = 2 if complete else len(falsifiers)
     gate["passed"] = gate["passed"] and bool(value.support_evidence) and gate["original_evidence_rechecked"] and gate["falsification_criteria_count"] >= 2
-    return SkillOutput(SKILL_NAME, complete or direct, "" if complete else reasoning, "精确水平和样本量必须由预实验方差、设备能力与安全审查冻结。", traceable_cards(value), gate, missing_evidence(value), {"complete_answer": complete, "falsification_criteria": falsifiers, "quality_metrics": QUALITY_METRICS}, {"dataset_version": value.dataset_version, "previous_skill": getattr(value.previous_output, "skill_name", None), "rechecked_evidence_ids": [card["evidence_id"] for card in traceable_cards(value)]})
+    independent, dependent = query_variables(value)
+    return SkillOutput(SKILL_NAME, complete or direct, "" if complete else reasoning, "精确水平和样本量必须由预实验方差、设备能力与安全审查冻结。", traceable_cards(value), gate, missing_evidence(value), {
+        "complete_answer": complete, "falsification_criteria": falsifiers, "quality_metrics": QUALITY_METRICS,
+        "research_object": (value.query_frame or {}).get("alloy_grade") or (value.query_frame or {}).get("material"),
+        "hypothesis": direct, "independent_variables": independent,
+        "factor_levels": "文献范围∩设备能力，经预实验冻结；双因素优先全因子或响应面",
+        "factor_level_rationale": "避免跨失效机制并检验处理引入的共变",
+        "dependent_variables": dependent,
+        "measurement_methods": "按裂纹扩展、起裂或寿命终点选择复制法/柔度法/原位成像/疲劳试验",
+        "measurement_units": "保持原始SI单位并报告测量不确定度",
+        "control_variables": ["material_batch", "manufacturing_window", "geometry", "surface_condition", "stress_ratio", "frequency", "temperature", "environment"],
+        "covariates": ["residual_stress", "microstructure", "surface_roughness", "initial_crack_length"],
+        "randomization": "材料批次内区组随机化测试顺序",
+        "blocking": "按材料批次和制造批次区组",
+        "sample_size_strategy": "预实验估计方差、效应量、删失率和交互效应后进行功效分析或仿真",
+        "runout_definition": "在方案冻结时按疲劳区间定义并作为删失记录",
+        "statistical_model": "混合效应回归、Paris/Walker拟合或删失生存模型，按终点选择",
+        "minimum_cost_plan": "同批材料小规模配对试验和关键协变量补测",
+        "full_validation_plan": "跨批次因子设计、联合表征、预注册模型和独立验证",
+    }, {"dataset_version": value.dataset_version, "previous_skill": getattr(value.previous_output, "skill_name", None), "rechecked_evidence_ids": [card["evidence_id"] for card in traceable_cards(value)]})
 
 
 def render_output(output: SkillOutput) -> str:

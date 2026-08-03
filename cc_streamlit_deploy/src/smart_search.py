@@ -15,6 +15,7 @@ from src.answer_quality import precise_refusal, validate_answer_quality
 from src.api_keys import get_deepseek_settings
 from src.deepseek_client import DeepSeekClient, DeepSeekRequestError
 from src.evidence_bundle import build_evidence_bundle
+from src.query_frame import parse_query_frame
 from src.query_understanding import understand_user_query
 from src.research_skills.contracts import SkillInput
 from src.research_skills.router import get_research_skill
@@ -122,9 +123,10 @@ def _cached_retrieval(
     base_dir_text: str,
     dataset_version: str,
     question: str,
+    query_frame_hash: str,
     top_k: int,
 ) -> dict[str, Any]:
-    del dataset_version
+    del dataset_version, query_frame_hash
     return answer_research_question(
         question, top_k=top_k, base_dir=Path(base_dir_text)
     )
@@ -135,9 +137,10 @@ def _cached_first_stage_retrieval(
     base_dir_text: str,
     dataset_version: str,
     question: str,
+    query_frame_hash: str,
     top_k: int,
 ) -> dict[str, Any]:
-    del dataset_version
+    del dataset_version, query_frame_hash
     return answer_research_question(
         question,
         top_k=top_k,
@@ -175,6 +178,15 @@ def _compact_conditions(value: Any) -> str:
     return "；".join(reported) if reported else "该证据未完整报告实验条件。"
 
 
+def _human_metadata(value: Any, fallback: str = "未报告") -> str:
+    """Hide internal recovery/status sentinels from user-facing evidence cards."""
+    text = str(value or "").strip()
+    normalized = text.upper()
+    if not text or "NOT_REPORTED" in normalized or normalized in {"UNKNOWN", "NONE", "NULL"}:
+        return fallback
+    return text
+
+
 def _evidence_markdown(
     result: dict[str, Any],
     *,
@@ -198,12 +210,12 @@ def _evidence_markdown(
             if original_text_limit and len(original_text) > original_text_limit:
                 original_text = original_text[:original_text_limit].rstrip() + "..."
             lines.extend([
-                f"#### {row.get('title') or '题名未报告'}",
-                f"- 作者与年份：{row.get('authors') or '未报告'}，{row.get('year') or '未报告'}",
+                f"#### {_human_metadata(row.get('title'), '题名未报告')}",
+                f"- 作者与年份：{_human_metadata(row.get('authors'))}，{_human_metadata(row.get('year'))}",
                 f"- 证据作用：{label.replace('证据', '')}",
                 f"- 原文摘录：{original_text}",
-                f"- 页码：{row.get('page_number') or '未报告'}；章节：{row.get('section') or '未报告'}",
-                f"- Evidence ID：{row.get('doc_id') or row.get('evidence_id') or '未报告'}",
+                f"- 页码：{_human_metadata(row.get('page_number'))}；章节：{_human_metadata(row.get('section'))}",
+                f"- Evidence ID：{_human_metadata(row.get('doc_id') or row.get('evidence_id'))}",
                 f"- 关键实验条件：{_compact_conditions(row.get('experimental_conditions'))}",
                 "",
             ])
@@ -294,8 +306,10 @@ def _build_skill_input(
     condition_evidence = [
         row for row in retrieved if row.get("experimental_conditions")
     ]
+    query_frame = parse_query_frame(question, parsed_entities)
     bundle = build_evidence_bundle(
-        question, support, counter, conditional, retrieved_pool=retrieved
+        question, support, counter, conditional, retrieved_pool=retrieved,
+        query_frame=query_frame.as_dict(), dataset_version=dataset_version,
     )
     formula_ids = {row["formula_id"] for row in bundle.formulas}
     formula_records = [row for row in retrieved if str(row.get("doc_id") or "") in formula_ids]
@@ -310,6 +324,7 @@ def _build_skill_input(
         condition_dependent_evidence=conditional,
         dataset_version=dataset_version,
         evidence_bundle=bundle.as_dict(),
+        query_frame=query_frame.as_dict(),
     )
 
 
@@ -339,9 +354,10 @@ def run_smart_search(
     # ``use_llm`` controls synthesis only and never weakens retrieval.
     retrieval_function = _cached_retrieval
     cache_before = retrieval_function.cache_info()
+    query_frame_hash = parse_query_frame(effective, understood).cache_key(dataset_version)
     result = copy.deepcopy(
         retrieval_function(
-            str(Path(base_dir).resolve()), dataset_version, effective, top_k
+            str(Path(base_dir).resolve()), dataset_version, effective, query_frame_hash, top_k
         )
     )
     try:
@@ -365,6 +381,7 @@ def run_smart_search(
             paper = manifest.get(str(row.get("paper_id") or ""), {})
             row["authors"] = paper.get("authors") or ""
             row["year"] = paper.get("publication_date") or paper.get("year") or ""
+            row["doi"] = paper.get("doi") or ""
     result["formal_paper_count"] = len(manifest)
     cache_after = retrieval_function.cache_info()
     retrieval_elapsed = time.perf_counter() - retrieval_started

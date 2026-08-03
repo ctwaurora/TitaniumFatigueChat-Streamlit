@@ -74,6 +74,58 @@ class PaperEvidenceSummary:
     result_directions: list[str]
     applicability: list[str]
     limitations: list[str]
+    canonical_id: str = ""
+    doi: str = ""
+    material: str = ""
+    manufacturing_process: str = ""
+    post_processing: str = ""
+    surface_condition: str = ""
+    microstructure: str = ""
+    residual_stress: str = ""
+    specimen_geometry: str = ""
+    loading_conditions: dict[str, Any] = field(default_factory=dict)
+    stress_ratio: str = ""
+    frequency: str = ""
+    temperature: str = ""
+    environment: str = ""
+    fatigue_regime: str = ""
+    crack_stage: str = ""
+    independent_variables: list[str] = field(default_factory=list)
+    dependent_variables: list[str] = field(default_factory=list)
+    measurement_methods: list[str] = field(default_factory=list)
+    quantitative_results: list[str] = field(default_factory=list)
+    equations: list[dict[str, Any]] = field(default_factory=list)
+    mechanism: list[str] = field(default_factory=list)
+    authors_conclusion: list[str] = field(default_factory=list)
+    evidence_role: list[str] = field(default_factory=list)
+    source_pages: list[int] = field(default_factory=list)
+    source_sections: list[str] = field(default_factory=list)
+    evidence_ids: list[str] = field(default_factory=list)
+    extraction_confidence: float = 0.0
+
+
+@dataclass
+class ScientificClaim:
+    claim_id: str
+    claim_text: str
+    material: str
+    manufacturing_process: str
+    independent_variable: str
+    dependent_variable: str
+    fatigue_stage: str
+    crack_stage: str
+    experimental_conditions: dict[str, Any]
+    mechanism_chain: list[str]
+    quantitative_relationship: str
+    applicable_formula_ids: list[str]
+    supporting_evidence_ids: list[str]
+    counter_evidence_ids: list[str]
+    condition_dependent_evidence_ids: list[str]
+    applicability_boundary: list[str]
+    unresolved_part: list[str]
+    evidence_level: str
+    confidence: float
+    source_papers: list[str]
 
 
 @dataclass
@@ -88,6 +140,13 @@ class CrossPaperSynthesis:
     unsupported_conclusions: list[str] = field(default_factory=list)
     formula_comparability: list[str] = field(default_factory=list)
     mechanism_map: dict[str, Any] = field(default_factory=dict)
+    consistent_findings: list[dict[str, Any]] = field(default_factory=list)
+    conflicting_findings: list[dict[str, Any]] = field(default_factory=list)
+    condition_explanations: list[str] = field(default_factory=list)
+    comparable_studies: list[list[str]] = field(default_factory=list)
+    non_comparable_studies: list[dict[str, Any]] = field(default_factory=list)
+    missing_condition_combinations: list[str] = field(default_factory=list)
+    evidence_limitations: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -98,6 +157,9 @@ class EvidenceBundle:
     formulas: list[dict[str, Any]]
     synthesis: CrossPaperSynthesis
     citation_index: dict[str, dict[str, Any]]
+    query_frame: dict[str, Any] = field(default_factory=dict)
+    scientific_claims: list[ScientificClaim] = field(default_factory=list)
+    dataset_version: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -140,6 +202,8 @@ def build_evidence_bundle(
     counter: list[dict[str, Any]],
     conditional: list[dict[str, Any]],
     retrieved_pool: list[dict[str, Any]] | None = None,
+    query_frame: dict[str, Any] | None = None,
+    dataset_version: str = "",
 ) -> EvidenceBundle:
     role_rows = (("SUPPORT", supporting), ("COUNTER", counter), ("CONDITION_DEPENDENT", conditional))
     grouped: dict[str, list[tuple[str, dict[str, Any]]]] = defaultdict(list)
@@ -165,13 +229,32 @@ def build_evidence_bundle(
         formula_rows.append({
             "formula_id": formula_id,
             "equation": str(row.get("equation") or row.get("formula")),
+            "equation_latex": str(row.get("equation_latex") or row.get("equation") or row.get("formula")),
+            "equation_text": str(row.get("original_text") or row.get("equation") or row.get("formula")),
             "paper_id": str(row.get("paper_id")),
+            "canonical_id": str(row.get("paper_id")),
             "title": str(row.get("title") or ""),
             "page_number": row.get("page_number"),
             "section": str(row.get("section") or ""),
             "parameters": row.get("parameters") or [],
             "units": row.get("units") or [],
+            "parameter_values": row.get("parameter_values") or {},
+            "parameter_units": row.get("parameter_units") or row.get("units") or {},
+            "variable_units": row.get("variable_units") or row.get("units") or {},
+            "dependent_variable": str(row.get("dependent_variable") or ""),
+            "independent_variables": row.get("independent_variables") or [],
             "applicable_conditions": _clean_conditions(row.get("applicable_conditions") or row.get("experimental_conditions")),
+            "material_scope": str(row.get("material_scope") or ""),
+            "process_scope": str(row.get("process_scope") or ""),
+            "fatigue_stage": str(row.get("fatigue_stage") or ""),
+            "crack_stage": str(row.get("crack_stage") or ""),
+            "stress_ratio_scope": str(row.get("stress_ratio_scope") or ""),
+            "temperature_scope": str(row.get("temperature_scope") or ""),
+            "environment_scope": str(row.get("environment_scope") or ""),
+            "assumptions": row.get("assumptions") or [],
+            "calibration_dataset": str(row.get("calibration_dataset") or ""),
+            "validation_dataset": str(row.get("validation_dataset") or ""),
+            "extraction_confidence": float(row.get("confidence") or row.get("extraction_confidence") or 0.0),
         })
 
     papers: list[PaperEvidenceSummary] = []
@@ -189,6 +272,13 @@ def build_evidence_bundle(
                 "section": str(row.get("section") or ""),
                 "directness": str(row.get("directness") or ""),
                 "conditions": _clean_conditions(row.get("experimental_conditions")),
+                "evidence_level": (
+                    "DIRECT_LITERATURE_FINDING"
+                    if str(row.get("directness") or "").upper() == "DIRECT"
+                    else "AUTHOR_INTERPRETATION"
+                    if re.search(r"mechanis|because|due to|attribut|机制|由于|归因", _text(row), re.I)
+                    else "CROSS_PAPER_SYNTHESIS"
+                ),
             }
             claims.append(claim)
             if evidence_id:
@@ -220,6 +310,34 @@ def build_evidence_bundle(
             result_directions=list(dict.fromkeys(_result_direction(_text(row)) for row in rows)),
             applicability=[f"{key}={value}" for key, value in conditions.items() if key in COMPARISON_FIELDS],
             limitations=["未报告完整关键实验条件"] if len(conditions) < 3 else [],
+            canonical_id=paper_id,
+            doi=str(rows[0].get("doi") or ""),
+            material=str(conditions.get("alloy_grade") or conditions.get("material") or ""),
+            manufacturing_process=str(conditions.get("manufacturing_process") or conditions.get("process") or ""),
+            post_processing=str(conditions.get("post_processing") or conditions.get("heat_treatment") or ""),
+            surface_condition=str(conditions.get("surface_treatment") or conditions.get("surface_state") or ""),
+            microstructure=str(conditions.get("microstructure") or ""),
+            residual_stress=str(conditions.get("residual_stress") or ""),
+            specimen_geometry=str(conditions.get("specimen_geometry") or conditions.get("sample_geometry") or ""),
+            loading_conditions={key: conditions.get(key) for key in ("loading_mode", "stress_ratio_R", "frequency", "temperature", "environment") if conditions.get(key) not in EMPTY_VALUES},
+            stress_ratio=str(conditions.get("stress_ratio_R") or ""),
+            frequency=str(conditions.get("frequency") or ""),
+            temperature=str(conditions.get("temperature") or ""),
+            environment=str(conditions.get("environment") or ""),
+            fatigue_regime=str(conditions.get("fatigue_regime") or ""),
+            crack_stage=str(conditions.get("crack_stage") or ""),
+            independent_variables=list((query_frame or {}).get("independent_variables") or []),
+            dependent_variables=list((query_frame or {}).get("dependent_variables") or []),
+            measurement_methods=list(dict.fromkeys(str(conditions.get(key)) for key in ("testing_method", "characterization_method") if conditions.get(key) not in EMPTY_VALUES)),
+            quantitative_results=[_text(row)[:350] for row in rows if re.search(r"\d+(?:\.\d+)?\s*(?:MPa|GPa|Hz|cycles?|mm|µm|μm|%)", _text(row), re.I)][:5],
+            equations=paper_formulas,
+            mechanism=mechanisms,
+            authors_conclusion=[claim["claim"] for claim in claims if claim["evidence_level"] in {"DIRECT_LITERATURE_FINDING", "AUTHOR_INTERPRETATION"}][:4],
+            evidence_role=list(dict.fromkeys(role for role, _ in entries)),
+            source_pages=sorted({int(row.get("page_number")) for row in rows if str(row.get("page_number") or "").isdigit()}),
+            source_sections=list(dict.fromkeys(str(row.get("section") or "") for row in rows if row.get("section"))),
+            evidence_ids=[claim["evidence_id"] for claim in claims if claim["evidence_id"]],
+            extraction_confidence=round(sum(float(row.get("confidence") or 0.0) for row in rows) / max(1, len(rows)), 4),
         ))
 
     papers.sort(key=lambda paper: ("SUPPORT" not in paper.roles, paper.title.casefold()))
@@ -244,6 +362,19 @@ def build_evidence_bundle(
             else "这些公式的适用条件不同，不能直接进行数值比较。"
         )
     topics = identify_topics(question)
+    comparable = []
+    non_comparable = []
+    for index, left in enumerate(papers):
+        for right in papers[index + 1:]:
+            differences = [key for key in COMPARISON_FIELDS if left.conditions.get(key) not in EMPTY_VALUES and right.conditions.get(key) not in EMPTY_VALUES and left.conditions.get(key) != right.conditions.get(key)]
+            if differences:
+                non_comparable.append({"paper_ids": [left.paper_id, right.paper_id], "different_conditions": differences, "reason": "条件不相容，只能用于解释冲突，不能定量合并。"})
+            else:
+                comparable.append([left.paper_id, right.paper_id])
+    structured_conflicts = [
+        {"paper_id": paper.paper_id, "finding": paper.principal_claims[0]["claim"], "conditions": paper.conditions, "classification": "CONDITION_DIFFERENCE" if mismatches else "POTENTIAL_TRUE_CONFLICT"}
+        for paper in papers if "COUNTER" in paper.roles and paper.principal_claims
+    ]
     synthesis = CrossPaperSynthesis(
         consensus=consensus,
         conflicts=conflicts,
@@ -259,5 +390,36 @@ def build_evidence_bundle(
             "message": "当前证据只能形成定性机制主导区，尚不足以确定精确转换边界。",
             "candidate_axes": topics[:2],
         } if len(topics) >= 2 else {},
+        consistent_findings=[{"finding": item, "evidence_level": "CROSS_PAPER_SYNTHESIS"} for item in consensus],
+        conflicting_findings=structured_conflicts,
+        condition_explanations=mismatches,
+        comparable_studies=comparable,
+        non_comparable_studies=non_comparable,
+        missing_condition_combinations=[f"缺少同时报告{key}且与问题变量匹配的研究。" for key in missing[:8]],
+        evidence_limitations=[f"{key}覆盖不足" for key in missing[:8]],
     )
-    return EvidenceBundle(question, topics, papers, formula_rows, synthesis, citation_index)
+    claims: list[ScientificClaim] = []
+    for index, paper in enumerate(papers):
+        if not paper.principal_claims:
+            continue
+        first = paper.principal_claims[0]
+        claims.append(ScientificClaim(
+            claim_id=f"SCI_CLAIM_{index + 1:03d}",
+            claim_text=first["claim"], material=paper.material,
+            manufacturing_process=paper.manufacturing_process,
+            independent_variable=", ".join((query_frame or {}).get("independent_variables") or []),
+            dependent_variable=", ".join((query_frame or {}).get("dependent_variables") or []),
+            fatigue_stage=paper.fatigue_regime, crack_stage=paper.crack_stage,
+            experimental_conditions=paper.conditions, mechanism_chain=paper.mechanisms,
+            quantitative_relationship=(paper.quantitative_results[0] if paper.quantitative_results else ""),
+            applicable_formula_ids=[item["formula_id"] for item in paper.formulas],
+            supporting_evidence_ids=[item["evidence_id"] for item in paper.principal_claims if item["role"] == "SUPPORT"],
+            counter_evidence_ids=[item["evidence_id"] for item in paper.principal_claims if item["role"] == "COUNTER"],
+            condition_dependent_evidence_ids=[item["evidence_id"] for item in paper.principal_claims if item["role"] == "CONDITION_DEPENDENT"],
+            applicability_boundary=paper.applicability,
+            unresolved_part=paper.limitations,
+            evidence_level=first["evidence_level"],
+            confidence=paper.extraction_confidence,
+            source_papers=[paper.paper_id],
+        ))
+    return EvidenceBundle(question, topics, papers, formula_rows, synthesis, citation_index, query_frame or {}, claims, dataset_version)

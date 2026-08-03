@@ -19,6 +19,7 @@ class SkillInput:
     dataset_version: str
     previous_output: "SkillOutput | None" = None
     evidence_bundle: dict[str, Any] = field(default_factory=dict)
+    query_frame: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

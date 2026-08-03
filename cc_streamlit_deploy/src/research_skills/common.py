@@ -18,6 +18,26 @@ def entity_labels(value: SkillInput) -> tuple[str, str]:
     )
 
 
+def query_variables(value: SkillInput) -> tuple[list[str], list[str]]:
+    frame = value.query_frame or value.evidence_bundle.get("query_frame") or {}
+    independent = [str(item) for item in frame.get("independent_variables") or []]
+    dependent = [str(item) for item in frame.get("dependent_variables") or []]
+    iv, dv = entity_labels(value)
+    if not independent and iv:
+        independent.append(iv)
+    if not dependent and dv:
+        dependent.append(dv)
+    return independent, dependent
+
+
+def evidence_level_instruction() -> str:
+    return (
+        "重要陈述必须区分：文献直接结果用‘该研究报告’，作者机制解释用‘作者将其解释为’，"
+        "跨文献综合用‘综合条件相容的研究可以判断’，系统推断用‘可以推测但尚未直接验证’，"
+        "候选模型用‘待拟合候选模型’，证据不足用‘当前证据不足以确定’。"
+    )
+
+
 def evidence_counts(value: SkillInput) -> tuple[int, int, int]:
     return (
         len(value.support_evidence),

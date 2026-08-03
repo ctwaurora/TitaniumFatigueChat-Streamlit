@@ -128,6 +128,22 @@ def _extract_formula_text(original_text: str, latex_candidate: str) -> str:
     return "\n".join(lines[start:end])
 
 
+def _remove_title_contamination(formula_text: str, paper_title: str) -> str:
+    """Remove page-header/title text without altering the extracted equation."""
+    title = " ".join(str(paper_title or "").split()).strip()
+    if not title:
+        return formula_text
+    cleaned_lines = []
+    for line in str(formula_text or "").splitlines():
+        compact = " ".join(line.split()).strip()
+        if compact.casefold() == title.casefold():
+            continue
+        compact = re.sub(re.escape(title), "", compact, flags=re.I).strip(" -–—:;")
+        if compact:
+            cleaned_lines.append(compact)
+    return "\n".join(cleaned_lines)
+
+
 def _formula_type(text: str) -> str:
     lower = text.lower()
     if any(term in lower for term in ("da/dn", "delta k", "δk", "crack growth", "paris")):
@@ -189,7 +205,10 @@ def load_literature_formulas(base_dir: Path) -> List[Dict[str, Any]]:
             metadata = manifest.get(paper_id, {})
             original_context = str(raw.get("original_text") or "").strip()
             latex_candidate = str(raw.get("latex_candidate") or "").strip()
-            original_formula = _extract_formula_text(original_context, latex_candidate)
+            paper_title = str((manifest.get(paper_id) or {}).get("title") or "题名未记录")
+            original_formula = _remove_title_contamination(
+                _extract_formula_text(original_context, latex_candidate), paper_title
+            )
             raw_review_status = str(raw.get("review_status") or "").upper()
             confirmed = raw_review_status in {"CONFIRMED", "HUMAN_CONFIRMED", "VERIFIED"}
             evidence_status = "已确认" if confirmed else "待人工复核"
@@ -212,7 +231,7 @@ def load_literature_formulas(base_dir: Path) -> List[Dict[str, Any]]:
                 "formula_id": f"{paper_id}:p{page_number}:e{index}",
                 "source_type": LITERATURE_FORMULA_SOURCE,
                 "paper_id": paper_id,
-                "paper_title": str(metadata.get("title") or "题名未记录"),
+                "paper_title": paper_title,
                 "authors_year": _authors_and_year(metadata),
                 "doi": str(metadata.get("doi") or "未记录"),
                 "page_number": page_number,
