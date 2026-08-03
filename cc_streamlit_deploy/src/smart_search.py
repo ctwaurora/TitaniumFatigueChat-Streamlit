@@ -14,6 +14,8 @@ from typing import Any, Callable
 from src.api_keys import get_deepseek_settings
 from src.deepseek_client import DeepSeekClient, DeepSeekRequestError
 from src.query_understanding import understand_user_query
+from src.research_skills.contracts import SkillInput
+from src.research_skills.router import get_research_skill
 from src.unified_rag import answer_research_question
 from src.variable_mapper import extract_variable_pair
 
@@ -277,209 +279,35 @@ def _first_stage_markdown(
     return "\n".join(lines), preview_rows
 
 
-def _llm_prompt(question: str, result: dict[str, Any], module: str) -> str:
-    rows = (result["supporting_evidence"][:6] + result["counter_evidence"][:4] + result["condition_dependent_evidence"][:4])
-    evidence = "\n".join(
-        f"[{row.get('doc_id')} | {row.get('title')} | p.{row.get('page_number')} | {row.get('section')}] {row.get('original_text')} CONDITIONS={_compact_conditions(row.get('experimental_conditions'))}"
-        for row in rows
+def _build_skill_input(
+    question: str,
+    parsed_entities: dict[str, Any],
+    result: dict[str, Any],
+    dataset_version: str,
+) -> SkillInput:
+    support = list(result.get("supporting_evidence") or [])
+    counter = list(result.get("counter_evidence") or [])
+    conditional = list(result.get("condition_dependent_evidence") or [])
+    retrieved = support + counter + conditional
+    condition_evidence = [
+        row for row in retrieved if row.get("experimental_conditions")
+    ]
+    formula_records = [
+        row for row in retrieved
+        if row.get("index_type") == "formula"
+        or "FORMULA_" in str(row.get("doc_id") or "")
+    ]
+    return SkillInput(
+        user_query=question,
+        parsed_entities=parsed_entities,
+        retrieved_evidence=retrieved,
+        condition_evidence=condition_evidence,
+        formula_records=formula_records,
+        support_evidence=support,
+        counter_evidence=counter,
+        condition_dependent_evidence=conditional,
+        dataset_version=dataset_version,
     )
-    return (
-        f"当前模块是{module}。仅依据下列本地证据，用中文直接回答问题。"
-        "本段只写结论、机制、条件边界、反向观点与不确定性，不列文献清单，"
-        "不显示JSON、代码字段或NOT_REPORTED；不得补造文献、页码、参数或机制边界。\n"
-        f"问题：{question}\n证据：\n{evidence}"
-    )
-
-
-def _formula_evidence_block(result: dict[str, Any]) -> str:
-    """Render only formulas returned by the formal RAG formula index."""
-    rows = []
-    for group in ("supporting_evidence", "counter_evidence", "condition_dependent_evidence"):
-        for row in result.get(group) or []:
-            equation = str(row.get("equation") or row.get("formula") or "").strip()
-            if equation and (
-                row.get("index_type") == "formula"
-                or "FORMULA_" in str(row.get("doc_id"))
-            ):
-                rows.append((row, equation))
-    if not rows:
-        return "**可追溯公式来源**\n\n本次正式 RAG 未召回可追溯的原文公式，因此不输出无来源公式或伪造参数。"
-    lines = ["**可追溯公式来源**", ""]
-    seen = set()
-    for row, equation in rows[:5]:
-        key = (str(row.get("doc_id")), equation)
-        if key in seen:
-            continue
-        seen.add(key)
-        lines.extend([
-            f"- 公式：`{equation}`",
-            f"- 来源：{row.get('title') or '题名未报告'}；作者与年份：{row.get('authors') or '未报告'}，{row.get('year') or '未报告'}；页码：{row.get('page_number') or '未报告'}；章节：{row.get('section') or '未报告'}；Evidence ID：{row.get('doc_id') or '未报告'}",
-            f"- 参数与单位：{', '.join(row.get('parameters') or []) or '原文未完整报告'}；{', '.join(row.get('units') or []) or '原文未完整报告'}",
-            "",
-        ])
-    return "\n".join(lines).rstrip()
-
-
-def _module_analysis_markdown(
-    module: str, question: str, result: dict[str, Any], synthesis: str
-) -> str:
-    entities = resolve_question_entities(question)
-    iv = entities["independent_label"] or "用户明确提出的变量"
-    dv = entities["dependent_label"] or "对应疲劳指标"
-    if not entities["specific"]:
-        # A vague query must stop at an evidence-bound clarification instead
-        # of inventing a generic scientific target.
-        iv = "未能从问题中可靠识别自变量"
-        dv = "未能从问题中可靠识别因变量"
-    sufficiency = result.get("evidence_sufficiency") or {}
-    level = str(sufficiency.get("status") or "本地证据不足")
-    supporting = len(result.get("supporting_evidence") or [])
-    counter = len(result.get("counter_evidence") or [])
-    conditional = len(result.get("condition_dependent_evidence") or [])
-    direct = synthesis.strip() or (
-        f"本地正式文献库检索到 {supporting} 条支持证据、{counter} 条反向证据和"
-        f" {conditional} 条条件依赖证据。结论必须限定在已报告材料、工艺与载荷条件内。"
-    )
-    analyses: dict[str, str] = {
-        "research_gap": f"""### 研究空白标题
-
-**现有研究已经解决的问题**
-
-现有研究已对 {iv} 与 {dv} 的关系给出部分条件化证据。
-
-**尚未解决的问题**
-
-{iv} 对 {dv} 的效应在匹配材料批次、微观组织、表面状态和载荷条件下的边界仍缺少独立验证。
-
-**为什么构成研究空白**
-
-现有证据分散在不同试验条件中，不能把跨论文差异直接解释为 {iv} 对 {dv} 的因果效应。
-
-**可能反驳该空白的证据**
-
-本次检索得到 {counter} 条反向证据和 {conditional} 条条件依赖证据；若其条件已覆盖目标组合，该空白应缩小或取消。
-
-**已覆盖条件**
-
-| 维度 | 当前覆盖 |
-|---|---|
-| 文献来源 | {len(result.get('retrieved_papers') or [])} 篇正式文献 |
-| 支持证据 | {supporting} 条 |
-| 反向证据 | {counter} 条 |
-| 条件依赖证据 | {conditional} 条 |
-
-**缺失条件**
-
-- 匹配材料批次与微观组织的对照；
-- 匹配应力比、疲劳区间和环境的组合验证；
-- 跨批次独立重复。
-
-**候选研究问题**
-
-1. 在匹配应力与组织条件下，{iv} 对 {dv} 的效应方向是否仍保持一致？
-2. 哪一组工艺或载荷条件会改变 {iv} 主导的失效机制？
-3. 该 {iv}–{dv} 边界能否在独立材料批次中复现？
-
-**可验证性**
-
-采用受控分组疲劳试验、断口溯源和匹配条件统计模型进行验证。
-
-**证据充分度**
-
-{level}
-""",
-        "hypothesis_generation": f"""**候选假设**
-
-在其他条件匹配时，{iv} 会以条件依赖方式改变 {dv} 或裂纹起裂机制。
-
-**科学依据**
-
-当前有 {supporting} 条支持证据、{counter} 条反向证据和 {conditional} 条条件依赖证据。
-
-**机制链**
-
-{iv} 变化 → 局部应力或微观损伤演化变化 → 起裂位置或扩展行为变化 → {dv} 变化。
-
-**自变量**：{iv}。  
-**因变量**：{dv}。  
-**控制变量**：材料批次、组织、试样几何、表面状态、应力比、频率、温度与环境。  
-**预测方向**：以支持证据中的主方向为候选预测，但遇到反向证据所对应条件时允许改变。  
-**支持证据**：{supporting} 条。  
-**反向证据**：{counter} 条。  
-**适用边界**：仅限于证据卡片中明确报告的材料、工艺和载荷条件。  
-**哪些结果会推翻假设**：匹配条件后效应消失、方向稳定反转，或由未控制变量完全解释。  
-**证据充分度**：{level}。
-""",
-        "experiment_design": f"""**研究对象**：与问题相符的钛合金疲劳试样。  
-**核心假设**：{iv} 在条件匹配后仍会改变 {dv}。  
-**自变量**：{iv} 及必要分层水平。  
-**因变量**：{dv}、起裂源和裂纹扩展指标。  
-**控制变量**：材料批次、组织、几何、表面状态、应力比、频率、温度和环境。  
-**协变量**：残余应力、缺陷几何、粗糙度与织构。  
-**分组方案**：基准组与 {iv} 多水平组，并保留关键条件的交互组。  
-**样本建议**：先做每组不少于5件的先导试验，正式样本量由效应量与方差功效分析确定。  
-**制样方法**：同批粉末、同一工艺窗口，记录加工和后处理全过程。  
-**加载条件**：应力水平、应力比和疲劳区间预注册，不混合拟合 HCF 与 VHCF。  
-**表征方法**：表面轮廓、micro-CT、残余应力、EBSD和SEM断口溯源按问题选用。  
-**数据分析**：S-N/裂纹扩展拟合、混合效应模型、交互项检验与不确定性区间。  
-**预测方向**：采用关于 {iv}–{dv} 的证据主方向作为预注册预测。  
-**支持假设的结果**：效应在匹配条件和独立批次中方向一致。  
-**推翻假设的结果**：效应消失、稳定反转或由混杂因素完全解释。  
-**最低成本方案**：复用现有试样完成表面测量、断口复核和小规模对照。  
-**完整方案**：跨批次全因子疲劳试验并进行盲法断口判定。  
-**风险与混杂因素**：批次差异、检测分辨率、残余应力、组织差异和删失数据。
-""",
-        "formula_explanation": f"""**公式**
-
-仅解释本次证据中能够追溯到原文上下文的疲劳模型；没有完整参数和单位时不做数值代入。
-
-**中文解释**：公式用于描述 {iv} 与 {dv} 之间的经验或机制关系。  
-**变量与单位**：以原文定义为准，必须统一应力、长度、循环数和扩展速率单位。  
-**适用条件**：材料、应力比、温度、疲劳区间和拟合区间与原文一致。  
-**前提假设**：模型形式、参数稳定性和数据区间满足原文假设。  
-**不适用情况**：跨疲劳区间、跨失效机制或单位未统一。  
-**多公式结果差异**：参数标定、应力比修正、缺陷表征和适用区间会造成差异。  
-**哪些公式不能直接比较**：输入量定义、单位、拟合区间或物理假设不同的公式。
-""",
-    }
-    generic = f"""**结论**
-
-本次检索得到 {supporting} 条支持证据、{counter} 条反向证据和 {conditional} 条条件依赖证据。
-
-**机制解释**
-
-{iv} 通过局部应力、组织或损伤演化影响 {dv}，具体方向受工艺和载荷条件约束。
-
-**条件边界**
-
-只在文献证据卡片明确报告的材料、工艺、表面状态、热处理和载荷条件内成立。
-
-**支持与反向观点**
-
-支持证据与反向证据并存时，应优先解释条件差异，不把跨条件差异直接当作矛盾。
-
-**不确定性与研究意义**
-
-证据充分度为 {level}；缺失条件需要通过补充检索或受控实验验证。
-"""
-    analysis = analyses.get(module, generic)
-    if module == "formula_explanation":
-        analysis = analysis.rstrip() + "\n\n" + _formula_evidence_block(result)
-    return f"""## 第一部分：直接回答
-
-{direct}
-
-## 第二部分：科研分析
-
-{analysis}
-
-## 第三部分：结论边界
-
-- 证据充分度：{level}。
-- 可直接支持：证据原文明确报告且条件一致的结论。
-- 系统推断：跨文献机制串联、候选假设与实验建议。
-- 本地证据不足：缺少匹配条件、独立重复或必要参数的部分。
-"""
 
 
 def run_smart_search(
@@ -504,7 +332,9 @@ def run_smart_search(
     dataset_version = smart_search_dataset_version(base_dir)
     retrieval_started = time.perf_counter()
     retrieval_started_epoch_ms = time.time_ns() / 1_000_000
-    retrieval_function = _cached_retrieval if use_llm else _cached_first_stage_retrieval
+    # All four skills require support, counter and condition-dependent evidence.
+    # ``use_llm`` controls synthesis only and never weakens retrieval.
+    retrieval_function = _cached_retrieval
     cache_before = retrieval_function.cache_info()
     result = copy.deepcopy(
         retrieval_function(
@@ -594,7 +424,12 @@ def run_smart_search(
                 **first_stage,
             }
         )
-    answer = ""
+    parsed_entities = resolve_question_entities(question)
+    skill = get_research_skill(module)
+    skill_input = _build_skill_input(
+        question, parsed_entities, result, dataset_version
+    )
+    synthesis = ""
     settings = get_deepseek_settings()
     if use_llm and settings.configured:
         try:
@@ -605,8 +440,11 @@ def run_smart_search(
             diagnostics["stage_timestamps_epoch_ms"]["t9_deepseek_start"] = round(
                 time.time_ns() / 1_000_000, 3
             )
-            answer = client.chat(
-                [{"role": "system", "content": "你是钛合金疲劳科研助手，必须严格服从证据引用约束。"}, {"role": "user", "content": _llm_prompt(effective, result, module)}],
+            synthesis = client.chat(
+                [
+                    {"role": "system", "content": "你是钛合金疲劳科研助手，必须严格服从证据引用约束。"},
+                    {"role": "user", "content": skill.build_prompt(skill_input)},
+                ],
                 temperature=0.1, max_tokens=1600, timeout=12, connect_timeout=3, max_retries=0,
             )
             diagnostics["llm_executed"] = True
@@ -616,13 +454,9 @@ def run_smart_search(
             )
         except (DeepSeekRequestError, ValueError, OSError) as exc:
             diagnostics["llm_error"] = f"{type(exc).__name__}:{exc}"
-    answer = _module_analysis_markdown(module, question, result, answer)
-    quality = validate_generated_answer(answer, question, module)
-    if not quality["passed"]:
-        # Never expose a vague LLM fallback. Rebuild from the deterministic,
-        # entity-bound template and retain the evidence cards below it.
-        answer = _module_analysis_markdown(module, question, result, "")
-        quality = validate_generated_answer(answer, question, module)
+    skill_output = skill.generate(skill_input, synthesis=synthesis)
+    answer = skill.render_output(skill_output)
+    quality = skill_output.quality_gate
     answer += "\n\n" + evidence_markdown
     diagnostics["total_elapsed_seconds"] = round(time.perf_counter() - started, 4)
     diagnostics["stage_timestamps_epoch_ms"]["t10_final_answer"] = round(
@@ -643,5 +477,6 @@ def run_smart_search(
         "first_stage": first_stage,
         "research_result": result,
         "query_understanding": understood,
+        "skill_output": skill_output.as_dict(),
         "diagnostics": diagnostics,
     }

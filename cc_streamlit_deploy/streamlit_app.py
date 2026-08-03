@@ -222,14 +222,24 @@ def check_duplicate_ids(df, id_col: str) -> tuple:
     return True, dup_ids, df
 
 
-SAMPLE_QUESTIONS = [
-    "孔隙尺寸和疲劳寿命之间是什么关系？",
-    "表面粗糙度和内部孔隙哪个更容易主导疲劳失效？",
-    "HIP 处理是否能完全消除孔隙缺陷对疲劳性能的影响？",
-    "给定 pore size 和 stress ratio，能否生成一个可验证假设？",
-    "L-PBF Ti-6Al-4V 中哪些文献结论存在冲突？",
-    "Paris 参数 C/m 如何受缺陷和微观组织影响？",
-]
+MODE_SAMPLE_QUESTIONS = {
+    "research_analysis": [
+        "HIP是否在所有条件下都能提高L-PBF Ti-6Al-4V疲劳寿命？",
+        "残余应力如何影响Ti-6Al-4V短裂纹扩展？",
+    ],
+    "research_gap": [
+        "寻找残余应力与微观组织共同影响短裂纹扩展的具体研究空白。",
+        "表面粗糙度与近表面缺陷竞争控制裂纹起裂还缺少哪些匹配实验？",
+    ],
+    "hypothesis_generation": [
+        "针对残余应力与α片层宽度对da/dN的影响提出公式化可证伪假设。",
+        "针对表面控制向近表面缺陷控制转换提出候选数学模型。",
+    ],
+    "experiment_design": [
+        "设计一个区分微观组织效应和残余应力效应的疲劳实验。",
+        "设计能够验证或推翻表面粗糙度—近表面缺陷转换假设的实验。",
+    ],
+}
 
 BAD_HYPOTHESIS_EXAMPLES = [
     "孔隙影响疲劳性能。",
@@ -241,10 +251,6 @@ BAD_HYPOTHESIS_EXAMPLES = [
 
 # Mode constants (both for internal use and display)
 MODES = {
-    "smart_search": {
-        "label": "智能搜索",
-        "desc": "检索正式文献库并生成完整中文回答。",
-    },
     "research_analysis": {
         "label": "科研分析",
         "desc": "系统将输出变量关系、机制链条、文献支持、候选模型和条件边界。",
@@ -256,10 +262,6 @@ MODES = {
     "hypothesis_generation": {
         "label": "假设生成",
         "desc": "系统将生成具体、可验证、可推翻的候选科学假设，并自动评分。",
-    },
-    "formula_explanation": {
-        "label": "公式模型解释",
-        "desc": "解释公式、变量、单位、适用范围和不可比条件。",
     },
     "experiment_design": {
         "label": "实验验证方案",
@@ -289,8 +291,6 @@ for key, default in [
     ("gap_results", None),
     ("gap_review_text", ""),
     ("gap_scope", "all"),
-    ("answer_depth", "paper_level"),
-    ("answer_depth_label", "论文级"),
 ]:
     if key not in st.session_state:
         if isinstance(default, tuple):
@@ -556,350 +556,6 @@ def generate_popular_science_answer(
 # MODE 2: Research Analysis (科研分析)
 # ═══════════════════════════════════════════════════════════════════════════
 
-def _build_question_understanding_section(
-    question: str,
-    ind_var: Optional[str],
-    dep_var: Optional[str],
-    var_class: str = "",
-) -> str:
-    """构建问题理解模块（论文级回答第1节）。"""
-    lines = ["## 1. 问题理解\n"]
-    lines.append(f"**原始问题**: {question}\n\n")
-
-    # Use query understanding module
-    try:
-        from src.query_understanding import understand_user_query
-        sq = understand_user_query(question)
-        task_intent = sq.get("task_intent", "general_explanation")
-        intent_labels = {
-            "general_explanation": "一般解释", "relation_analysis": "变量关系分析",
-            "equation_generation": "方程/参数生成", "hypothesis_generation": "假设生成",
-            "experiment_design": "实验设计", "conflict_detection": "文献冲突检测",
-            "macro_micro_mechanism": "宏微观机制分析",
-            "dominance_comparison": "因素比较", "literature_search": "文献检索",
-            "research_gap_discovery": "研究空白",
-        }
-        lines.append(f"**系统理解**: 将用户问题识别为「{intent_labels.get(task_intent, '一般解释')}」任务。\n\n")
-
-        # Corrections
-        if sq.get("has_corrections") and sq.get("corrections"):
-            lines.append("**自动修正**:\n")
-            for c in sq["corrections"]:
-                conf = int(c.get("confidence", 0.8) * 100)
-                lines.append(f"- 「{c['raw']}」→「{c['corrected']}」(置信度: {conf}%)\n")
-            lines.append("\n")
-    except Exception:
-        pass
-
-    lines.append("**识别变量**:\n")
-    if ind_var and dep_var:
-        lines.append(f"- **自变量 (IV)**: {ind_var}\n")
-        lines.append(f"- **因变量 (DV)**: {dep_var}\n")
-        if var_class:
-            lines.append(f"- **变量关系类型**: {var_class}\n")
-    elif ind_var:
-        lines.append(f"- **自变量 (IV)**: {ind_var}\n")
-        lines.append(f"- **因变量 (DV)**: 待识别\n")
-    elif dep_var:
-        lines.append(f"- **自变量 (IV)**: 待识别\n")
-        lines.append(f"- **因变量 (DV)**: {dep_var}\n")
-    else:
-        lines.append("- **自变量 (IV)**: 待识别\n")
-        lines.append("- **因变量 (DV)**: 待识别\n")
-
-    # Add recommended variables if vague
-    if dep_var and dep_var.lower() in BANNED_VAGUE_DV:
-        iv_lower = (ind_var or "").lower()
-        suggestions = DV_RECOMMENDED_MAP.get(iv_lower, [
-            "Nf", "fatigue_limit σw", "crack_initiation_site", "da/dN"
-        ])
-        lines.append(f"\n> ⚠️ 因变量「{dep_var}」过于模糊，建议拆解为: {', '.join(suggestions)}\n")
-
-    lines.append("\n---\n")
-    return "".join(lines)
-
-
-def generate_research_analysis_answer(
-    question: str,
-    ind_var: Optional[str],
-    dep_var: Optional[str],
-    var_class: str,
-    ranker=None,
-    depth: str = "paper_level",
-) -> str:
-    """
-    科研分析模式 — 输出论文级详细科研分析。
-
-    深度:
-      - standard: 简短结论
-      - detailed: 含变量关系、机制、文献
-      - paper_level: 15层完整论文分析
-    """
-    lines = []
-
-    # ── 0. Question understanding (paper-level) ──
-    if depth == "paper_level":
-        lines.append(_build_question_understanding_section(question, ind_var, dep_var, var_class))
-
-    # ── 1. Direct conclusion ──
-    if depth == "paper_level":
-        lines.append("## 2. 直接结论\n")
-    else:
-        lines.append("## 直接关系结论\n")
-    lines.append("**用户关注变量**:\n")
-    lines.append(f"- **自变量**: {ind_var or '（未识别）'}\n")
-    lines.append(f"- **因变量**: {dep_var or '（未识别）'}\n\n")
-
-    direct = _direct_relation_text(ind_var, dep_var)
-    lines.append(direct + "\n")
-
-    # ── 2. Variable relation analysis ──
-    if depth == "paper_level":
-        lines.append("## 3. 详细变量关系分析\n")
-        lines.append("### 3.1 自变量如何影响因变量\n\n")
-    else:
-        lines.append("## 变量关系判断\n")
-
-    rel_result = find_exact_or_near_relation(ind_var, dep_var)
-    if rel_result["found"]:
-        lines.append(f"- **匹配质量**: {rel_result['match_quality']}\n")
-        lines.append(f"- **匹配数量**: {len(rel_result['relations'])} 条\n")
-        for r in rel_result["relations"][:3]:
-            iv = r.get("independent_variable", "")
-            dv = r.get("dependent_variable", "")
-            rt = r.get("relation_type", "")
-            cond = r.get("condition", "")
-            mech = r.get("mechanism", "")[:120]
-            lines.append(f"- {iv} → {dv}（{rt}）\n")
-            if cond:
-                lines.append(f"  - **条件**: {cond}\n")
-            if mech:
-                lines.append(f"  - {mech}\n")
-    else:
-        lines.append(f"- {rel_result['evidence_summary']}\n")
-
-    # ── 3. Condition boundaries & competing mechanisms ──
-    if depth == "paper_level" and ind_var and dep_var:
-        lines.append("\n### 3.2 调节变量如何改变关系\n\n")
-        iv_lower = ind_var.lower()
-        dv_lower = dep_var.lower()
-
-        if "roughness" in iv_lower:
-            lines.append(
-                "**表面状态 (surface_state)** 是核心调节变量。\n\n"
-                "- 在 **as-built** 状态下，表面粗糙度 Ra/Rz 较高（通常 Ra > 10μm），"
-                "表面缺口效应占主导，裂纹倾向于从表面粗糙峰根部起裂。\n"
-                "- 在 **polished** 或 **machined** 状态下，表面缺口消除，"
-                "内部孔隙或近表面缺陷对疲劳寿命 Nf 的解释力增强。\n"
-                "- **应力比 R** 影响局部应力幅水平和裂纹闭合效应，"
-                "高 R 比下表面缺口效应可能更加显著。\n\n"
-            )
-            lines.append("### 3.3 竞争机制\n\n")
-            lines.append(
-                "表面粗糙度与内部孔隙存在**竞争主导关系**:\n\n"
-                "- 表面粗糙度高（as-built）→ **表面主导**起裂模式\n"
-                "- 表面改善后（polished/machined）→ **孔隙主导**起裂模式\n"
-                "- 存在临界表面粗糙度值（如 Ra 阈值），"
-                "低于该值时主导权转向孔隙。\n"
-                "- 该临界值受 √area、distance_to_surface、R 比的调节。\n\n"
-            )
-        elif "pore" in iv_lower or "defect" in iv_lower:
-            lines.append(
-                "**距表面距离 (distance_to_surface)** 是核心调节变量。\n\n"
-                "- 近表面孔隙（distance_to_surface < 100μm）："
-                "孔隙边缘应力集中与自由表面应力场叠加，"
-                "显著提高起裂驱动力，降低 Nf。\n"
-                "- 深部孔隙（distance_to_surface > 500μm）："
-                "应力叠加效应减弱，起裂驱动力以孔隙自身应力集中为主。\n"
-                "- **表面状态**竞争：在 as-built 试样中，表面粗糙度"
-                "可能掩盖近表面孔隙的起裂主导作用。\n"
-                "- **应力比 R**：高 R 比下平均应力增高，"
-                "孔隙边缘的应力集中效应被放大。\n\n"
-            )
-        elif "delta" in iv_lower or "crack" in iv_lower:
-            lines.append(
-                "**微观组织**是核心调节变量。\n\n"
-                "- α lath 宽度增大可能提高 Paris 参数 m，"
-                "降低裂纹扩展抗力。\n"
-                "- **缺陷状态**：孔隙/未熔合缺陷在高 ΔK 下影响减弱，"
-                "但在近门槛值区缺陷对 ΔKth 有明显降低作用。\n"
-                "- **应力比 R**：高 R 比降低裂纹闭合效应，"
-                "提高有效 ΔKeff，加速裂纹扩展。\n\n"
-            )
-        else:
-            lines.append(
-                "变量间的关系可能受以下调节变量影响：\n"
-                "- **表面状态** (as-built vs polished)\n"
-                "- **热处理** (stress-relieved vs HIP vs annealing)\n"
-                "- **应力比 R**\n"
-                "- **缺陷状态** (孔隙率、缺陷尺寸)\n"
-                "- **微观组织** (α/β 相比例、晶粒尺寸)\n\n"
-            )
-
-    # ── 4. Mechanism chain ──
-    if ind_var and dep_var:
-        if depth == "paper_level":
-            lines.append("## 4. 机制链条\n\n")
-        else:
-            lines.append("## 机制链条\n")
-        chain = build_mechanism_chain(ind_var, dep_var)
-        lines.append("```\n" + chain + "\n```\n")
-
-    # ── 5. Literature evidence status ──
-    if depth == "paper_level":
-        lines.append("## 5. 文献证据状态\n\n")
-        support = evaluate_literature_support(ind_var, dep_var, question)
-        cov = support["coverage_level"]
-        n_ev = support["matched_evidence_count"]
-        n_direct = len(support["supporting_evidence"])
-        n_conflict = len(support["conflicting_or_conditional_evidence"])
-
-        if cov == "sufficient" and n_direct >= 2:
-            lines.append("**证据等级**: 🟢 direct / sufficient\n\n")
-            lines.append(f"本地文献库中有 {n_direct} 条直接证据支持该变量关系，"
-                         f"共匹配 {n_ev} 条相关证据片段。\n\n")
-        elif cov in ("sufficient", "partial") and n_direct >= 1:
-            lines.append("**证据等级**: 🟡 partially supported / indirect\n\n")
-            lines.append(f"存在 {n_direct} 条直接证据，"
-                         f"另有 {n_ev - n_direct} 条间接证据。"
-                         f"需要更多系统定量研究。\n\n")
-        elif n_conflict > 0:
-            lines.append("**证据等级**: 🟠 conflicting\n\n")
-            lines.append(f"检测到 {n_conflict} 条冲突或条件依赖证据。"
-                         f"不同文献结论可能因未控制变量而异。\n\n")
-        else:
-            lines.append("**证据等级**: 🔴 insufficient / search-guided candidate\n\n")
-            lines.append("当前本地文献库不足以支持强判断。\n\n")
-
-        # Missing data fields
-        lines.append("**缺失的关键数据字段**:\n")
-        if "roughness" in (ind_var or "").lower():
-            lines.append("- surface_roughness_Ra/Rz 与 Nf 配对数据\n"
-                         "- crack_initiation_site SEM 确认数据\n"
-                         "- 同时包含 Ra/Rz、pore_size、distance_to_surface 的系统对比\n")
-        elif "pore" in (ind_var or "").lower():
-            lines.append("- pore_size / √area 与 Nf 配对数据\n"
-                         "- distance_to_surface 的系统控制研究\n"
-                         "- 近表面 vs 深部孔隙的对比实验\n")
-        elif "delta" in (ind_var or "").lower() or "crack" in (ind_var or "").lower():
-            lines.append("- da/dN-ΔK 完整曲线\n"
-                         "- Paris_C / Paris_m 参数\n"
-                         "- ΔKth 门槛值\n")
-        else:
-            lines.append(f"- {ind_var or '自变量'} → {dep_var or '因变量'} 的直接实验数据\n")
-
-    # ── 6. Equation / models ──
-    if depth == "paper_level":
-        lines.append("## 6. 可能方程或模型\n\n")
-    else:
-        lines.append("## 可能方程/模型\n")
-    lines.append(_build_equation_section(ind_var, dep_var, question))
-
-    # ── 7. Literature support ──
-    if depth == "paper_level":
-        lines.append("## 7. 文献支撑\n\n")
-    lines.append(_build_lit_support_section(ind_var, dep_var, question))
-
-    # ── 8. Scientific judgment ──
-    if depth == "paper_level":
-        lines.append("## 8. 科研判断\n\n")
-    else:
-        lines.append("## 科研判断\n")
-    if ind_var and dep_var:
-        support = evaluate_literature_support(ind_var, dep_var, question)
-        cov = support["coverage_level"]
-        n_ev = support["matched_evidence_count"]
-        n_direct = len(support["supporting_evidence"])
-
-        if cov == "sufficient" and n_direct >= 2:
-            lines.append("**判断**: 🟢 **evidence-supported**\n")
-            lines.append("本地文献库有直接证据支持该变量关系。\n")
-        elif cov in ("sufficient", "partial") and n_direct >= 1:
-            lines.append("**判断**: 🟡 **partially supported**\n")
-            lines.append("存在部分证据支持，但需要更多定量数据。\n")
-        elif n_direct == 0 and len(support["conflicting_or_conditional_evidence"]) > 0:
-            lines.append("**判断**: 🟠 **存在条件冲突**\n")
-            lines.append("不同文献结论不一致，可能依赖未控制条件。\n")
-        else:
-            lines.append("**判断**: 🔴 **search-guided candidate / evidence insufficient**\n")
-            lines.append("当前证据不足以支持强判断，需要补充文献。\n")
-    else:
-        lines.append("**判断**: 变量不明确，无法做出科研判断。\n")
-
-    # ── 9. Candidate hypothesis (paper-level only) ──
-    if depth == "paper_level" and ind_var and dep_var:
-        lines.append("## 9. 候选科学假设\n\n")
-        detailed_hyp = _generate_detailed_variable_hypothesis(ind_var, dep_var, question)
-        if detailed_hyp:
-            lines.append(detailed_hyp + "\n")
-        else:
-            lines.append(
-                "基于当前变量对，可生成以下候选假设：\n\n"
-            )
-
-    # ── 10. Experimental verification (paper-level only) ──
-    if depth == "paper_level" and ind_var and dep_var:
-        lines.append("## 10. 实验验证方案\n\n")
-        lines.append(generate_experiment_design_answer(question, ind_var, dep_var, var_class))
-        lines.append("\n")
-
-    # ── 11. Data needed ──
-    if depth == "paper_level":
-        lines.append("## 11. 当前不足与需要补充的数据\n\n")
-    else:
-        lines.append("## 下一步需要的数据\n")
-    if ind_var == "pore_size" and dep_var == "fatigue_life":
-        lines.append("""1. 包含 pore_size / √area 与 Nf 对应关系的实验文献
-2. 同时包含 micro-CT 缺陷表征和 HCF 疲劳数据的文献
-3. 包含裂纹起裂源与孔隙位置对应关系的断口分析
-4. Murakami / Kitagawa-Takahashi / El Haddad 模型验证数据
-""")
-    elif ind_var and "roughness" in ind_var.lower():
-        lines.append("""1. 表面粗糙度 Ra/Rz 与 Nf 的直接配对实验数据
-2. 同时包含 Ra/Rz、pore_size、distance_to_surface 和 crack_initiation_site 的系统对比
-3. as-built vs polished 组间裂纹起裂源比较数据
-4. 不同表面状态下 S-N 曲线数据
-""")
-    else:
-        lines.append("""1. 补充该变量对的定量实验数据
-2. 控制变量的系统对比研究
-3. 含方程参数的文献数据
-""")
-
-    # ── 12. Improvement recommendation (paper-level) ──
-    if depth == "paper_level":
-        lines.append("## 12. 改进后的高质量假设方向\n\n")
-        iv_lower = (ind_var or "").lower()
-        if "roughness" in iv_lower:
-            lines.append(
-                "基于以上分析，推荐优先验证以下高质量假设方向：\n\n"
-                "**表面粗糙度—内部孔隙竞争主导疲劳裂纹起裂的条件边界假设**\n\n"
-                "在 as-built L-PBF Ti-6Al-4V 中，较高的表面粗糙度 Ra/Rz "
-                "可能通过表面缺口效应优先诱导疲劳裂纹在表面粗糙峰处起裂，"
-                "从而削弱内部孔隙尺寸对疲劳寿命 Nf 的解释力。相反，"
-                "在 polished 或 machined 表面中，表面缺口效应减弱，"
-                "近表面或内部大孔隙对裂纹起裂位置和 Nf 的影响会增强。\n\n"
-                "该假设包含明确的条件边界（as-built vs polished）、"
-                "竞争机制（表面缺口 vs 内部孔隙）、"
-                "具体因变量（Nf / crack_initiation_site）"
-                "和验证方案（SEM fractography + micro-CT + HCF）。\n"
-            )
-        elif "pore" in iv_lower:
-            lines.append(
-                "**孔隙尺寸—距表面距离耦合控制疲劳裂纹起裂的假设**\n\n"
-                "在控制材料成分、L-PBF 工艺参数和表面状态（polished）后，"
-                "具有较大 √area 且距自由表面较近的孔隙，"
-                "比深部同等尺寸孔隙更容易成为疲劳裂纹起裂源，"
-                "并导致疲劳寿命 Nf 降低。\n\n"
-                "该假设需通过 micro-CT + SEM fractography + HCF 联合验证。\n"
-            )
-        else:
-            lines.append(
-                "建议对当前变量对进行更系统的文献检索，"
-                "补充直接实验证据后生成具体可验证假设。\n"
-            )
-
-    return "".join(lines)
 
 
 def _direct_relation_text(ind_var: Optional[str], dep_var: Optional[str]) -> str:
@@ -2105,13 +1761,8 @@ def generate_comprehensive_answer(
     progress_callback=None,
     use_llm: bool = True,
 ) -> str:
-    """
-    根据 answer_mode 和 answer_depth 分派到不同深度的回答生成器。
-    默认使用 paper_level（论文级详细分析）。
-    """
-    # ── Read depth preference ──
+    """Run one complete evidence-bound research skill."""
     import streamlit as st
-    depth = st.session_state.get("answer_depth", "paper_level")
 
     # ── Step 1: Extract variable pair ──
     ind_var, dep_var, var_class = extract_variable_pair(question)
@@ -2146,14 +1797,6 @@ def generate_comprehensive_answer(
             "evidence_status": sufficiency.get("status", "NOT_EVALUATED"),
         }
 
-    # ── Step 4-8: 无需额外追加 ──
-    if depth != "paper_level":
-        quality = quality_gate_for_specificity(answer)
-        if quality["low_specificity"]:
-            supplement = _build_specificity_supplement(ind_var, dep_var)
-            if supplement:
-                answer += "\n" + supplement
-
     # ── Step 9: Do not create an unclaimed Streamlit PENDING task ──
     if coverage_result.get("topup_required"):
         answer += "\n## OA 文献补充门禁\n\n"
@@ -2174,6 +1817,33 @@ def _mark_smart_search_received() -> None:
     ) + 1
 
 
+def _select_research_skill(mode: str) -> None:
+    """Switch the lightweight UI mode without retrieval or model execution."""
+    if mode not in MODES:
+        return
+    previous = st.session_state.get("answer_mode", "research_analysis")
+    st.session_state.answer_mode = mode
+    st.session_state.last_mode = mode
+    if mode != previous:
+        st.session_state.pop("answer", None)
+        st.session_state.analysis_done = False
+
+
+def _fill_example_question(question: str) -> None:
+    """Fill the input only; examples never execute retrieval or a model call."""
+    st.session_state.user_question = question
+    st.session_state.pop("answer", None)
+    st.session_state.analysis_done = False
+
+
+def _navigate_to(page: str) -> None:
+    """Switch top-level pages in the normal full-app button rerun."""
+    st.session_state.page = page
+    if page == "search":
+        st.session_state.pop("answer", None)
+        st.session_state.analysis_done = False
+
+
 @st.fragment
 def _render_smart_search_analysis_fragment() -> None:
     """Run one complete module analysis without a second generation action."""
@@ -2186,6 +1856,48 @@ def _render_smart_search_analysis_fragment() -> None:
         key="user_question",
         label_visibility="collapsed",
     )
+    st.markdown(
+        """
+        <style>
+        .st-key-analysis_mode_buttons [data-testid="stHorizontalBlock"] {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 0.5rem;
+        }
+        .st-key-analysis_mode_buttons [data-testid="stColumn"] {
+            width: auto !important;
+            min-width: 0 !important;
+            flex: none !important;
+        }
+        .st-key-analysis_mode_buttons button {
+            min-height: 2.75rem;
+            white-space: nowrap;
+        }
+        @media (max-width: 640px) {
+            .st-key-analysis_mode_buttons [data-testid="stHorizontalBlock"] {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    current_mode = st.session_state.get("answer_mode", "research_analysis")
+    if current_mode not in MODES:
+        current_mode = "research_analysis"
+        st.session_state.answer_mode = current_mode
+    with st.container(key="analysis_mode_buttons"):
+        mode_columns = st.columns(4)
+        for column, mode in zip(mode_columns, MODES):
+            column.button(
+                MODES[mode]["label"],
+                key=f"analysis_mode_{mode}",
+                type="primary" if mode == current_mode else "secondary",
+                use_container_width=True,
+                on_click=_select_research_skill,
+                args=(mode,),
+            )
+    st.caption(f"当前模式：{MODES[current_mode]['label']}")
     action = st.columns([1, 2, 1])[1]
     analyze_clicked = action.button(
         "🔍 开始分析",
@@ -2223,6 +1935,18 @@ def _render_smart_search_analysis_fragment() -> None:
             st.session_state.analysis_done = True
             st.session_state.answer_timestamp = time.time()
             st.session_state.pop("smart_search_pending_full_answer", None)
+
+    st.divider()
+    st.caption("示例问题")
+    sample_columns = st.columns(2)
+    for index, question in enumerate(MODE_SAMPLE_QUESTIONS.get(current_mode, [])):
+        sample_columns[index % 2].button(
+            question,
+            key=safe_key(f"sample_{current_mode}", question, index),
+            use_container_width=True,
+            on_click=_fill_example_question,
+            args=(question,),
+        )
 
     has_answer = bool(st.session_state.get("answer"))
     smart_result = st.session_state.get("smart_search_result") or {}
@@ -2481,28 +2205,23 @@ with st.sidebar:
     st.divider()
 
     # 最终产品只保留三个顶层入口；科研子模块在“智能分析”内部切换。
-    if st.button(
+    st.button(
         "智能分析", key="nav_analysis", use_container_width=True,
         type="primary" if current_page == "search" else "secondary",
-    ):
-        st.session_state.page = "search"
-        st.session_state.pop("answer", None)
-        st.session_state.analysis_done = False
-        st.rerun()
+        on_click=_navigate_to, args=("search",),
+    )
 
-    if st.button(
+    st.button(
         "文献库", key="nav_library", use_container_width=True,
         type="primary" if current_page == "library" else "secondary",
-    ):
-        st.session_state.page = "library"
-        st.rerun()
+        on_click=_navigate_to, args=("library",),
+    )
 
-    if st.button(
+    st.button(
         "公式", key="nav_formula", use_container_width=True,
         type="primary" if current_page == "formula_explain" else "secondary",
-    ):
-        st.session_state.page = "formula_explain"
-        st.rerun()
+        on_click=_navigate_to, args=("formula_explain",),
+    )
 
     from src.data_cache import get_system_stats_cached
     stats = get_system_stats_cached()
@@ -2524,74 +2243,23 @@ with st.sidebar:
 # PAGE: AI Scientist Search
 # ═══════════════════════════════════════════════════════════════════════════
 
+_page_mount = st.empty()
+
 if current_page == "search":
-    st.session_state["smart_search_full_rerun_count"] = int(
-        st.session_state.get("smart_search_full_rerun_count", 0)
-    ) + 1
+    with _page_mount.container():
+        st.session_state["smart_search_full_rerun_count"] = int(
+            st.session_state.get("smart_search_full_rerun_count", 0)
+        ) + 1
 
-    if _SEARCH_PREWARM_THREAD.is_alive():
-        _SEARCH_PREWARM_THREAD.join(timeout=5.0)
-
-    active_mode = st.session_state.get("answer_mode", "research_analysis")
-    st.caption("TitaniumFatigueChat")
-    st.title(MODES.get(active_mode, MODES["research_analysis"])["label"])
-    st.divider()
-
-    search_col1, search_col2, search_col3 = st.columns([1, 2, 1])
-
-    with search_col2:
-        # Current module is selected from the left navigation.
-        mode_options = [
-            "research_analysis", "research_gap", "hypothesis_generation",
-            "experiment_design", "formula_explanation", "smart_search",
-        ]
-        previous_mode = st.session_state.get("answer_mode", "research_analysis")
-        current_mode = previous_mode
-        if current_mode not in mode_options:
-            current_mode = "research_analysis"
-        current_mode = st.selectbox(
-            "分析类型",
-            mode_options,
-            index=mode_options.index(current_mode),
-            format_func=lambda value: MODES[value]["label"],
-            key="analysis_mode_selector",
-        )
-        st.session_state.answer_mode = current_mode
-        if current_mode != previous_mode:
-            st.session_state.pop("answer", None)
-            st.session_state.analysis_done = False
-        if not st.session_state.get("answer"):
-            st.session_state.last_mode = current_mode
-        st.caption(f"当前模块：{MODES[current_mode]['label']}")
-
-        # ── Answer depth selector ──
-        depth_options = {
-            "standard": "标准",
-            "detailed": "详细",
-            "paper_level": "论文级",
-        }
-        current_depth = st.session_state.get("answer_depth", "paper_level")
-        selected_depth = st.radio(
-            "分析深度",
-            options=list(depth_options),
-            format_func=lambda value: depth_options[value],
-            index=list(depth_options).index(current_depth),
-            horizontal=True,
-            key="answer_depth_selector",
-        )
-        st.session_state.answer_depth = selected_depth
-        _render_smart_search_analysis_fragment()
-
-        # ── Sample question buttons ──
+        st.caption("TitaniumFatigueChat")
+        st.title("智能分析")
+        st.caption("基于正式可信文献、条件化证据与反证检索的钛合金疲劳科研推理")
         st.divider()
-        st.markdown("<div style='font-size:0.85rem; color:#888; text-align:center;'>💡 示例问题</div>", unsafe_allow_html=True)
-        sample_cols = st.columns(2)
-        for i, q in enumerate(SAMPLE_QUESTIONS):
-            with sample_cols[i % 2]:
-                if st.button(q, key=safe_key("sample_q", q, i), use_container_width=True):
-                    st.session_state.user_question = q
-                    st.session_state.answer = None
-                    st.rerun()
+
+        search_col1, search_col2, search_col3 = st.columns([1, 2, 1])
+
+        with search_col2:
+            _render_smart_search_analysis_fragment()
 
 # ═══════════════════════════════════════════════════════════════════════════
 # PAGE: Research Gap Discovery
@@ -2796,6 +2464,7 @@ elif current_page == "research_gap":
 # ═══════════════════════════════════════════════════════════════════════════
 
 elif current_page == "library":
+    _page_mount.empty()
     from src.formal_library_page import render_formal_library_page
     render_formal_library_page(st, base_dir=BASE_DIR)
 
@@ -2954,7 +2623,7 @@ elif current_page == "sci_export":
 
 elif current_page == "dashboard":
     st.markdown("<h1 style='text-align: center;'>📊 论文结果统计面板</h1>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align:center;color:#888;'>Evidence–Parameter–Conflict RAG — 论文级数据统计</p>")
+    st.markdown("<p style='text-align:center;color:#888;'>Evidence–Parameter–Conflict RAG — 科研数据统计</p>")
     st.divider()
 
     # ═══ 缓存化系统统计 ═══
@@ -3084,6 +2753,7 @@ elif current_page == "hypothesis_gen":
 # ═══════════════════════════════════════════════════════════════════════════
 
 elif current_page == "formula_explain":
+    _page_mount.empty()
     import pandas as pd
     from src.literature_formula_library import (
         EVIDENCE_STATUSES,
