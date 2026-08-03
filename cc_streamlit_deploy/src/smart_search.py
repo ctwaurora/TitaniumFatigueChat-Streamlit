@@ -11,8 +11,10 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from src.answer_quality import precise_refusal, validate_answer_quality
 from src.api_keys import get_deepseek_settings
 from src.deepseek_client import DeepSeekClient, DeepSeekRequestError
+from src.evidence_bundle import build_evidence_bundle
 from src.query_understanding import understand_user_query
 from src.research_skills.contracts import SkillInput
 from src.research_skills.router import get_research_skill
@@ -288,15 +290,15 @@ def _build_skill_input(
     support = list(result.get("supporting_evidence") or [])
     counter = list(result.get("counter_evidence") or [])
     conditional = list(result.get("condition_dependent_evidence") or [])
-    retrieved = support + counter + conditional
+    retrieved = list(result.get("retrieved_evidence_pool") or support + counter + conditional)
     condition_evidence = [
         row for row in retrieved if row.get("experimental_conditions")
     ]
-    formula_records = [
-        row for row in retrieved
-        if row.get("index_type") == "formula"
-        or "FORMULA_" in str(row.get("doc_id") or "")
-    ]
+    bundle = build_evidence_bundle(
+        question, support, counter, conditional, retrieved_pool=retrieved
+    )
+    formula_ids = {row["formula_id"] for row in bundle.formulas}
+    formula_records = [row for row in retrieved if str(row.get("doc_id") or "") in formula_ids]
     return SkillInput(
         user_query=question,
         parsed_entities=parsed_entities,
@@ -307,6 +309,7 @@ def _build_skill_input(
         counter_evidence=counter,
         condition_dependent_evidence=conditional,
         dataset_version=dataset_version,
+        evidence_bundle=bundle.as_dict(),
     )
 
 
@@ -354,7 +357,10 @@ def run_smart_search(
         }
     except (OSError, json.JSONDecodeError, KeyError):
         manifest = {}
-    for key in ("supporting_evidence", "counter_evidence", "condition_dependent_evidence"):
+    for key in (
+        "supporting_evidence", "counter_evidence", "condition_dependent_evidence",
+        "retrieved_evidence_pool",
+    ):
         for row in result.get(key) or []:
             paper = manifest.get(str(row.get("paper_id") or ""), {})
             row["authors"] = paper.get("authors") or ""
@@ -430,6 +436,7 @@ def run_smart_search(
         question, parsed_entities, result, dataset_version
     )
     synthesis = ""
+    llm_call_count = 0
     settings = get_deepseek_settings()
     if use_llm and settings.configured:
         try:
@@ -447,6 +454,7 @@ def run_smart_search(
                 ],
                 temperature=0.1, max_tokens=1600, timeout=12, connect_timeout=3, max_retries=0,
             )
+            llm_call_count += 1
             diagnostics["llm_executed"] = True
             diagnostics["llm_usage"] = client.usage_snapshot()
             diagnostics["llm_elapsed_seconds"] = round(
@@ -456,7 +464,51 @@ def run_smart_search(
             diagnostics["llm_error"] = f"{type(exc).__name__}:{exc}"
     skill_output = skill.generate(skill_input, synthesis=synthesis)
     answer = skill.render_output(skill_output)
-    quality = skill_output.quality_gate
+    quality = validate_answer_quality(
+        answer,
+        question=question,
+        skill_name=skill_output.skill_name,
+        evidence_bundle=skill_input.evidence_bundle,
+    )
+    repair_attempted = False
+    if diagnostics["llm_executed"] and not quality["passed"]:
+        repair_attempted = True
+        try:
+            repair_prompt = skill.build_repair_prompt(
+                skill_input, draft=answer, failures=quality["failures"]
+            )
+            repaired = client.chat(
+                [
+                    {"role": "system", "content": "你是科研回答质量修复器。只能使用给定EvidenceBundle，不得新增事实或引用。"},
+                    {"role": "user", "content": repair_prompt},
+                ],
+                temperature=0.0, max_tokens=1400, timeout=10, connect_timeout=3, max_retries=0,
+            )
+            llm_call_count += 1
+            repaired_output = skill.generate(skill_input, synthesis=repaired)
+            repaired_answer = skill.render_output(repaired_output)
+            repaired_quality = validate_answer_quality(
+                repaired_answer,
+                question=question,
+                skill_name=repaired_output.skill_name,
+                evidence_bundle=skill_input.evidence_bundle,
+            )
+            if repaired_quality["passed"]:
+                skill_output, answer, quality = repaired_output, repaired_answer, repaired_quality
+            else:
+                quality = repaired_quality
+                answer = precise_refusal(
+                    skill_output.skill_name, quality["failures"], skill_input.evidence_bundle
+                )
+        except (DeepSeekRequestError, ValueError, OSError) as exc:
+            diagnostics["llm_error"] = f"REPAIR_{type(exc).__name__}:{exc}"
+            answer = precise_refusal(
+                skill_output.skill_name, quality["failures"], skill_input.evidence_bundle
+            )
+    elif not quality["passed"]:
+        answer = precise_refusal(
+            skill_output.skill_name, quality["failures"], skill_input.evidence_bundle
+        )
     answer += "\n\n" + evidence_markdown
     diagnostics["total_elapsed_seconds"] = round(time.perf_counter() - started, 4)
     diagnostics["stage_timestamps_epoch_ms"]["t10_final_answer"] = round(
@@ -464,6 +516,11 @@ def run_smart_search(
     )
     diagnostics["timeout_exceeded"] = diagnostics["total_elapsed_seconds"] > 30
     diagnostics["specificity_gate"] = quality
+    diagnostics["llm_call_count"] = llm_call_count
+    diagnostics["quality_repair_attempted"] = repair_attempted
+    diagnostics["identified_topics"] = result.get("identified_topics") or []
+    diagnostics["evidence_bundle_paper_count"] = len(skill_input.evidence_bundle.get("papers") or [])
+    diagnostics["plausible_formula_count"] = len(skill_input.evidence_bundle.get("formulas") or [])
     if progress_callback:
         progress_callback(
             {

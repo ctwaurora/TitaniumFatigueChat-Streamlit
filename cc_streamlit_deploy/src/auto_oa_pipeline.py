@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import os
 import re
@@ -39,6 +40,7 @@ from src.stage1_store import (
     update_paper_domain_scope,
     update_paper_library_status,
 )
+from src.pdf_naming import rename_new_formal_pdf
 from src.unified_rag import build_unified_rag, rag_paths
 
 
@@ -226,6 +228,51 @@ def _existing_rag_ids(base_dir: Path) -> List[str]:
     return retained
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _preflight_existing_formal_assets(
+    paper_ids: Sequence[str], base_dir: Path
+) -> Dict[str, Any]:
+    records = {
+        str(row.get("paper_id") or ""): row
+        for row in load_paper_manifest(base_dir)
+    }
+    failures: Dict[str, List[str]] = {}
+    for paper_id in dict.fromkeys(paper_ids):
+        row = records.get(paper_id) or {}
+        reasons: List[str] = []
+        pdf_path = Path(str(row.get("canonical_pdf_path") or ""))
+        if row.get("library_status") != "FORMAL":
+            reasons.append("NOT_FORMAL")
+        if not pdf_path.is_file():
+            reasons.append("PDF_MISSING")
+        elif str(row.get("file_hash_sha256") or "").lower() != _file_sha256(pdf_path):
+            reasons.append("PDF_SHA_MISMATCH")
+        deep_root = base_dir / "data" / "deep_read" / paper_id
+        status = _read_json(deep_root / "extraction_status.json")
+        pages = _read_jsonl(deep_root / "page_records.jsonl")
+        real_pages = int(status.get("real_page_count") or 0)
+        if status.get("status") != "COMPLETED" or not status.get("deep_read_complete"):
+            reasons.append("DEEP_READ_INCOMPLETE")
+        if real_pages < 1 or len(pages) != real_pages:
+            reasons.append("PAGE_RECORD_COVERAGE_INVALID")
+        if reasons:
+            failures[paper_id] = reasons
+    if failures:
+        detail = ";".join(
+            f"{paper_id}={','.join(reasons)}"
+            for paper_id, reasons in sorted(failures.items())
+        )
+        raise RuntimeError("EXISTING_FORMAL_PREFLIGHT_FAILED:" + detail)
+    return {"verified_count": len(set(paper_ids)), "failures": {}}
+
+
 def evaluate_auto_rag_gate(
     paper_id: str,
     *,
@@ -348,8 +395,14 @@ def index_auto_validated_paper(
     gate = evaluate_auto_rag_gate(paper_id, base_dir=base_dir)
     if not gate["passed"]:
         return {"status": "NOT_INDEXED", "gate": gate}
-    paper_ids = list(dict.fromkeys([*_existing_rag_ids(base_dir), paper_id]))
-    result = build_unified_rag(paper_ids, base_dir=base_dir)
+    existing_ids = _existing_rag_ids(base_dir)
+    preflight = _preflight_existing_formal_assets(existing_ids, base_dir)
+    paper_ids = list(dict.fromkeys([*existing_ids, paper_id]))
+    result = build_unified_rag(
+        paper_ids,
+        base_dir=base_dir,
+        required_paper_ids=paper_ids,
+    )
     rag_manifest = _read_json(rag_paths(base_dir)["manifest"])
     actually_indexed = paper_id in {
         str(value) for value in (rag_manifest.get("paper_ids") or [])
@@ -361,6 +414,7 @@ def index_auto_validated_paper(
         "status": gate["index_status"],
         "gate": gate,
         "rag": result,
+        "existing_formal_preflight": preflight,
     }
 
 
@@ -460,12 +514,17 @@ def run_auto_oa_discovery(
     base_dir: Path = BASE_DIR,
     session: Optional[requests.Session] = None,
     progress_callback: Optional[ProgressCallback] = None,
+    excluded_dois: Optional[set[str]] = None,
+    excluded_titles: Optional[set[str]] = None,
 ) -> Dict[str, Any]:
     """Run the complete bounded workflow in the active web request."""
     query = " ".join(str(query or "").split())
     if not query:
         return {"status": "INVALID_INPUT", "results": [], "error": "SEARCH_TOPIC_REQUIRED"}
-    max_new = max(1, min(int(max_new), 3))
+    # Desktop automatic intake is deliberately bounded to one ten-paper
+    # checkpoint batch. Larger expansions must resume through the batch
+    # orchestrator so failures can be audited between batches.
+    max_new = max(1, min(int(max_new), 10))
     _emit(progress_callback, "SEARCHING", query=query)
     discovery = discover_oa_candidates(
         query,
@@ -473,7 +532,27 @@ def run_auto_oa_discovery(
         session=session,
         base_dir=base_dir,
     )
+    existing_manifest = load_paper_manifest(base_dir)
+    existing_formal_ids = {
+        str(row.get("paper_id") or "") for row in existing_manifest
+        if row.get("library_status") == "FORMAL"
+        and row.get("rag_status") == "INDEXED_STAGE3_UNIFIED"
+    }
+    existing_formal_dois = {
+        normalize_doi(row.get("doi") or "") for row in existing_manifest
+        if str(row.get("paper_id") or "") in existing_formal_ids
+        and normalize_doi(row.get("doi") or "")
+    }
+    existing_formal_titles = {
+        normalize_title(row.get("title") or "") for row in existing_manifest
+        if str(row.get("paper_id") or "") in existing_formal_ids
+        and normalize_title(row.get("title") or "")
+    }
+    attempted_dois = {normalize_doi(value) for value in (excluded_dois or set()) if normalize_doi(value)}
+    attempted_titles = {normalize_title(value) for value in (excluded_titles or set()) if normalize_title(value)}
     filtered: List[Dict[str, Any]] = []
+    existing_formal_duplicate_count = 0
+    attempted_candidate_skip_count = 0
     for candidate in discovery["candidates"]:
         scope = classify_literature_scope(candidate)
         candidate = {**candidate, **scope}
@@ -487,6 +566,20 @@ def run_auto_oa_discovery(
         if not _matches_topic(candidate, topic_filter):
             continue
         if core_only and not _is_core_paper(candidate):
+            continue
+        candidate_doi = normalize_doi(candidate.get("doi") or "")
+        candidate_title = normalize_title(candidate.get("title") or "")
+        if (
+            (candidate_doi and candidate_doi in attempted_dois)
+            or (candidate_title and candidate_title in attempted_titles)
+        ):
+            attempted_candidate_skip_count += 1
+            continue
+        if (
+            (candidate_doi and candidate_doi in existing_formal_dois)
+            or (candidate_title and candidate_title in existing_formal_titles)
+        ):
+            existing_formal_duplicate_count += 1
             continue
         filtered.append(candidate)
     filtered.sort(key=lambda row: _candidate_rank(row, query))
@@ -519,6 +612,22 @@ def run_auto_oa_discovery(
             library_status="CANDIDATE",
             base_dir=base_dir,
         )
+        registered_paper_id = str(registration.get("paper_id") or "")
+        if registered_paper_id in existing_formal_ids:
+            existing_formal_duplicate_count += 1
+            results.append({
+                "paper_id": registered_paper_id,
+                "title": candidate.get("title") or "",
+                "doi": candidate.get("doi") or "",
+                "download_status": "DUPLICATE_EXISTING_FORMAL_SKIPPED",
+                "downloaded_pdf": False,
+                "quality_gate": "NOT_RUN_EXISTING_FORMAL_PROTECTED",
+                "library_status": "FORMAL",
+                "rag_status": "INDEXED_STAGE3_UNIFIED",
+                "failure_reason": "EXISTING_FORMAL_NOT_REPROCESSED",
+                "phases": ["SEARCHING", "METADATA_VALIDATED", "DEDUPLICATED"],
+            })
+            continue
         detail: Dict[str, Any] = {
             "paper_id": str(registration.get("paper_id") or ""),
             "title": candidate.get("title") or "",
@@ -639,6 +748,12 @@ def run_auto_oa_discovery(
                 update_paper_library_status(
                     paper_id, "FORMAL", base_dir=base_dir
                 )
+                try:
+                    detail["pdf_naming"] = rename_new_formal_pdf(base_dir, paper_id)
+                except (OSError, RuntimeError) as exc:
+                    # Naming is a storage concern: preserve a scientifically
+                    # accepted paper and surface the operational failure.
+                    detail["pdf_naming"] = {"error": str(exc)}
                 detail["phases"].append("COMPLETED")
                 _emit(progress_callback, "COMPLETED", paper_id=paper_id)
             else:
@@ -665,6 +780,8 @@ def run_auto_oa_discovery(
         "download_attempt_count": download_attempt_count,
         "download_success_count": download_success_count,
         "candidate_count": len(filtered),
+        "existing_formal_duplicate_count": existing_formal_duplicate_count,
+        "attempted_candidate_skip_count": attempted_candidate_skip_count,
         "results": results,
         "source_results": discovery["source_results"],
         "errors": discovery["errors"],

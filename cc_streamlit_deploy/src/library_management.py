@@ -264,5 +264,7 @@ def delete_formal_papers(
         json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     temporary.replace(whitelist_path)
-    cleanup = apply_plan(base_dir, build_plan(base_dir))
+    cleanup_plan = build_plan(base_dir)
+    cleanup_plan["authorized_removals"] = requested
+    cleanup = apply_plan(base_dir, cleanup_plan)
     return {"status": "COMPLETED", "impact": impact, "rag": rag, "cleanup": cleanup}

@@ -28,6 +28,13 @@ from sklearn.decomposition import TruncatedSVD
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import Normalizer
 
+from src.research_topics import (
+    document_topics,
+    expand_topic_query,
+    identify_topics,
+    pore_is_dominant,
+    query_mentions_pores,
+)
 from src.stage1_store import BASE_DIR, load_paper_manifest, update_paper_rag_status
 
 
@@ -217,12 +224,7 @@ def _tokens(text: str) -> List[str]:
 
 
 def expand_question(question: str) -> str:
-    expanded = [question]
-    lower = question.lower()
-    for marker, terms in QUERY_EXPANSIONS.items():
-        if marker.lower() in lower:
-            expanded.append(terms)
-    return " ".join(expanded)
+    return expand_topic_query(question)
 
 
 def identify_variables(question: str) -> List[str]:
@@ -232,6 +234,16 @@ def identify_variables(question: str) -> List[str]:
         if any(term.lower() in lower for term in terms):
             found.append(variable)
     return found
+
+
+def _counter_signal(text: str) -> bool:
+    return bool(re.search(
+        r"\b(?:no significant|not significant|however|whereas|contrary|exception|"
+        r"depend(?:s|ed|ent)? on|limited to|did not|failed to)\b|"
+        r"无显著|并不显著|然而|相反|例外|取决于|仅适用于|未提高|未降低",
+        str(text or ""),
+        re.I,
+    ))
 
 
 def _conditions_from_text(text: str, supplied: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -664,11 +676,26 @@ def build_unified_rag(
     paper_ids: Sequence[str],
     *,
     base_dir: Path = BASE_DIR,
+    required_paper_ids: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     """Rebuild the Stage-3 source only from completed Stage-2 artifacts."""
     paths = rag_paths(base_dir)
     paths["root"].mkdir(parents=True, exist_ok=True)
-    documents, build_info = _build_documents(base_dir, list(dict.fromkeys(paper_ids)))
+    requested_ids = list(dict.fromkeys(paper_ids))
+    documents, build_info = _build_documents(base_dir, requested_ids)
+    accepted_ids = set(build_info["accepted_paper_ids"])
+    required_ids = set(
+        requested_ids if required_paper_ids is None else required_paper_ids
+    )
+    missing_required = sorted(required_ids - accepted_ids)
+    if missing_required:
+        # This check deliberately happens before the first index write.  A
+        # failed incremental intake must leave the complete previous RAG on
+        # disk and must not downgrade any existing canonical record.
+        raise RuntimeError(
+            "UNIFIED_RAG_REQUIRED_PAPERS_REJECTED:"
+            + ",".join(missing_required)
+        )
     for index_type, rows in documents.items():
         _atomic_jsonl(paths[index_type], rows)
     all_documents = [
@@ -710,7 +737,6 @@ def build_unified_rag(
         "built_at": manifest["built_at"],
     }
     _atomic_json(paths["status"], status)
-    accepted_ids = set(build_info["accepted_paper_ids"])
     for row in load_paper_manifest(base_dir):
         paper_id = str(row.get("paper_id") or "")
         if (
@@ -882,6 +908,7 @@ def retrieve_research_evidence(
     base_dir: Path = BASE_DIR,
 ) -> Dict[str, Any]:
     started = time.perf_counter()
+    query_topics = identify_topics(question)
     normalized_question = expand_question(question)
     normalization_complete = time.perf_counter()
     errors = []
@@ -934,12 +961,24 @@ def retrieve_research_evidence(
             "page": 0.02,
             "section": 0.0,
         }.get(doc.get("index_type"), 0.0)
+        doc_topics = document_topics(doc.get("text") or "", doc.get("experimental_conditions") or {})
+        topic_overlap = len(set(query_topics) & set(doc_topics))
+        topic_bonus = min(0.18, topic_overlap * 0.06)
+        unsolicited_pore_penalty = (
+            0.30
+            if not query_mentions_pores(question)
+            and "DEFECT" in doc_topics
+            and pore_is_dominant(doc.get("text") or "")
+            else 0.0
+        )
         rerank_score = (
             retrieval_score
             + min(0.15, coverage * 0.05)
             + provenance * 0.03
             + direct_bonus
             + layer_bonus
+            + topic_bonus
+            - unsolicited_pore_penalty
         )
         item = {
             **doc,
@@ -956,6 +995,9 @@ def retrieve_research_evidence(
                     for term in VARIABLE_TERMS.get(variable, (variable,))
                 )
             ],
+            "matched_topics": sorted(set(query_topics) & set(doc_topics)),
+            "document_topics": doc_topics,
+            "unsolicited_pore_penalty": unsolicited_pore_penalty,
         }
         candidates.append(item)
     candidates.sort(key=lambda row: row["rerank_score"], reverse=True)
@@ -969,6 +1011,7 @@ def retrieve_research_evidence(
         "question": question,
         "task_type": task_type,
         "required_variables": variables,
+        "identified_topics": query_topics,
         "condition_filters": condition_filters or {},
         "bm25_executed": bm25_executed,
         "vector_executed": vector_executed,
@@ -1000,6 +1043,7 @@ def retrieve_supporting_evidence(
 def generate_counter_targets(question: str) -> List[str]:
     """Generate alternate-mechanism targets without asserting they are true."""
     variables = set(identify_variables(question))
+    topics = set(identify_topics(question))
     targets = []
     if {"pore_size", "surface_distance", "crack_initiation", "fatigue_life"} & variables:
         targets.extend(
@@ -1020,6 +1064,20 @@ def generate_counter_targets(question: str) -> List[str]:
                 "crack closure threshold regime invalid Paris comparison",
             ]
         )
+    topic_targets = {
+        "RESIDUAL_STRESS": "residual stress relaxation redistribution no significant crack growth",
+        "MICROSTRUCTURE": "microstructure lath grain texture no significant fatigue effect",
+        "HEAT_TREATMENT": "heat treatment coarsening adverse fatigue no improvement",
+        "HIP": "HIP microstructure coarsening fatigue no improvement condition dependent",
+        "SURFACE_CONDITION": "surface treatment roughness machining condition dependent fatigue",
+        "BUILD_ORIENTATION": "build orientation anisotropy no significant after machining heat treatment",
+        "FATIGUE_LOADING": "stress ratio crack closure threshold condition dependent",
+        "ENVIRONMENT": "environment temperature crack growth condition dependent",
+        "SHORT_CRACK": "short crack long crack model invalid microstructure condition",
+    }
+    for topic in topics:
+        if topic in topic_targets:
+            targets.append(topic_targets[topic])
     if not targets:
         targets = [
             f"alternative mechanism conditions for {expand_question(question)}",
@@ -1183,36 +1241,26 @@ def answer_research_question(
     include_counter: bool = True,
 ) -> Dict[str, Any]:
     started = time.perf_counter()
-    # A single enlarged primary window supplies both supporting and
-    # condition-dependent evidence.  This preserves the retrieval pool while
-    # avoiding three identical corpus scans for the same question.
+    # One enlarged retrieval pool is shared by support, counter, condition and
+    # formula selection. This avoids repeated corpus scans and guarantees that
+    # the selected Skill sees one coherent ranking.
+    shared_query = question
     if include_counter:
-        with ThreadPoolExecutor(max_workers=2) as executor:
-            base_future = executor.submit(
-                retrieve_research_evidence,
-                question,
-                top_k=max(30, top_k * 3),
-                base_dir=base_dir,
-            )
-            counter_future = executor.submit(
-                retrieve_counter_evidence,
-                question,
-                top_k=top_k,
-                base_dir=base_dir,
-            )
-            base = base_future.result()
-            counter = counter_future.result()
-    else:
-        base = retrieve_research_evidence(
-            question,
-            top_k=max(30, top_k * 3),
-            base_dir=base_dir,
-        )
-        counter = []
-    supporting = list(base["results"][:top_k])
+        shared_query += " alternative mechanism no significant effect condition dependent"
+    base = retrieve_research_evidence(
+        shared_query,
+        required_variables=identify_variables(question),
+        top_k=max(60, top_k * 6),
+        base_dir=base_dir,
+    )
+    pool = list(base["results"])
+    counter_candidates = [row for row in pool if _counter_signal(row.get("text") or row.get("claim") or "")]
+    counter = counter_candidates[:top_k] if include_counter else []
+    counter_ids = {row.get("doc_id") for row in counter}
+    supporting = [row for row in pool if row.get("doc_id") not in counter_ids][:top_k]
     conditional = [
         row
-        for row in base["results"]
+        for row in pool
         if any((row.get("experimental_conditions") or {}).values())
     ][:top_k]
     sufficiency = evaluate_evidence_sufficiency(
@@ -1233,6 +1281,8 @@ def answer_research_question(
         "supporting_evidence": supporting,
         "counter_evidence": counter,
         "condition_dependent_evidence": conditional,
+        "retrieved_evidence_pool": pool,
+        "identified_topics": identify_topics(question),
         "insufficient": sufficiency["status"] == "INSUFFICIENT",
         "duplicate_removed": base["duplicate_removed"],
         "page_traceability_rate": sufficiency["page_traceability_rate"],

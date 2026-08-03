@@ -1,5 +1,5 @@
 TitaniumFatigueChat Streamlit deployment manifest
-file_count=129
+file_count=133
 
 .gitignore
 .streamlit/config.toml
@@ -44,6 +44,7 @@ skills/review_skill.py
 skills/search_skill.py
 src/__init__.py
 src/ablation_study.py
+src/answer_quality.py
 src/api_keys.py
 src/app_auth.py
 src/auto_collector.py
@@ -65,6 +66,7 @@ src/deepseek_usage.py
 src/discovery.py
 src/domain_scope.py
 src/equation_engine.py
+src/evidence_bundle.py
 src/evidence_extraction.py
 src/evidence_gate.py
 src/evidence_quality.py
@@ -98,6 +100,7 @@ src/page_answers.py
 src/paper_classifier.py
 src/paper_collector.py
 src/paper_readiness.py
+src/pdf_naming.py
 src/pdf_rematcher.py
 src/pdf_upload_handler.py
 src/pdf_watcher.py
@@ -116,6 +119,7 @@ src/research_skills/hypothesis_generation_skill.py
 src/research_skills/research_gap_skill.py
 src/research_skills/router.py
 src/research_skills/scientific_analysis_skill.py
+src/research_topics.py
 src/retrospective_validation.py
 src/sci_export.py
 src/scientific_framework.py

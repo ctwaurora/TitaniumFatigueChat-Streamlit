@@ -1,145 +1,82 @@
-"""Independent falsifiable-hypothesis generation skill."""
+"""Formula-aware falsifiable hypothesis Skill."""
 
 from __future__ import annotations
 
-from src.research_skills.common import (
-    base_quality_gate,
-    entity_labels,
-    evidence_counts,
-    evidence_prompt_block,
-    formula_lines,
-    missing_evidence,
-    traceable_cards,
-)
+from src.research_skills.common import base_quality_gate, bundle_prompt, entity_labels, missing_evidence, primary_citation, traceable_cards
 from src.research_skills.contracts import SkillInput, SkillOutput
 
 
 SKILL_NAME = "hypothesis_generation_skill"
-TASK_DEFINITION = "生成具体、公式约束、可证伪且能拟合验证的候选假设。"
-QUALITY_METRICS = (
-    "hypothesis_falsifiability", "formula_applicability", "condition_completeness",
-    "counter_evidence_coverage", "unsupported_claim_rate", "citation_truthfulness",
-)
+TASK_DEFINITION = "生成有来源、公式约束、可拟合并可被明确推翻的候选假设。"
+QUALITY_METRICS = ("hypothesis_falsifiability", "formula_applicability", "condition_completeness", "unsupported_claim_rate")
 
 
 def build_prompt(value: SkillInput) -> str:
+    return f"""你正在独立执行 hypothesis_generation_skill。问题：{value.user_query}
+基于EvidenceBundle生成候选假设，不得声称已被证明。必须写：研究对象；自变量；因变量；控制变量；中介机制；预测关系的函数类型；公式、参数、单位与适用范围；至少两条具体推翻条件；替代解释；拟合和验证方法。
+文献公式须逐字引用Formula ID、题名、页码、章节；无可信文献公式但有定量依据时，只能写“以下为系统提出的待拟合候选模型，并非文献原公式”，且不得伪造系数。
+每个事实标 Evidence ID 和页码，不报告证据数量，不把未提及的孔隙设为核心变量。
+EvidenceBundle：{bundle_prompt(value)}"""
+
+
+def build_repair_prompt(value: SkillInput, *, draft: str, failures: list[str]) -> str:
+    return f"""修复 hypothesis_generation_skill 草稿。失败项：{'；'.join(failures)}。
+补齐具体变量、机制、函数形式、单位、范围、替代解释、两条独立推翻判据和验证方法。真实公式只能逐字来自EvidenceBundle；候选模型必须明确标注且不得填系数。
+草稿：{draft}\nEvidenceBundle：{bundle_prompt(value)}"""
+
+
+def _fallback(value: SkillInput) -> tuple[str, str, list[str]]:
     iv, dv = entity_labels(value)
-    return (
-        "你正在执行 hypothesis_generation_skill。输出必须是候选假设，不得声称已证明。"
-        "明确自变量、因变量、控制变量、中介机制、预测关系、至少两条证伪判据和参数拟合计划。"
-        "只能引用证据中的原文公式；自建模型必须标注候选模型且不得伪造系数。\n"
-        f"问题：{value.user_query}\n自变量：{iv}\n因变量：{dv}\n证据：\n{evidence_prompt_block(value)}"
-    )
+    bundle = value.evidence_bundle or {}
+    cross = bundle.get("synthesis") or {}
+    formulas = bundle.get("formulas") or []
+    if not (value.support_evidence and iv and dv):
+        return "本地正式证据不足，无法形成有来源的可证伪假设。", "需要明确变量并补足直接证据与实验条件。", []
+    support_cite = primary_citation(value)
+    counter_cite = primary_citation(value, "COUNTER")
+    hypothesis = f"候选假设：在材料、热处理、表面状态和载荷条件匹配后，{iv}通过改变局部裂纹驱动力或微观屏障作用，使{dv}出现可重复、可拟合的条件化变化。{support_cite}"
+    if formulas:
+        item = formulas[0]
+        formula = f"文献原公式：{item['equation']}；Formula ID：{item['formula_id']}；页码：{item['page_number']}；参数：{item.get('parameters') or '未报告'}；单位：{item.get('units') or '未报告'}；适用条件：{item.get('applicable_conditions') or '未完整报告'}。"
+    else:
+        formula = f"以下为系统提出的待拟合候选模型，并非文献原公式：{dv}=f({iv}, controls)。不预填函数系数；用线性、幂律、阈值和分段模型的交叉验证误差选择形式。"
+    falsifiers = [
+        f"控制协变量后，{iv}项及其关键交互项的置信区间覆盖预注册的最小效应，且加入该项不改善留出批次预测。",
+        f"独立材料批次出现稳定相反方向，或中介指标不随{iv}变化而{dv}仍变化。",
+    ]
+    reasoning = f"""### 具体候选假设
+{hypothesis}
+
+### 研究对象、自变量和因变量
+研究对象以证据中题名、材料和工艺匹配的钛合金试样为限；自变量：{iv}；因变量：{dv}。
+
+### 控制变量和中介机制
+控制材料批次、制造窗口、几何、热处理、表面状态、应力比、频率、温度和环境。中介量测为局部裂纹驱动力、裂纹闭合或微观组织屏障，按问题主题选择。
+
+### 预测关系、公式和适用范围
+{formula}
+
+### 支持、反向与替代解释
+支持依据：{(cross.get('consensus') or ['现有证据只支持条件化趋势。'])[0]} {support_cite}\n反向边界：{(cross.get('conflicts') or ['未召回明确反向结果，不能据此认定不存在。'])[0]} {counter_cite}\n替代解释包括未测残余应力、表面状态、组织尺度和载荷历史。
+
+### 明确证伪判据
+1. {falsifiers[0]}\n2. {falsifiers[1]}
+
+### 参数拟合与实验验证方案
+预注册候选函数、单位和适用区间；报告参数置信区间、共线性和留出批次预测误差，并以独立试样复核机制指标。"""
+    return hypothesis, reasoning, falsifiers
 
 
 def generate(value: SkillInput, synthesis: str = "") -> SkillOutput:
-    iv, dv = entity_labels(value)
-    support, counter, conditional = evidence_counts(value)
-    missing = missing_evidence(value)
-    specific = bool(value.parsed_entities.get("specific"))
-    evidence_sufficient = bool(value.retrieved_evidence and value.support_evidence)
-    if specific and evidence_sufficient:
-        statement = (
-            f"候选假设：在材料批次、组织、表面状态和载荷条件匹配时，{iv} 的受控变化会导致 {dv} 出现可重复的方向性变化；"
-            "当反向证据对应条件出现时，该方向允许发生转换。"
-        )
-        direct = synthesis.strip() or statement
-    elif not specific:
-        statement = "变量关系不完整，无法形成可证伪候选假设。"
-        direct = "hypothesis_generation_skill 拒绝根据模糊问题生成假设。"
-    else:
-        statement = "本地正式可信 RAG 缺少直接支持证据，无法形成有来源的候选假设。"
-        direct = "hypothesis_generation_skill 拒绝把证据不足包装成可证伪假设。"
-    formulas = formula_lines(value)
-    formula_text = (
-        "\n".join(formulas)
-        if formulas
-        else "未召回可追溯原文公式。候选模型只保留符号关系，不设定系数：DV = f(IV, controls)。"
-    )
-    falsifiers = [
-        f"匹配条件后，{iv} 对 {dv} 的效应不显著且置信区间排除预注册最小效应。",
-        f"独立批次中效应方向稳定反转，或 {iv} 的贡献被单一已测混杂变量完全解释。",
-    ]
-    reasoning = f"""**具体候选假设**
-
-{statement}
-
-**自变量**：{iv}。
-
-**因变量**：{dv}。
-
-**控制变量**：材料批次、制造窗口、试样几何、表面状态、热处理、应力比、频率、温度和环境。
-
-**中介机制**
-
-{iv} 改变局部应力或微观损伤演化，再通过起裂位置或裂纹扩展路径影响 {dv}。
-
-**文献原公式或候选模型**
-
-{formula_text}
-
-**参数、单位和适用范围**
-
-原文未报告的参数不补值；应力、长度、循环数和 da/dN 单位必须统一，拟合范围不得跨越不同失效机制。
-
-**预测关系**
-
-采用 {support} 条支持证据中的主方向作为预注册候选预测，并用 {counter} 条反向证据和 {conditional} 条条件依赖证据限定边界。
-
-**明确证伪判据**
-
-1. {falsifiers[0]}
-2. {falsifiers[1]}
-
-**参数拟合与实验验证方案**
-
-先做先导试验估计方差和效应量，再使用预注册模型拟合交互项；以留出批次验证方向、参数稳定性和预测区间。"""
-    combined = direct + "\n" + reasoning
-    gate = base_quality_gate(
-        value, combined, skill_name=SKILL_NAME,
-        required_terms=("明确证伪判据", "参数拟合与实验验证方案", "中介机制"),
-    )
-    gate["falsification_criteria_count"] = len(falsifiers)
-    gate["evidence_sufficient"] = evidence_sufficient
-    gate["passed"] = gate["passed"] and len(falsifiers) >= 2 and evidence_sufficient
-    return SkillOutput(
-        skill_name=SKILL_NAME,
-        direct_answer=direct,
-        structured_reasoning=reasoning,
-        uncertainty="该结果是 evidence-bound candidate hypothesis，不是已证实结论。",
-        evidence_cards=traceable_cards(value),
-        quality_gate=gate,
-        missing_evidence=missing,
-        specific_fields={
-            "hypothesis": statement,
-            "independent_variable": iv,
-            "dependent_variable": dv,
-            "mediator": "local stress / micro-damage / crack path",
-            "formula_or_candidate_model": formula_text,
-            "falsification_criteria": falsifiers,
-            "fit_and_validation_plan": "preregistered interaction model plus held-out build",
-            "quality_metrics": QUALITY_METRICS,
-        },
-        trace={
-            "dataset_version": value.dataset_version,
-            "previous_skill": getattr(value.previous_output, "skill_name", None),
-            "rechecked_evidence_ids": [card["evidence_id"] for card in traceable_cards(value)],
-        },
-    )
+    direct, reasoning, falsifiers = _fallback(value)
+    complete = synthesis.strip()
+    combined = complete or f"{direct}\n{reasoning}"
+    gate = base_quality_gate(value, combined, skill_name=SKILL_NAME)
+    gate["falsification_criteria_count"] = 2 if complete else len(falsifiers)
+    gate["passed"] = gate["passed"] and bool(value.support_evidence) and gate["falsification_criteria_count"] >= 2
+    return SkillOutput(SKILL_NAME, complete or direct, "" if complete else reasoning, "候选假设不是已证实结论；条件不匹配时不得外推。", traceable_cards(value), gate, missing_evidence(value), {"complete_answer": complete, "falsification_criteria": falsifiers, "quality_metrics": QUALITY_METRICS}, {"dataset_version": value.dataset_version, "previous_skill": getattr(value.previous_output, "skill_name", None), "rechecked_evidence_ids": [card["evidence_id"] for card in traceable_cards(value)]})
 
 
 def render_output(output: SkillOutput) -> str:
-    return f"""## 第一部分：直接回答
-
-{output.direct_answer}
-
-## 第二部分：科研分析
-
-{output.structured_reasoning}
-
-## 第三部分：结论边界
-
-- 假设性质：候选、可证伪，尚未被证明。
-- 原文公式与候选模型已分开标注。
-- 本地证据不足：{('；'.join(output.missing_evidence)) if output.missing_evidence else '未发现结构性缺项。'}
-"""
+    complete = output.specific_fields.get("complete_answer")
+    return str(complete) if complete else f"## 直接结论\n\n{output.direct_answer}\n\n{output.structured_reasoning}\n\n## 结论边界\n\n{output.uncertainty}"

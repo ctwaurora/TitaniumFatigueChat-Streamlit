@@ -1,150 +1,91 @@
-"""Independent evidence-bound research gap skill."""
+"""Counter-evidence-first research-gap Skill."""
 
 from __future__ import annotations
 
-from src.research_skills.common import (
-    base_quality_gate,
-    entity_labels,
-    evidence_counts,
-    evidence_prompt_block,
-    missing_evidence,
-    traceable_cards,
-)
+from src.research_skills.common import base_quality_gate, bundle_prompt, entity_labels, missing_evidence, primary_citation, traceable_cards
 from src.research_skills.contracts import SkillInput, SkillOutput
 
 
 SKILL_NAME = "research_gap_skill"
-TASK_DEFINITION = "区分已解决与未解决问题，压制研究空白误报并提出可证伪问题。"
-QUALITY_METRICS = (
-    "research_gap_false_positive_rate",
-    "counter_evidence_coverage",
-    "condition_completeness",
-    "citation_truthfulness",
-    "testability",
-)
+TASK_DEFINITION = "在反证核验后识别具体、未被现有匹配条件研究解决的空白。"
+QUALITY_METRICS = ("gap_false_positive_rate", "counter_evidence_coverage", "condition_completeness", "citation_truthfulness")
 
 
 def build_prompt(value: SkillInput) -> str:
+    return f"""你正在独立执行 research_gap_skill。问题：{value.user_query}
+先核对EvidenceBundle中的COUNTER和CONDITION_DEPENDENT记录，判断问题是否已被部分或全部解决。不得为了产出空白而忽略反证。
+输出：具体研究空白标题；已有研究解决了什么；尚缺哪个由2-4个变量组成的匹配条件组合；为何现有研究不能直接比较；反证和可能取消空白的证据；证据缺口矩阵；1-3个具体研究问题；可证伪假设；最低成本验证；本地库覆盖不足项。
+正文不得报告证据数量。每项关键判断标 Evidence ID 和页码。用户未问孔隙时不得把孔隙设为主空白。
+EvidenceBundle：{bundle_prompt(value)}"""
+
+
+def build_repair_prompt(value: SkillInput, *, draft: str, failures: list[str]) -> str:
+    return f"""修复 research_gap_skill 草稿。失败项：{'；'.join(failures)}。
+重新以反证优先核验空白，写清对象、疲劳阶段、核心变量、缺失条件组合和最低成本验证。若现有证据已解决问题，应取消或缩小空白。
+不得新增EvidenceBundle之外的引用。草稿：{draft}\nEvidenceBundle：{bundle_prompt(value)}"""
+
+
+def _fallback(value: SkillInput) -> tuple[str, str]:
     iv, dv = entity_labels(value)
-    return (
-        "你正在执行 research_gap_skill。禁止把文献数量少直接称为研究空白。"
-        "先证明已有研究不能在匹配条件下回答具体变量关系，再给出证据缺口矩阵。"
-        "必须检索可能反驳该空白的证据，并给出具体研究问题、可证伪假设和最低成本验证。\n"
-        f"问题：{value.user_query}\n待审计关系：{iv} -> {dv}\n证据：\n{evidence_prompt_block(value)}"
-    )
+    bundle = value.evidence_bundle or {}
+    cross = bundle.get("synthesis") or {}
+    consensus = cross.get("consensus") or []
+    conflicts = cross.get("conflicts") or []
+    missing = cross.get("missing_conditions") or []
+    formulas = bundle.get("formulas") or []
+    if not consensus or not value.counter_evidence:
+        return "本地证据不足，不能把检索覆盖不足误报为研究空白。", "需要先补足直接证据、反向证据与匹配实验条件。"
+    title = f"{iv or '所问变量'}与{dv or '疲劳结果'}在匹配材料-处理-载荷条件下的效应边界"
+    support_cite = primary_citation(value)
+    counter_cite = primary_citation(value, "COUNTER")
+    formula_text = "现有EvidenceBundle未提供可逐字核验的文献原公式。"
+    if formulas:
+        formula = formulas[0]
+        formula_text = (
+            f"{formula['equation']}（Formula ID：{formula['formula_id']}；"
+            f"页码：{formula['page_number']}；章节：{formula.get('section') or '未报告'}；"
+            f"适用条件：{formula.get('applicable_conditions') or '原文未完整报告'}）"
+        )
+    direct = f"可成立的空白不是泛称“多因素耦合”，而是：{title}。现有结果尚不能在同一实验空间内分离变量贡献。{support_cite}"
+    reasoning = f"""### 具体研究空白标题
+{title}
+
+### 已有研究解决了什么
+{consensus[0]}
+
+### 尚未解决的具体问题
+缺少在同一材料批次、相同表面状态和相同疲劳阶段下，同时控制{iv or '自变量'}并测量{dv or '因变量'}的匹配比较。
+
+### 为什么已有研究不能直接回答
+{'；'.join(cross.get('condition_mismatches') or ['材料、处理或载荷条件没有形成可直接比较的交集。'])}
+
+### 反证检索
+{(conflicts[0] + ' ' + counter_cite) if conflicts else '未召回足以取消空白的明确反向结果，但不能据此断言其不存在。'}
+
+### 证据缺口矩阵
+| 维度 | 状态 | 需要补足 |\n|---|---|---|\n| 匹配条件 | 不完整 | {'、'.join(missing[:4]) or '关键控制变量'} |\n| 因果分离 | 未完成 | 同批次对照与交互项 |\n| 外部验证 | 未完成 | 独立批次复现 |
+
+### 相关公式与适用性
+{formula_text}
+
+### 具体研究问题与可证伪假设
+在匹配条件后，{iv or '自变量'}是否仍能独立解释{dv or '因变量'}？若效应置信区间包含预注册最小效应且独立批次无法复现，则该假设被推翻。
+
+### 最低成本验证
+复用同批次试样，补测缺失条件，开展小规模配对疲劳试验并盲法判定起裂位置。"""
+    return direct, reasoning
 
 
 def generate(value: SkillInput, synthesis: str = "") -> SkillOutput:
-    iv, dv = entity_labels(value)
-    support, counter, conditional = evidence_counts(value)
-    missing = missing_evidence(value)
-    specific = bool(value.parsed_entities.get("specific"))
-    evidence_sufficient = bool(value.retrieved_evidence and value.support_evidence)
-    title = (
-        f"{iv}—{dv} 在匹配组织、表面和载荷条件下的边界缺口"
-        if specific and evidence_sufficient
-        else "无法建立具体研究空白"
-    )
-    if not specific:
-        direct = "变量关系不完整，research_gap_skill 拒绝输出泛化研究空白。"
-        unresolved = "需要先明确可测自变量、因变量和目标材料。"
-    elif not evidence_sufficient:
-        direct = "本地正式可信 RAG 缺少直接支持证据，无法区分真正空白与检索缺失，因此拒绝宣称存在研究空白。"
-        unresolved = "只能记录本地证据不足，不能据此生成研究空白结论。"
-    else:
-        direct = synthesis.strip() or (
-            f"当前证据不能在完全匹配的材料批次、组织、表面状态和载荷条件下确定 {iv} 对 {dv} 的独立效应边界。"
-        )
-        unresolved = f"尚未解决 {iv} 与 {dv} 在关键条件交互下何时改变效应方向或主导机制。"
-    matrix = (
-        "| 缺口维度 | 当前状态 | 判定 |\n|---|---:|---|\n"
-        f"| 支持证据 | {support} | 仅支持已报告条件 |\n"
-        f"| 反向证据 | {counter} | 用于缩小或取消空白 |\n"
-        f"| 条件依赖证据 | {conditional} | 需要匹配实验空间 |"
-    )
-    falsifiable = f"在材料批次、组织和载荷匹配后，改变 {iv} 仍会导致 {dv} 出现可重复的方向性变化。"
-    reasoning = f"""### 研究空白标题
-
-{title}
-
-**已解决问题**
-
-正式文献提供 {support} 条支持证据，只说明该关系在部分已报告条件中可观察。
-
-**未解决的具体问题**
-
-{unresolved}
-
-**为什么已有研究不能回答**
-
-跨论文的材料批次、组织、表面状态、应力比和疲劳区间并不完全匹配，不能把跨论文差异直接解释为单变量因果效应。
-
-**证据缺口矩阵**
-
-{matrix}
-
-**反证检索**
-
-已重新核对 {counter} 条反向证据与 {conditional} 条条件依赖证据；若这些证据覆盖目标条件，空白必须缩小或取消。
-
-**具体研究问题**
-
-1. 匹配组织和载荷后，{iv} 对 {dv} 的效应方向是否保持？
-2. 哪一组条件组合触发主导机制转换？
-
-**可证伪假设**
-
-{falsifiable}
-
-**最低成本验证**
-
-复用同批次试样，补齐关键条件测量，完成小规模配对疲劳试验和盲法断口溯源。"""
-    combined = direct + "\n" + reasoning
-    gate = base_quality_gate(
-        value,
-        combined,
-        skill_name=SKILL_NAME,
-        required_terms=("证据缺口矩阵", "反证检索", "可证伪假设", "最低成本验证"),
-    )
-    gate["false_positive_guard"] = counter > 0 or conditional > 0
-    gate["evidence_sufficient"] = evidence_sufficient
-    gate["passed"] = gate["passed"] and gate["false_positive_guard"] and evidence_sufficient
-    return SkillOutput(
-        skill_name=SKILL_NAME,
-        direct_answer=direct,
-        structured_reasoning=reasoning,
-        uncertainty="若反向证据已经覆盖目标条件，则该空白应取消而非继续放大。",
-        evidence_cards=traceable_cards(value),
-        quality_gate=gate,
-        missing_evidence=missing,
-        specific_fields={
-            "gap_title": title,
-            "gap_matrix": matrix,
-            "candidate_questions": [f"{iv} 对 {dv} 的效应边界是什么？"],
-            "falsifiable_hypothesis": falsifiable,
-            "minimum_validation": "matched-pair pilot plus blinded fractography",
-            "quality_metrics": QUALITY_METRICS,
-        },
-        trace={
-            "dataset_version": value.dataset_version,
-            "previous_skill": getattr(value.previous_output, "skill_name", None),
-            "rechecked_evidence_ids": [card["evidence_id"] for card in traceable_cards(value)],
-        },
-    )
+    direct, reasoning = _fallback(value)
+    complete = synthesis.strip()
+    combined = complete or f"{direct}\n{reasoning}"
+    gate = base_quality_gate(value, combined, skill_name=SKILL_NAME)
+    gate["false_positive_guard"] = bool(value.counter_evidence)
+    gate["passed"] = gate["passed"] and bool(value.support_evidence) and gate["false_positive_guard"]
+    return SkillOutput(SKILL_NAME, complete or direct, "" if complete else reasoning, "空白只在匹配条件内成立，反证覆盖后必须缩小或取消。", traceable_cards(value), gate, missing_evidence(value), {"complete_answer": complete, "quality_metrics": QUALITY_METRICS}, {"dataset_version": value.dataset_version, "previous_skill": getattr(value.previous_output, "skill_name", None), "rechecked_evidence_ids": [card["evidence_id"] for card in traceable_cards(value)]})
 
 
 def render_output(output: SkillOutput) -> str:
-    return f"""## 第一部分：直接回答
-
-{output.direct_answer}
-
-## 第二部分：科研分析
-
-{output.structured_reasoning}
-
-## 第三部分：结论边界
-
-- 研究空白成立条件：已有证据不能在匹配实验空间内回答问题。
-- 可能取消空白的证据：反向或条件依赖证据覆盖目标条件。
-- 本地证据不足：{('；'.join(output.missing_evidence)) if output.missing_evidence else '未发现结构性缺项。'}
-"""
+    complete = output.specific_fields.get("complete_answer")
+    return str(complete) if complete else f"## 直接结论\n\n{output.direct_answer}\n\n{output.structured_reasoning}\n\n## 结论边界\n\n{output.uncertainty}"

@@ -1,129 +1,94 @@
-"""Independent evidence-bound scientific analysis skill."""
+"""Evidence-bound scientific analysis Skill."""
 
 from __future__ import annotations
 
-from src.research_skills.common import (
-    base_quality_gate,
-    entity_labels,
-    evidence_counts,
-    evidence_prompt_block,
-    formula_lines,
-    missing_evidence,
-    traceable_cards,
-)
+from src.research_skills.common import base_quality_gate, bundle_prompt, entity_labels, missing_evidence, primary_citation, traceable_cards
 from src.research_skills.contracts import SkillInput, SkillOutput
 
 
 SKILL_NAME = "scientific_analysis_skill"
-TASK_DEFINITION = "解释具体变量关系、机制、冲突、条件边界和证据不足。"
-QUALITY_METRICS = (
-    "citation_truthfulness",
-    "page_accuracy",
-    "condition_completeness",
-    "counter_evidence_coverage",
-    "formula_applicability",
-    "unsupported_claim_rate",
-)
+TASK_DEFINITION = "综合正式文献，回答具体结论、机制、条件边界、冲突、公式和未知项。"
+QUALITY_METRICS = ("citation_truthfulness", "condition_completeness", "counter_evidence_coverage", "formula_applicability", "unsupported_claim_rate")
 
 
 def build_prompt(value: SkillInput) -> str:
+    return f"""你正在独立执行 scientific_analysis_skill，只生成这一项任务的最终中文科研回答。
+问题：{value.user_query}
+只能使用下方 EvidenceBundle。不得报告证据数量，不得使用模糊占位词，不得补造参数、阈值或文献。
+先直接回答，再依次写：具体机制；实验条件与适用边界；文献冲突与反向观点；公式或数学关系；当前不能确定；科研意义或验证建议。
+每个关键结论紧邻标注 Evidence ID 与页码。真实公式必须逐字显示 Formula ID、变量、单位和适用条件；没有可信公式时明确说明。
+用户未问孔隙时，孔隙只能作为有证据的次要混杂因素。参考文献由系统在答案末尾统一附加，不要自造参考文献。
+EvidenceBundle：
+{bundle_prompt(value)}"""
+
+
+def build_repair_prompt(value: SkillInput, *, draft: str, failures: list[str]) -> str:
+    return f"""修复 scientific_analysis_skill 草稿。失败项：{'；'.join(failures)}。
+保留有来源的具体结论，删除证据计数和无关孔隙主线，补齐机制、条件边界、反向观点、公式适用性和未知项。
+只能引用 EvidenceBundle 中存在的 Evidence ID、页码和 Formula ID。
+草稿：{draft}
+EvidenceBundle：{bundle_prompt(value)}"""
+
+
+def _fallback(value: SkillInput) -> tuple[str, str]:
     iv, dv = entity_labels(value)
-    return (
-        "你正在执行 scientific_analysis_skill。只做科学关系分析，不生成研究空白、候选假设或实验方案。"
-        "必须逐项核对支持、反向和条件依赖证据，说明机制、实验条件、冲突与适用边界。"
-        "没有原文公式时不得补造公式或参数。回答不得出现泛化占位词。\n"
-        f"问题：{value.user_query}\n自变量：{iv}\n因变量：{dv}\n证据：\n{evidence_prompt_block(value)}"
-    )
+    bundle = value.evidence_bundle or {}
+    synthesis = bundle.get("synthesis") or {}
+    consensus = synthesis.get("consensus") or []
+    conflicts = synthesis.get("conflicts") or []
+    mismatches = synthesis.get("condition_mismatches") or []
+    formulas = bundle.get("formulas") or []
+    if not consensus:
+        return "本地正式证据不足，无法对该变量关系给出可追溯结论。", "当前缺少可核验的直接证据、条件与反向结果。"
+    support_cite = primary_citation(value)
+    counter_cite = primary_citation(value, "COUNTER")
+    direct = f"现有正式证据支持在已报告条件内分析{iv or '所问自变量'}对{dv or '所问结果'}的作用，但不能跨越未匹配条件直接外推。{consensus[0]} {support_cite}"
+    formula_text = "未检索到通过可信结构检查的文献原公式；现有证据支持趋势，但不足以确定具体函数形式。"
+    if formulas:
+        item = formulas[0]
+        formula_text = f"{item['equation']}（Formula ID：{item['formula_id']}，页码：{item['page_number']}；适用条件：{item.get('applicable_conditions') or '原文未完整报告'}）"
+    reasoning = f"""### 具体机制
+{consensus[1] if len(consensus) > 1 else '证据未充分分离各机制贡献，不能把相关性写成单因素因果。'}
+
+### 实验条件和适用边界
+{'；'.join(mismatches) if mismatches else '只能适用于证据卡中明确报告的材料、处理、表面和加载条件。'}
+
+### 文献冲突及反向观点
+{(conflicts[0] + ' ' + counter_cite) if conflicts else '当前检索结果未提供可明确复核的相反结论；这不等于不存在反向证据。'}
+
+### 公式或数学关系
+{formula_text}
+
+### 当前不能确定的内容
+{'；'.join(synthesis.get('unsupported_conclusions') or ['未报告条件下的效应方向和定量幅度不能确定。'])}
+
+### 科研意义或验证建议
+采用同批材料和匹配载荷条件的对照设计，分别测量所问变量、裂纹阶段指标与关键混杂因素。"""
+    return direct, reasoning
 
 
 def generate(value: SkillInput, synthesis: str = "") -> SkillOutput:
-    iv, dv = entity_labels(value)
-    support, counter, conditional = evidence_counts(value)
-    missing = missing_evidence(value)
-    specific = bool(value.parsed_entities.get("specific"))
-    evidence_sufficient = bool(value.retrieved_evidence and value.support_evidence)
-    if not specific:
-        direct = "本地系统无法从问题中可靠识别完整变量关系，因此拒绝生成泛化科研结论。"
-        mechanism = "请明确材料、具体自变量和可测因变量后再分析。"
-    elif not evidence_sufficient:
-        direct = "本地正式可信 RAG 缺少直接支持证据，因此拒绝把机制推断写成科研结论。"
-        mechanism = "只能确认当前证据不足，不能根据领域常识补写无来源机制。"
-    else:
-        direct = synthesis.strip() or (
-            f"关于 {iv} 对 {dv} 的影响，本地正式库提供 {support} 条支持证据、"
-            f"{counter} 条反向证据和 {conditional} 条条件依赖证据。"
-        )
-        mechanism = (
-            f"{iv} 可能通过局部应力、组织演化或损伤起始路径改变 {dv}；"
-            "具体方向必须按证据卡片中的材料、表面状态、热处理和载荷条件分别判断。"
-        )
-    formulas = formula_lines(value)
-    reasoning = f"""**结论**
-
-{direct}
-
-**具体机制**
-
-{mechanism}
-
-**实验条件与适用边界**
-
-只把条件记录中明确报告的材料、制造工艺、建造方向、热处理、表面状态、应力比和疲劳区间作为结论边界。
-
-**文献冲突与反向观点**
-
-本次独立核对 {counter} 条反向证据和 {conditional} 条条件依赖证据。跨材料、跨应力比或跨表面状态的差异不直接视为同条件矛盾。
-
-**必要公式**
-
-{chr(10).join(formulas) if formulas else '本次检索未召回可追溯原文公式，不输出无来源公式或参数。'}
-
-**证据不足部分**
-
-{('；'.join(missing)) if missing else '当前检索范围内未发现结构性缺项，但仍需遵守文献条件边界。'}"""
-    combined = direct + "\n" + reasoning
-    gate = base_quality_gate(
-        value,
-        combined,
-        skill_name=SKILL_NAME,
-        required_terms=("具体机制", "实验条件与适用边界", "文献冲突与反向观点"),
-    )
-    gate["evidence_sufficient"] = evidence_sufficient
-    gate["passed"] = gate["passed"] and evidence_sufficient
+    direct, reasoning = _fallback(value)
+    complete = synthesis.strip()
+    combined = complete or f"{direct}\n{reasoning}"
+    gate = base_quality_gate(value, combined, skill_name=SKILL_NAME)
+    gate["evidence_sufficient"] = bool(value.support_evidence)
+    gate["passed"] = gate["passed"] and gate["evidence_sufficient"]
     return SkillOutput(
         skill_name=SKILL_NAME,
-        direct_answer=direct,
-        structured_reasoning=reasoning,
-        uncertainty="证据充分度取决于直接证据、反证和条件记录是否覆盖同一实验空间。",
+        direct_answer=complete or direct,
+        structured_reasoning="" if complete else reasoning,
+        uncertainty="结论只覆盖EvidenceBundle中已报告且可比较的条件。",
         evidence_cards=traceable_cards(value),
         quality_gate=gate,
-        missing_evidence=missing,
-        specific_fields={
-            "mechanism": mechanism,
-            "boundary_policy": "MATCHED_REPORTED_CONDITIONS_ONLY",
-            "formula_assessment": formulas,
-            "quality_metrics": QUALITY_METRICS,
-        },
-        trace={
-            "dataset_version": value.dataset_version,
-            "previous_skill": getattr(value.previous_output, "skill_name", None),
-            "rechecked_evidence_ids": [card["evidence_id"] for card in traceable_cards(value)],
-        },
+        missing_evidence=missing_evidence(value),
+        specific_fields={"complete_answer": complete, "quality_metrics": QUALITY_METRICS},
+        trace={"dataset_version": value.dataset_version, "previous_skill": getattr(value.previous_output, "skill_name", None), "rechecked_evidence_ids": [card["evidence_id"] for card in traceable_cards(value)]},
     )
 
 
 def render_output(output: SkillOutput) -> str:
-    return f"""## 第一部分：直接回答
-
-{output.direct_answer}
-
-## 第二部分：科研分析
-
-{output.structured_reasoning}
-
-## 第三部分：结论边界
-
-- 可直接支持：原文、页码和实验条件一致的结论。
-- 系统推断：机制串联与跨文献归纳。
-- 本地证据不足：{('；'.join(output.missing_evidence)) if output.missing_evidence else '未发现结构性缺项。'}
-"""
+    complete = output.specific_fields.get("complete_answer")
+    if complete:
+        return str(complete)
+    return f"## 直接结论\n\n{output.direct_answer}\n\n{output.structured_reasoning}\n\n## 结论边界\n\n{output.uncertainty}"

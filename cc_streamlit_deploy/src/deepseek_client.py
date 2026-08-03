@@ -72,6 +72,14 @@ class DeepSeekClient:
         response: Optional[requests.Response] = None
         last_error: Optional[BaseException] = None
         bypass_broken_proxy = self._bypass_broken_proxy
+        request_kwargs = {
+            "headers": {
+                "Authorization": f"Bearer {self.settings.api_key}",
+                "Content-Type": "application/json",
+            },
+            "json": payload,
+            "timeout": (connect_timeout, timeout),
+        }
         attempts = max(1, max_retries)
         for attempt in range(attempts):
             if attempt:
@@ -81,15 +89,7 @@ class DeepSeekClient:
                 sender = (
                     self._direct_session.post if bypass_broken_proxy else requests.post
                 )
-                response = sender(
-                    self.endpoint,
-                    headers={
-                        "Authorization": f"Bearer {self.settings.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                    timeout=(connect_timeout, timeout),
-                )
+                response = sender(self.endpoint, **request_kwargs)
                 if response.status_code != 429:
                     break
                 retry_after = response.headers.get("Retry-After", "")
@@ -105,6 +105,19 @@ class DeepSeekClient:
                 response = None
                 bypass_broken_proxy = True
                 self._bypass_broken_proxy = True
+                # A broken environment proxy is a transport-route failure, not
+                # a model retry.  Try the already-created no-proxy session in
+                # the same call even when max_retries=0.
+                self._usage["retry_count"] += 1
+                try:
+                    response = self._direct_session.post(
+                        self.endpoint, **request_kwargs
+                    )
+                    if response.status_code != 429:
+                        break
+                except requests.RequestException as direct_exc:
+                    last_error = direct_exc
+                    response = None
                 if attempt + 1 < attempts:
                     time.sleep(min(2 ** attempt, 30.0))
             except requests.RequestException as exc:

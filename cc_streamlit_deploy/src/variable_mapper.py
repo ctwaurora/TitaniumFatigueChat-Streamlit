@@ -28,7 +28,7 @@ SYNONYM_GROUPS: Dict[str, List[str]] = {
     "pore_size": [
         "孔隙尺寸", "缺陷尺寸", "孔隙大小", "孔径", "pore size",
         "defect size", "pore diameter", "pore radius", "pore dimension",
-        "sqrt_area", "√area", "sqrt area", "square root of area",
+        "sqrt_area", "sqrt-area", "√area", "sqrt area", "square root of area",
     ],
     "fatigue_life": [
         "疲劳寿命", "寿命", "疲劳性能", "fatigue life", "nf", "cycles to failure",
@@ -92,6 +92,18 @@ for canonical, syns in SYNONYM_GROUPS.items():
 _KEYWORD_MAP.sort(key=lambda x: -len(x[0]))
 
 
+def _contains_keyword(text: str, keyword: str) -> bool:
+    """Match short ASCII symbols as tokens so ``ra`` does not match ``area``."""
+    if re.fullmatch(r"[a-z0-9_]+", keyword) and len(keyword) <= 3:
+        return bool(
+            re.search(
+                rf"(?<![a-z0-9_]){re.escape(keyword)}(?![a-z0-9_])",
+                text,
+            )
+        )
+    return keyword in text
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # 2. Extract variable pair from user query
 # ═══════════════════════════════════════════════════════════════════════════
@@ -117,7 +129,7 @@ def extract_variable_pair(user_query: str) -> Tuple[Optional[str], Optional[str]
     # ── Step 1: Detect all canonical variables in the query ──
     found_vars: List[str] = []
     for keyword, canonical in _KEYWORD_MAP:
-        if keyword in text:
+        if _contains_keyword(text, keyword):
             if canonical not in found_vars:
                 found_vars.append(canonical)
 
@@ -141,8 +153,8 @@ def extract_variable_pair(user_query: str) -> Tuple[Optional[str], Optional[str]
             left = m.group(1).strip()
             right = m.group(2).strip()
             # Map both sides to canonical variables
-            left_vars = [cv for kw, cv in _KEYWORD_MAP if kw in left]
-            right_vars = [cv for kw, cv in _KEYWORD_MAP if kw in right]
+            left_vars = [cv for kw, cv in _KEYWORD_MAP if _contains_keyword(left, kw)]
+            right_vars = [cv for kw, cv in _KEYWORD_MAP if _contains_keyword(right, kw)]
 
             if left_vars and right_vars:
                 # Convention: first mentioned = independent, second = dependent

@@ -18,6 +18,7 @@ class SkillInput:
     condition_dependent_evidence: list[dict[str, Any]]
     dataset_version: str
     previous_output: "SkillOutput | None" = None
+    evidence_bundle: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

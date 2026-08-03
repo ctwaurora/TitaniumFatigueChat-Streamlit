@@ -24,6 +24,7 @@ from src.stage1_store import (
     register_pdf_path,
     update_paper_library_status,
 )
+from src.pdf_naming import rename_new_formal_pdf
 
 
 STAGES = (
@@ -389,9 +390,15 @@ def process_task(
         )
     update_paper_library_status(paper_id, "FORMAL", base_dir=base_dir)
     _record_success(base_dir, paper_id)
+    naming = {}
+    try:
+        naming = rename_new_formal_pdf(base_dir, paper_id)
+    except (OSError, RuntimeError) as exc:
+        naming = {"error": str(exc)}
     return _update_task(
         base_dir, task_id, stage="FORMAL_INDEXED", paper_id=paper_id,
         title=str(registration.get("title") or ""), last_error_cn="",
+        pdf_naming=naming,
     )
 
 

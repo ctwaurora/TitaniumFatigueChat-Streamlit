@@ -26,6 +26,26 @@ def evidence_counts(value: SkillInput) -> tuple[int, int, int]:
     )
 
 
+def bundle_prompt(value: SkillInput) -> str:
+    """Return the compact EvidenceBundle supplied to a concrete Skill."""
+    import json
+
+    return json.dumps(value.evidence_bundle, ensure_ascii=False, separators=(",", ":"))
+
+
+def primary_citation(value: SkillInput, role: str = "SUPPORT") -> str:
+    for paper in value.evidence_bundle.get("papers") or []:
+        for claim in paper.get("principal_claims") or []:
+            if claim.get("role") != role:
+                continue
+            return f"[Evidence ID：{claim.get('evidence_id')}，页码：{claim.get('page_number')}]"
+    rows = value.support_evidence if role == "SUPPORT" else value.counter_evidence
+    if rows:
+        row = rows[0]
+        return f"[Evidence ID：{row.get('doc_id') or row.get('evidence_id')}，页码：{row.get('page_number')}]"
+    return ""
+
+
 def traceable_cards(value: SkillInput, limit: int = 30) -> list[dict[str, Any]]:
     cards = []
     for role, rows in (
