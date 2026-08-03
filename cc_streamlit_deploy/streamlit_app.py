@@ -2480,27 +2480,28 @@ with st.sidebar:
     render_logout_control(st)
     st.divider()
 
-    # ── 简洁科研模块导航 ──
-    for nav_key in (
-        "smart_search", "research_analysis", "research_gap",
-        "hypothesis_generation", "formula_explanation", "experiment_design",
+    # 最终产品只保留三个顶层入口；科研子模块在“智能分析”内部切换。
+    if st.button(
+        "智能分析", key="nav_analysis", use_container_width=True,
+        type="primary" if current_page == "search" else "secondary",
     ):
-        if st.button(
-            MODES[nav_key]["label"], key=f"nav_{nav_key}",
-            use_container_width=True,
-            type="primary" if current_page == "search" and st.session_state.get("answer_mode") == nav_key else "secondary",
-        ):
-            st.session_state.page = "search"
-            st.session_state.answer_mode = nav_key
-            st.session_state.pop("answer", None)
-            st.session_state.analysis_done = False
-            st.rerun()
+        st.session_state.page = "search"
+        st.session_state.pop("answer", None)
+        st.session_state.analysis_done = False
+        st.rerun()
 
     if st.button(
-        "文献库管理", key="nav_library", use_container_width=True,
+        "文献库", key="nav_library", use_container_width=True,
         type="primary" if current_page == "library" else "secondary",
     ):
         st.session_state.page = "library"
+        st.rerun()
+
+    if st.button(
+        "公式", key="nav_formula", use_container_width=True,
+        type="primary" if current_page == "formula_explain" else "secondary",
+    ):
+        st.session_state.page = "formula_explain"
         st.rerun()
 
     from src.data_cache import get_system_stats_cached
@@ -2540,7 +2541,27 @@ if current_page == "search":
 
     with search_col2:
         # Current module is selected from the left navigation.
-        current_mode = st.session_state.answer_mode
+        mode_options = [
+            "research_analysis", "research_gap", "hypothesis_generation",
+            "experiment_design", "formula_explanation", "smart_search",
+        ]
+        previous_mode = st.session_state.get("answer_mode", "research_analysis")
+        current_mode = previous_mode
+        if current_mode not in mode_options:
+            current_mode = "research_analysis"
+        current_mode = st.selectbox(
+            "分析类型",
+            mode_options,
+            index=mode_options.index(current_mode),
+            format_func=lambda value: MODES[value]["label"],
+            key="analysis_mode_selector",
+        )
+        st.session_state.answer_mode = current_mode
+        if current_mode != previous_mode:
+            st.session_state.pop("answer", None)
+            st.session_state.analysis_done = False
+        if not st.session_state.get("answer"):
+            st.session_state.last_mode = current_mode
         st.caption(f"当前模块：{MODES[current_mode]['label']}")
 
         # ── Answer depth selector ──
@@ -3155,8 +3176,7 @@ elif current_page == "formula_explain":
         if selected_rows:
             selected_formula = filtered_formulas[selected_rows[0]]
             with st.expander("公式证据详情", expanded=True):
-                st.markdown(f"**paper_id**：`{selected_formula['paper_id']}`")
-                st.markdown(f"**论文完整题目**：{selected_formula['paper_title']}")
+                st.markdown(f"**文献题目**：{selected_formula['paper_title']}")
                 st.markdown(f"**DOI**：{selected_formula['doi']}")
                 st.markdown(f"**页码**：{selected_formula['page_number']}")
                 st.markdown(f"**章节**：{selected_formula['section']}")
@@ -3180,12 +3200,9 @@ elif current_page == "formula_explain":
                     "**文献采用的参数**："
                     + "；".join(selected_formula["parameter_values_units"])
                 )
-                st.markdown(f"**数据来源**：`{selected_formula['data_source']}`")
-                st.markdown(f"**作者给出的适用范围**：{selected_formula['author_scope']}")
-                st.markdown(f"**作者给出的局限**：{selected_formula['author_limitations']}")
-                st.markdown(
-                    f"**人工审核状态**：`{selected_formula['manual_review_status']}`"
-                )
+                st.markdown(f"**数据来源**：{selected_formula['data_source']}")
+                st.markdown(f"**适用范围**：{selected_formula['author_scope']}")
+                st.markdown(f"**局限**：{selected_formula['author_limitations']}")
 
     st.divider()
     with st.expander("基础理论模型参考", expanded=False):

@@ -15,10 +15,90 @@ from src.api_keys import get_deepseek_settings
 from src.deepseek_client import DeepSeekClient, DeepSeekRequestError
 from src.query_understanding import understand_user_query
 from src.unified_rag import answer_research_question
+from src.variable_mapper import extract_variable_pair
 
 
 ProgressCallback = Callable[[dict[str, Any]], None]
 PORE_PATTERN = re.compile(r"孔隙|孔洞|气孔|pore|porosity", re.IGNORECASE)
+
+ENTITY_LABELS = {
+    "pore_size": "孔隙尺寸（√area）",
+    "fatigue_life": "疲劳寿命（Nf）",
+    "fatigue_limit": "疲劳极限（σw）",
+    "da_dn": "裂纹扩展速率（da/dN）",
+    "delta_k": "应力强度因子范围（ΔK）",
+    "surface_roughness": "表面粗糙度（Ra/Rz）",
+    "pore_location": "孔隙距表面距离",
+    "stress_amplitude": "应力幅（σa）",
+    "stress_ratio": "应力比（R）",
+    "heat_treatment": "热处理/HIP状态",
+    "microstructure": "微观组织",
+    "residual_stress": "残余应力",
+    "porosity": "孔隙率",
+    "paris_c_m": "Paris参数（C、m）",
+    "build_orientation": "建造方向",
+    "short_crack": "短裂纹",
+    "long_crack": "长裂纹",
+}
+
+
+def resolve_question_entities(question: str) -> dict[str, Any]:
+    """Resolve concrete scientific entities before any answer template runs."""
+    independent, dependent, classification = extract_variable_pair(question)
+    lowered = str(question).lower()
+    aliases = (
+        (("建造方向", "build orientation", "build direction"), "build_orientation"),
+        (("短裂纹", "小裂纹", "short crack", "small crack"), "short_crack"),
+        (("长裂纹", "long crack", "long-crack"), "long_crack"),
+        (("内部孔隙", "internal pore", "near-surface pore"), "pore_size"),
+    )
+    mentioned = [canonical for terms, canonical in aliases if any(term in lowered for term in terms)]
+    if mentioned:
+        if independent in {None, "fatigue_life", "da_dn"}:
+            independent = mentioned[0]
+        elif dependent is None and mentioned[0] != independent:
+            dependent = mentioned[0]
+    # Questions phrased as “whether X changes Y” should preserve causal order.
+    if independent in {"fatigue_life", "fatigue_limit", "da_dn"} and dependent in {
+        "heat_treatment", "surface_roughness", "residual_stress", "microstructure",
+    }:
+        independent, dependent = dependent, independent
+    if not independent and re.search(r"paris|c/m|c和m|c、m|公式|方程", lowered):
+        independent, dependent, classification = "delta_k", "da_dn", "equation_query"
+    if dependent is None and independent in {"build_orientation", "short_crack", "long_crack"}:
+        if independent == "short_crack" and (
+            "长裂纹" in lowered or "long crack" in lowered
+        ):
+            dependent = "long_crack"
+        else:
+            dependent = "fatigue_life"
+        classification = "quantitative_relation"
+    return {
+        "independent": independent,
+        "dependent": dependent,
+        "independent_label": ENTITY_LABELS.get(independent, independent or ""),
+        "dependent_label": ENTITY_LABELS.get(dependent, dependent or ""),
+        "classification": classification,
+        "specific": bool(independent and dependent),
+    }
+
+
+def validate_generated_answer(answer: str, question: str, module: str) -> dict[str, Any]:
+    """Hard gate against vague placeholders leaking into user-facing output."""
+    banned = ("目标因素", "问题中的目标因素", "某个因素", "疲劳响应")
+    hits = [term for term in banned if term in answer]
+    entities = resolve_question_entities(question)
+    missing_entities = []
+    if entities["specific"]:
+        for label in (entities["independent_label"], entities["dependent_label"]):
+            if label and label.split("（", 1)[0] not in answer and label not in answer:
+                missing_entities.append(label)
+    return {
+        "passed": not hits and not missing_entities,
+        "banned_terms": hits,
+        "missing_entities": missing_entities,
+        "module": module,
+    }
 
 
 def smart_search_dataset_version(base_dir: Path) -> str:
@@ -211,9 +291,46 @@ def _llm_prompt(question: str, result: dict[str, Any], module: str) -> str:
     )
 
 
+def _formula_evidence_block(result: dict[str, Any]) -> str:
+    """Render only formulas returned by the formal RAG formula index."""
+    rows = []
+    for group in ("supporting_evidence", "counter_evidence", "condition_dependent_evidence"):
+        for row in result.get(group) or []:
+            equation = str(row.get("equation") or row.get("formula") or "").strip()
+            if equation and (
+                row.get("index_type") == "formula"
+                or "FORMULA_" in str(row.get("doc_id"))
+            ):
+                rows.append((row, equation))
+    if not rows:
+        return "**可追溯公式来源**\n\n本次正式 RAG 未召回可追溯的原文公式，因此不输出无来源公式或伪造参数。"
+    lines = ["**可追溯公式来源**", ""]
+    seen = set()
+    for row, equation in rows[:5]:
+        key = (str(row.get("doc_id")), equation)
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.extend([
+            f"- 公式：`{equation}`",
+            f"- 来源：{row.get('title') or '题名未报告'}；作者与年份：{row.get('authors') or '未报告'}，{row.get('year') or '未报告'}；页码：{row.get('page_number') or '未报告'}；章节：{row.get('section') or '未报告'}；Evidence ID：{row.get('doc_id') or '未报告'}",
+            f"- 参数与单位：{', '.join(row.get('parameters') or []) or '原文未完整报告'}；{', '.join(row.get('units') or []) or '原文未完整报告'}",
+            "",
+        ])
+    return "\n".join(lines).rstrip()
+
+
 def _module_analysis_markdown(
     module: str, question: str, result: dict[str, Any], synthesis: str
 ) -> str:
+    entities = resolve_question_entities(question)
+    iv = entities["independent_label"] or "用户明确提出的变量"
+    dv = entities["dependent_label"] or "对应疲劳指标"
+    if not entities["specific"]:
+        # A vague query must stop at an evidence-bound clarification instead
+        # of inventing a generic scientific target.
+        iv = "未能从问题中可靠识别自变量"
+        dv = "未能从问题中可靠识别因变量"
     sufficiency = result.get("evidence_sufficiency") or {}
     level = str(sufficiency.get("status") or "本地证据不足")
     supporting = len(result.get("supporting_evidence") or [])
@@ -228,15 +345,15 @@ def _module_analysis_markdown(
 
 **现有研究已经解决的问题**
 
-现有研究已经建立了若干材料、工艺、后处理和载荷因素与疲劳行为之间的条件化联系。
+现有研究已对 {iv} 与 {dv} 的关系给出部分条件化证据。
 
 **尚未解决的问题**
 
-不同因素在匹配材料批次、微观组织、表面状态和载荷条件下的相对主导边界仍缺少独立验证。
+{iv} 对 {dv} 的效应在匹配材料批次、微观组织、表面状态和载荷条件下的边界仍缺少独立验证。
 
 **为什么构成研究空白**
 
-现有证据分散在不同试验条件中，不能把跨论文差异直接解释为单一变量的因果效应。
+现有证据分散在不同试验条件中，不能把跨论文差异直接解释为 {iv} 对 {dv} 的因果效应。
 
 **可能反驳该空白的证据**
 
@@ -259,9 +376,9 @@ def _module_analysis_markdown(
 
 **候选研究问题**
 
-1. 在匹配应力与组织条件下，目标因素的效应方向是否仍保持一致？
-2. 哪一组工艺或载荷条件会改变主导失效机制？
-3. 该边界能否在独立材料批次中复现？
+1. 在匹配应力与组织条件下，{iv} 对 {dv} 的效应方向是否仍保持一致？
+2. 哪一组工艺或载荷条件会改变 {iv} 主导的失效机制？
+3. 该 {iv}–{dv} 边界能否在独立材料批次中复现？
 
 **可验证性**
 
@@ -273,7 +390,7 @@ def _module_analysis_markdown(
 """,
         "hypothesis_generation": f"""**候选假设**
 
-在其他条件匹配时，问题中的目标因素会以条件依赖方式改变疲劳寿命或裂纹起裂机制。
+在其他条件匹配时，{iv} 会以条件依赖方式改变 {dv} 或裂纹起裂机制。
 
 **科学依据**
 
@@ -281,10 +398,10 @@ def _module_analysis_markdown(
 
 **机制链**
 
-目标因素变化 → 局部应力或微观损伤演化变化 → 起裂位置或扩展行为变化 → 疲劳响应变化。
+{iv} 变化 → 局部应力或微观损伤演化变化 → 起裂位置或扩展行为变化 → {dv} 变化。
 
-**自变量**：问题中的目标因素。  
-**因变量**：疲劳寿命、疲劳极限、裂纹起裂或扩展指标。  
+**自变量**：{iv}。  
+**因变量**：{dv}。  
 **控制变量**：材料批次、组织、试样几何、表面状态、应力比、频率、温度与环境。  
 **预测方向**：以支持证据中的主方向为候选预测，但遇到反向证据所对应条件时允许改变。  
 **支持证据**：{supporting} 条。  
@@ -294,18 +411,18 @@ def _module_analysis_markdown(
 **证据充分度**：{level}。
 """,
         "experiment_design": f"""**研究对象**：与问题相符的钛合金疲劳试样。  
-**核心假设**：目标因素在条件匹配后仍会改变疲劳响应。  
-**自变量**：目标因素及必要分层水平。  
-**因变量**：疲劳寿命、疲劳极限、起裂源和裂纹扩展指标。  
+**核心假设**：{iv} 在条件匹配后仍会改变 {dv}。  
+**自变量**：{iv} 及必要分层水平。  
+**因变量**：{dv}、起裂源和裂纹扩展指标。  
 **控制变量**：材料批次、组织、几何、表面状态、应力比、频率、温度和环境。  
 **协变量**：残余应力、缺陷几何、粗糙度与织构。  
-**分组方案**：基准组与目标因素多水平组，并保留关键条件的交互组。  
+**分组方案**：基准组与 {iv} 多水平组，并保留关键条件的交互组。  
 **样本建议**：先做每组不少于5件的先导试验，正式样本量由效应量与方差功效分析确定。  
 **制样方法**：同批粉末、同一工艺窗口，记录加工和后处理全过程。  
 **加载条件**：应力水平、应力比和疲劳区间预注册，不混合拟合 HCF 与 VHCF。  
 **表征方法**：表面轮廓、micro-CT、残余应力、EBSD和SEM断口溯源按问题选用。  
 **数据分析**：S-N/裂纹扩展拟合、混合效应模型、交互项检验与不确定性区间。  
-**预测方向**：采用证据主方向作为预注册预测。  
+**预测方向**：采用关于 {iv}–{dv} 的证据主方向作为预注册预测。  
 **支持假设的结果**：效应在匹配条件和独立批次中方向一致。  
 **推翻假设的结果**：效应消失、稳定反转或由混杂因素完全解释。  
 **最低成本方案**：复用现有试样完成表面测量、断口复核和小规模对照。  
@@ -316,7 +433,7 @@ def _module_analysis_markdown(
 
 仅解释本次证据中能够追溯到原文上下文的疲劳模型；没有完整参数和单位时不做数值代入。
 
-**中文解释**：公式用于描述载荷、寿命或裂纹扩展速率之间的经验或机制关系。  
+**中文解释**：公式用于描述 {iv} 与 {dv} 之间的经验或机制关系。  
 **变量与单位**：以原文定义为准，必须统一应力、长度、循环数和扩展速率单位。  
 **适用条件**：材料、应力比、温度、疲劳区间和拟合区间与原文一致。  
 **前提假设**：模型形式、参数稳定性和数据区间满足原文假设。  
@@ -331,7 +448,7 @@ def _module_analysis_markdown(
 
 **机制解释**
 
-目标因素通过局部应力、组织或损伤演化影响疲劳响应，具体方向受工艺和载荷条件约束。
+{iv} 通过局部应力、组织或损伤演化影响 {dv}，具体方向受工艺和载荷条件约束。
 
 **条件边界**
 
@@ -346,6 +463,8 @@ def _module_analysis_markdown(
 证据充分度为 {level}；缺失条件需要通过补充检索或受控实验验证。
 """
     analysis = analyses.get(module, generic)
+    if module == "formula_explanation":
+        analysis = analysis.rstrip() + "\n\n" + _formula_evidence_block(result)
     return f"""## 第一部分：直接回答
 
 {direct}
@@ -497,13 +616,20 @@ def run_smart_search(
             )
         except (DeepSeekRequestError, ValueError, OSError) as exc:
             diagnostics["llm_error"] = f"{type(exc).__name__}:{exc}"
-    answer = _module_analysis_markdown(module, effective, result, answer)
+    answer = _module_analysis_markdown(module, question, result, answer)
+    quality = validate_generated_answer(answer, question, module)
+    if not quality["passed"]:
+        # Never expose a vague LLM fallback. Rebuild from the deterministic,
+        # entity-bound template and retain the evidence cards below it.
+        answer = _module_analysis_markdown(module, question, result, "")
+        quality = validate_generated_answer(answer, question, module)
     answer += "\n\n" + evidence_markdown
     diagnostics["total_elapsed_seconds"] = round(time.perf_counter() - started, 4)
     diagnostics["stage_timestamps_epoch_ms"]["t10_final_answer"] = round(
         time.time_ns() / 1_000_000, 3
     )
     diagnostics["timeout_exceeded"] = diagnostics["total_elapsed_seconds"] > 30
+    diagnostics["specificity_gate"] = quality
     if progress_callback:
         progress_callback(
             {
