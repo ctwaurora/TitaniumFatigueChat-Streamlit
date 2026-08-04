@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from src.research_skills.common import base_quality_gate, bundle_prompt, entity_labels, evidence_level_instruction, missing_evidence, primary_citation, query_variables, traceable_cards, usable_formulas
 from src.research_skills.contracts import SkillInput, SkillOutput
+from src.research_skills.domain_profiles import profile_prompt_block, select_domain_profile
 
 
 SKILL_NAME = "experiment_design_skill"
@@ -16,6 +17,7 @@ def build_prompt(value: SkillInput) -> str:
 必须重新核对EvidenceBundle，不得把任何上一步自然语言当作事实。以Markdown表格为主体，至少输出变量定义表、实验分组表、预测与证伪表；并说明研究对象、载荷、样本量、表征、统计模型、最低成本与完整方案。
 不得随意给固定样本数或无来源阈值。每个证据约束标Evidence ID和页码，不报告证据数量。用户未问孔隙时不得自动设计孔隙实验。
 {evidence_level_instruction()}
+{profile_prompt_block(value)}
 EvidenceBundle：{bundle_prompt(value)}"""
 
 
@@ -45,8 +47,20 @@ def _fallback(value: SkillInput) -> tuple[str, str, list[str]]:
         item = formulas[0]
         formula_note = f"拟合文献原公式 {item['equation']}（Formula ID：{item['formula_id']}，页码：{item['page_number']}），仅在其单位和适用条件一致时比较。"
     frame = value.query_frame or bundle.get("query_frame") or {}
+    profile = select_domain_profile(value)
+    frame_subject = str(frame.get("alloy_grade") or "").strip()
+    if frame_subject and frame_subject.casefold() not in object_text.casefold():
+        object_text = f"{frame_subject}；{object_text}"
+    if not frame.get("requested_formulas"):
+        formulas = []
     variables = set(frame.get("independent_variables") or []) | set(frame.get("dependent_variables") or [])
-    pore_life = "pore_size" in variables and bool({"fatigue_life", "fatigue_life_Nf"} & variables)
+    pore_life = profile.key == "defect_size_life"
+    if not pore_life:
+        hypothesis = (
+            f"{profile.direct_claim} 实验将检验中介链“{profile.mechanism_chain}”。"
+            f"若{profile.falsifiers[0]}，则推翻或削弱该假设。{primary_citation(value)}"
+        )
+        falsifiers = list(profile.falsifiers)
     if pore_life:
         hypothesis = (
             "在材料、表面、残余应力和载荷条件匹配后，√area增大将降低Nf，且该效应受d/√area调节；"
@@ -87,22 +101,23 @@ def _fallback(value: SkillInput) -> tuple[str, str, list[str]]:
     else:
         variable_table = f"""| 变量类型 | 变量 | 建议水平或范围 | 单位 | 测量方法 | 设计目的 |
 |---|---|---|---|---|---|
-| 自变量 | {iv} | 文献范围与设备能力交集，经预实验冻结 | 按原始物理量 | 校准后的对应表征方法 | 检验主效应 |
-| 因变量 | {dv} | 连续记录至预注册终点 | 保持原始SI单位 | 对应疲劳试验/裂纹测量 | 量化结果 |
-| 控制变量 | 材料、表面、热处理、R和频率 | 组间固定 | 各自SI单位 | 制程与载荷记录 | 排除混杂 |
-| 协变量 | 残余应力、组织尺度、实际载荷 | 实测 | 各自SI单位 | XRD/EBSD/载荷校准 | 调整共变 |"""
-        group_table = f"""| 组别 | {iv}水平 | 材料/表面/热处理 | 载荷条件 | 主要比较 |
+| 自变量 | {'、'.join(profile.independent)} | 文献范围与设备能力交集，经预实验冻结 | {profile.variables_and_units} | {profile.measurements} | 检验主效应与交互 |
+| 因变量 | {'、'.join(profile.dependent)} | 连续记录至预注册终点 | 保持原始SI单位 | 对应疲劳/裂纹测量 | 分离起裂、扩展或寿命终点 |
+| {profile.title}控制变量 | {profile.confounders} | 围绕{profile.title}固定或分层 | 主题原始单位 | 记录{profile.title}制程、环境与载荷 | 排除{profile.title}混杂 |
+| {profile.title}协变量 | 批次、实际载荷及{'、'.join(profile.independent[:2])}相关机制量 | {profile.title}逐件实测 | 主题原始单位 | {profile.measurements} | 调整{profile.title}剩余共变 |
+| 机制中介量 | {profile.mechanism_chain} | 各阶段同步测量 | 按测量方法 | {profile.measurements} | 检验因果链 |"""
+        group_table = f"""| 组别 | {profile.title}因素设置 | 匹配条件 | 载荷/环境 | 主要比较 |
 |---|---|---|---|---|
-| G1基线 | 低水平或基准 | 固定 | 固定R、频率和环境 | 基线 |
-| G2主效应 | 高水平 | 同G1 | 同G1 | {iv}主效应 |
-| G3交互 | 高水平×关键条件 | 同批次 | 同G1 | 交互效应 |
-| G4验证 | 覆盖全范围 | 独立批次 | 同主试验 | 外部验证 |"""
+| G1-{profile.title}基线 | {'、'.join(profile.independent[:1])}基准 | {profile.confounders} | 按{profile.title}证据冻结 | 主题基线重复性 |
+| G2-{profile.title}主效应 | 改变{'、'.join(profile.independent[:1])} | {profile.title}同批次匹配 | 同主题基线 | 主效应 |
+| G3-{profile.title}交互 | {'×'.join(profile.independent[:2])}交互 | 补测{profile.title}中介量 | 同主题基线 | {profile.title}竞争机制 |
+| G4-{profile.title}验证 | 覆盖{'、'.join(profile.independent)} | {profile.title}独立批次 | 复现主题主试验 | 外部验证 |"""
         prediction_table = f"""| 检验项目 | 假设成立时的预测结果 | 推翻或削弱假设的结果 | 统计检验 |
 |---|---|---|---|
-| 主效应 | {iv}改变时{dv}按预注册方向变化 | 效应接近0或方向不稳定 | 回归系数及置信区间 |
-| 交互效应 | 关键条件显著调节主效应 | 交互项不显著或方向相反 | 交互回归/似然比检验 |
-| 外部验证 | 完整模型优于基线 | 完整模型无改进 | RMSE/MAE、交叉验证 |"""
-        loading_protocol = "应力水平、R、频率、终止循环数和失效终点均由匹配文献、设备能力与预实验冻结，不填写无来源数值。"
+| {profile.title}主效应 | {profile.predictions} | {profile.falsifiers[0]} | {profile.title}系数区间与效应图 |
+| {profile.title}机制中介 | {profile.mechanism_chain} | {profile.title}中介量不响应或方向相反 | 主题中介/混合效应模型 |
+| {profile.title}外部验证 | `{profile.model}`优于主题基线 | {profile.falsifiers[1]} | {profile.title}留出误差与交叉验证 |"""
+        loading_protocol = f"围绕{profile.title}，{profile.boundary} 精确水平、终止循环数和失效终点由匹配文献、设备能力与预实验冻结，不填写无来源数值。"
     reasoning = f"""### 研究对象
 {object_text}。
 
@@ -119,28 +134,28 @@ def _fallback(value: SkillInput) -> tuple[str, str, list[str]]:
 {prediction_table}
 
 ### 样本建议
-预实验用于估计方差、删失率和最小有意义效应；正式样本量由目标功效、显著性水平、效应量、组数及失访/run-out率计算，不预填固定数量。
+{profile.title}预实验先估计{'、'.join(profile.dependent)}的方差、run-out删失率和最小有意义效应；正式样本量针对{'×'.join(profile.independent[:2])}交互，由功效分析或仿真确定，不预填固定数量。
 
 ### 加载条件
 {loading_protocol}
 
 ### 表征方法
-根据假设选择XRD残余应力、EBSD组织、表面轮廓、裂纹复制/DIC、SEM断口；只有缺陷是问题变量时才加入micro-CT。
+{profile.measurements}
 
 ### 数据分析、统计模型和公式拟合
-{formula_note} 裂纹扩展采用含交互项的混合效应回归或Paris/Walker参数拟合；寿命含run-out时采用生存分析或删失Weibull模型。选择依据是因变量类型、重复测量结构和删失机制；报告置信区间、共线性、交叉验证与独立批次验证。
+{formula_note} {profile.title}的主题候选模型为`{profile.model}`；{profile.model_note} 围绕{'、'.join(profile.dependent)}选择统计结构，并用{profile.measurements}形成的机制指标复核参数；报告置信区间、共线性与独立批次预测误差。
 
 ### 预测结果
-若假设成立，{iv}变化应同时引起预设中介指标和{dv}按同一条件化模型变化，而不是只出现未解释的组间差异。
+若假设成立，{profile.predictions}
 
 ### 推翻假设的结果
 1. {falsifiers[0]}\n2. {falsifiers[1]}
 
 ### 最低成本方案
-复用同批材料，补测关键协变量，完成小规模配对疲劳和盲法断口判定。
+围绕{profile.title}，最低成本版本采用{profile.factor_design}，优先检验{'×'.join(profile.independent[:2])}并同步测量一个主题机制指标。
 
 ### 完整验证方案与风险
-跨批次因子设计、无损/组织/残余应力联合表征、预注册统计模型和独立批次验证。主要风险是批次、表面、热处理与载荷共线；{'；'.join(cross.get('condition_mismatches') or ['需防止条件漂移'])}。"""
+完整方案采用{profile.factor_design}，联合表征为{profile.measurements}，并用独立批次检验`{profile.model}`。主要风险来自{profile.confounders}；执行时必须维持{profile.boundary}"""
     return f"建议采用证据匹配的分层对照设计验证：{hypothesis}", reasoning, falsifiers
 
 
@@ -153,7 +168,8 @@ def generate(value: SkillInput, synthesis: str = "") -> SkillOutput:
     gate["falsification_criteria_count"] = 2 if complete else len(falsifiers)
     gate["passed"] = gate["passed"] and bool(value.support_evidence) and gate["original_evidence_rechecked"] and gate["falsification_criteria_count"] >= 2
     independent, dependent = query_variables(value)
-    return SkillOutput(SKILL_NAME, complete or direct, "" if complete else reasoning, "精确水平和样本量必须由预实验方差、设备能力与安全审查冻结。", traceable_cards(value), gate, missing_evidence(value), {
+    profile = select_domain_profile(value)
+    return SkillOutput(SKILL_NAME, complete or direct, "" if complete else reasoning, f"{profile.title}的精确水平和样本量必须由预实验方差、设备能力与安全审查冻结。", traceable_cards(value), gate, missing_evidence(value), {
         "complete_answer": complete, "falsification_criteria": falsifiers, "quality_metrics": QUALITY_METRICS,
         "research_object": (value.query_frame or {}).get("alloy_grade") or (value.query_frame or {}).get("material"),
         "hypothesis": direct, "independent_variables": independent,

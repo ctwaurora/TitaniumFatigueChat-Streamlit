@@ -26,10 +26,16 @@ from src.variable_mapper import extract_variable_pair
 
 ProgressCallback = Callable[[dict[str, Any]], None]
 PORE_PATTERN = re.compile(r"孔隙|孔洞|气孔|pore|porosity", re.IGNORECASE)
+OUT_OF_SCOPE_PATTERN = re.compile(
+    r"锂离子|电池|正极|负极|电解液|光伏|芯片|天气|烹饪|股票|量子计算|"
+    r"lithium[- ]?ion|battery|cathode|anode|electrolyte|photovoltaic|semiconductor",
+    re.IGNORECASE,
+)
 
 ENTITY_LABELS = {
     "pore_size": "孔隙尺寸（√area）",
     "fatigue_life": "疲劳寿命（Nf）",
+    "fatigue_life_Nf": "疲劳寿命（Nf）",
     "fatigue_limit": "疲劳极限（σw）",
     "da_dn": "裂纹扩展速率（da/dN）",
     "delta_k": "应力强度因子范围（ΔK）",
@@ -45,12 +51,28 @@ ENTITY_LABELS = {
     "build_orientation": "建造方向",
     "short_crack": "短裂纹",
     "long_crack": "长裂纹",
+    "alpha_lath_width": "α片层宽度",
+    "prior_beta_grain": "先前β晶粒",
+    "crystallographic_texture": "织构",
+    "near_surface_defect": "近表面缺陷",
+    "environmental_medium": "环境介质",
+    "loading_frequency": "加载频率",
+    "fatigue_regime": "HCF/VHCF疲劳区间",
+    "short_crack_growth_rate": "短裂纹扩展速率",
+    "effective_delta_k": "有效应力强度因子范围（ΔKeff）",
+    "crack_growth_rate_da_dn": "裂纹扩展速率（da/dN）",
+    "delta_k_threshold": "裂纹扩展阈值（ΔKth）",
+    "paris_parameters": "Paris参数（C、m）",
+    "crack_initiation": "裂纹起裂",
+    "crack_origin_location": "裂纹起源位置",
+    "fatigue_performance": "疲劳性能",
 }
 
 
 def resolve_question_entities(question: str) -> dict[str, Any]:
     """Resolve concrete scientific entities before any answer template runs."""
     independent, dependent, classification = extract_variable_pair(question)
+    frame = parse_query_frame(question).as_dict()
     lowered = str(question).lower()
     aliases = (
         (("建造方向", "build orientation", "build direction"), "build_orientation"),
@@ -78,6 +100,18 @@ def resolve_question_entities(question: str) -> dict[str, Any]:
             dependent = "long_crack"
         else:
             dependent = "fatigue_life"
+        classification = "quantitative_relation"
+    # The legacy variable mapper intentionally recognizes a small core
+    # vocabulary. Prefer the richer scientific query frame whenever it found
+    # explicit causal variables and outcomes. This keeps downstream Skills
+    # aligned with the user's actual topic instead of a nearby generic pair.
+    frame_independent = frame.get("independent_variables") or []
+    frame_dependent = frame.get("dependent_variables") or []
+    if frame_independent:
+        independent = frame_independent[0]
+    if frame_dependent:
+        dependent = frame_dependent[0]
+    if independent and dependent:
         classification = "quantitative_relation"
     return {
         "independent": independent,
@@ -117,6 +151,11 @@ def smart_search_dataset_version(base_dir: Path) -> str:
             payload = b"missing"
         parts.append(hashlib.sha256(payload).hexdigest())
     return ":".join(parts)
+
+
+def _explicitly_out_of_scope(question: str) -> bool:
+    """Reject an explicitly different discipline before touching local RAG."""
+    return bool(OUT_OF_SCOPE_PATTERN.search(str(question or "")))
 
 
 @functools.lru_cache(maxsize=64)
@@ -348,6 +387,26 @@ def run_smart_search(
     scope_guard_applied = bool(not PORE_PATTERN.search(question) and PORE_PATTERN.search(effective))
     if scope_guard_applied:
         effective = question
+    if _explicitly_out_of_scope(effective):
+        answer = (
+            "## 直接结论\n\n"
+            "该问题超出当前正式文献库范围。TitaniumFatigueChat的本地证据只覆盖钛合金疲劳，"
+            "不能使用钛合金疲劳证据强行回答其他学科问题，也不会虚构本地引文。\n\n"
+            "## 结论边界\n\n"
+            "当前回答仅确认范围不匹配；需要切换到对应领域的正式文献库后再进行检索和分析。\n\n"
+            "## 文献证据\n\n当前钛合金疲劳文献库不提供该主题证据。"
+        )
+        elapsed = round(time.perf_counter() - started, 4)
+        if progress_callback:
+            progress_callback({"stage": "COMPLETE", "message": "问题超出当前正式文献库范围。", "total_elapsed_seconds": elapsed})
+        return {
+            "answer": answer,
+            "first_stage": {"retrieval_scope": "OUT_OF_SCOPE", "retrieved_paper_count": 0, "evidence_count": 0, "elapsed_seconds": elapsed},
+            "research_result": {"supporting_evidence": [], "counter_evidence": [], "condition_dependent_evidence": [], "retrieved_evidence_pool": []},
+            "query_understanding": understood,
+            "skill_output": {"skill_name": "scope_guard", "quality_gate": {"passed": True}},
+            "diagnostics": {"total_elapsed_seconds": elapsed, "scope_guard_out_of_domain": True, "llm_executed": False, "specificity_gate": {"passed": True, "failures": []}},
+        }
     normalization_complete_epoch_ms = time.time_ns() / 1_000_000
     dataset_version = smart_search_dataset_version(base_dir)
     retrieval_started = time.perf_counter()

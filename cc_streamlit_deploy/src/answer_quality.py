@@ -54,7 +54,7 @@ def validate_answer_quality(
             failures.append("missing_section_or_concept:validation")
     if skill_name == "scientific_analysis_skill":
         direct_block = answer.split("###", 1)[0]
-        if not any(term in direct_block for term in ("提高", "降低", "增大", "减小", "相关", "影响", "作用")):
+        if not any(term in direct_block for term in ("提高", "降低", "增大", "减小", "相关", "影响", "作用", "对应", "加快", "减弱", "导致", "转向", "描述", "不能")):
             failures.append("direct_answer_missing_scientific_conclusion")
         if not any(term in answer for term in ("机制", "驱动力", "应力集中", "裂纹", "组织")):
             failures.append("direct_answer_missing_mechanism")
@@ -104,12 +104,23 @@ def validate_answer_quality(
         "hip": ("hip", "\u70ed\u7b49\u9759\u538b", "hot isostatic"),
         "stress_amplitude": ("\u5e94\u529b\u5e45", "\u03c3a", "stress amplitude"),
         "stress_ratio": ("\u5e94\u529b\u6bd4", "r=", "stress ratio"),
-        "pore_size": ("\u5b54\u9699\u5c3a\u5bf8", "\u7f3a\u9677\u5c3a\u5bf8", "pore size", "sqrt area"),
+        "pore_size": ("\u5b54\u9699\u5c3a\u5bf8", "\u7f3a\u9677\u5c3a\u5bf8", "√area", "pore size", "sqrt area"),
         "porosity": ("\u5b54\u9699\u7387", "porosity"),
-        "pore_location": ("\u5b54\u9699\u4f4d\u7f6e", "\u8ddd\u8868\u9762\u8ddd\u79bb", "pore location"),
+        "pore_location": ("\u5b54\u9699\u4f4d\u7f6e", "缺陷位置", "表面、近表面和内部", "\u8ddd\u8868\u9762\u8ddd\u79bb", "pore location"),
         "paris_c_m": ("paris", "c\u548cm", "c/m"),
         "crack_closure": ("\u88c2\u7eb9\u95ed\u5408", "crack closure"),
         "crack_initiation_life": ("\u8d77\u88c2\u5bff\u547d", "crack initiation life"),
+        "prior_beta_grain": ("先前β晶粒", "原始β晶粒", "prior beta grain"),
+        "crystallographic_texture": ("织构", "texture"),
+        "near_surface_defect": ("近表面缺陷", "near-surface defect"),
+        "loading_frequency": ("频率", "loading frequency"),
+        "environmental_medium": ("环境", "空气", "真空", "腐蚀", "environment"),
+        "fatigue_regime": ("HCF", "VHCF", "高周疲劳", "超高周疲劳"),
+        "delta_k_threshold": ("ΔKth", "扩展阈值", "delta kth"),
+        "paris_parameters": ("Paris", "C、m", "C和m"),
+        "crack_initiation": ("裂纹起裂", "裂纹萌生", "起裂", "crack initiation"),
+        "crack_origin_location": ("裂纹起源", "起裂位置", "表面/内部起裂"),
+        "fatigue_performance": ("疲劳性能", "疲劳行为", "疲劳寿命", "疲劳极限"),
     })
     for entity in [*(frame.get("independent_variables") or []), *(frame.get("dependent_variables") or [])]:
         aliases = entity_aliases.get(str(entity), (str(entity),))
@@ -155,7 +166,10 @@ def validate_answer_quality(
     if not query_mentions_pores(question):
         pore_hits = len(PORE_PATTERN.findall(answer))
         headings = re.findall(r"(?m)^#{1,4}\s+(.+)$", answer)
-        if pore_hits > 2 or any(PORE_PATTERN.search(heading) for heading in headings):
+        variables = set(frame.get("independent_variables") or []) | set(frame.get("dependent_variables") or [])
+        requested_formulas = set(frame.get("requested_formulas") or [])
+        pore_limit = 999 if "Murakami" in requested_formulas else 4 if "hip" in variables else 2
+        if pore_hits > pore_limit or any(PORE_PATTERN.search(heading) for heading in headings):
             failures.append("unsolicited_pore_centrality")
 
     if skill_name in {"hypothesis_generation_skill", "experiment_design_skill"}:
@@ -233,11 +247,17 @@ def precise_refusal(skill_name: str, failures: list[str], evidence_bundle: dict[
     details = "、".join(missing[:5]) or "可核验的页码、实验条件或反向证据"
     original_query = str((evidence_bundle.get("query_frame") or {}).get("original_query") or "").strip()
     query_context = f"针对问题“{original_query}”，" if original_query else ""
+    hypothesis_note = (
+        "该命题最多只能标记为低置信度候选假设，不能给出虚构系数或统一阈值；"
+        "应补充同材料状态、同载荷历史的直接文献与交互试验。\n\n"
+        if skill_name == "hypothesis_generation_skill" else ""
+    )
     return (
         "## 直接结论\n\n"
         f"{query_context}当前证据不足以形成满足具体性与可证伪要求的科研答案。以下列出需要补充的文献或实验条件。\n\n"
         "## 当前不能确定的内容\n\n"
         f"当前正式证据缺少或无法一致核对：{details}。需要补足这些证据后才能由 {skill_name} 继续生成。\n\n"
         "## 仍需补足的证据\n\n"
+        f"{hypothesis_note}"
         "需要补充同材料状态、同疲劳阶段的匹配实验，核对公式参数及单位，并检索能够支持或推翻主结论的直接研究。"
     )

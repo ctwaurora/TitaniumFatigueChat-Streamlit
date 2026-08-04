@@ -89,15 +89,20 @@ def bundle_prompt(value: SkillInput) -> str:
 
 
 def primary_citation(value: SkillInput, role: str = "SUPPORT") -> str:
+    citation_index = (value.evidence_bundle or {}).get("citation_index") or {}
     for paper in value.evidence_bundle.get("papers") or []:
         for claim in paper.get("principal_claims") or []:
             if claim.get("role") != role:
                 continue
+            if citation_index and str(claim.get("evidence_id")) not in citation_index:
+                continue
             return f"[Evidence ID：{claim.get('evidence_id')}，页码：{claim.get('page_number')}]"
     rows = value.support_evidence if role == "SUPPORT" else value.counter_evidence
-    if rows:
-        row = rows[0]
-        return f"[Evidence ID：{row.get('doc_id') or row.get('evidence_id')}，页码：{row.get('page_number')}]"
+    for row in rows:
+        evidence_id = str(row.get("doc_id") or row.get("evidence_id") or "")
+        if citation_index and evidence_id not in citation_index:
+            continue
+        return f"[Evidence ID：{evidence_id}，页码：{row.get('page_number')}]"
     return ""
 
 

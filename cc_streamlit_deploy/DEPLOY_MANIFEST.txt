@@ -1,5 +1,5 @@
 TitaniumFatigueChat Streamlit deployment manifest
-file_count=134
+file_count=135
 
 .gitignore
 .streamlit/config.toml
@@ -115,6 +115,7 @@ src/research_reasoning.py
 src/research_skills/__init__.py
 src/research_skills/common.py
 src/research_skills/contracts.py
+src/research_skills/domain_profiles.py
 src/research_skills/experiment_design_skill.py
 src/research_skills/hypothesis_generation_skill.py
 src/research_skills/research_gap_skill.py

@@ -49,14 +49,21 @@ class QueryFrame:
 
 
 VARIABLE_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("residual_stress", ("residual stress", "残余应力")),
+    ("residual_stress", ("residual stress", "残余应力", "残余拉应力", "残余压应力")),
     ("alpha_lath_width", ("alpha lath", "α片层", "片层宽度")),
+    ("prior_beta_grain", ("prior beta grain", "prior-β", "先前β晶粒", "原始β晶粒")),
+    ("crystallographic_texture", ("crystallographic texture", "texture", "织构")),
     ("microstructure", ("microstructure", "微观组织", "显微组织", "组织")),
     ("surface_roughness", ("surface roughness", "表面粗糙", "ra", "rz")),
+    ("near_surface_defect", ("near-surface defect", "near surface defect", "近表面缺陷")),
+    ("pore_location", ("pore location", "defect location", "孔隙位置", "缺陷位置", "距表面", "表面、近表面", "表面和内部")),
     ("build_orientation", ("build orientation", "build direction", "建造方向", "成形方向")),
     ("stress_ratio", ("stress ratio", "应力比", "r比")),
+    ("loading_frequency", ("loading frequency", "frequency", "加载频率", "频率")),
+    ("environmental_medium", ("environment", "air", "vacuum", "corrosion", "环境", "空气", "真空", "腐蚀")),
+    ("fatigue_regime", ("hcf", "vhcf", "高周疲劳", "超高周疲劳", "疲劳区间")),
     ("temperature", ("temperature", "温度", "高温")),
-    ("pore_size", ("pore size", "defect size", "孔隙尺寸", "缺陷尺寸", "sqrt area", "√area")),
+    ("pore_size", ("pore size", "defect size", "孔隙尺寸", "缺陷尺寸", "孔隙会", "sqrt area", "√area")),
     ("heat_treatment", ("heat treatment", "热处理", "anneal", "退火", "时效")),
     ("hip", ("hot isostatic", "hip", "热等静压")),
 )
@@ -64,17 +71,28 @@ VARIABLE_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
 DEPENDENT_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("short_crack_growth_rate", ("short crack growth", "短裂纹扩展", "小裂纹扩展")),
     ("crack_growth_rate_da_dn", ("da/dn", "裂纹扩展速率", "crack growth rate")),
+    ("delta_k_threshold", ("delta kth", "Δkth", "裂纹扩展阈值", "扩展阈值")),
+    ("paris_parameters", ("paris parameter", "paris参数", "paris模型参数", "c和m", "c、m")),
     ("effective_delta_k", ("delta keff", "Δkeff", "有效应力强度因子")),
     ("fatigue_life_Nf", ("fatigue life", "疲劳寿命", "总寿命", "nf")),
     ("fatigue_limit", ("fatigue limit", "疲劳极限")),
     ("crack_initiation_life", ("crack initiation life", "起裂寿命")),
+    ("crack_initiation", ("crack initiation", "裂纹起裂", "裂纹萌生")),
+    ("crack_origin_location", ("crack origin", "裂纹起源", "起裂位置", "表面转向内部")),
+    ("fatigue_performance", ("fatigue performance", "fatigue behavior", "疲劳性能", "疲劳行为")),
     ("crack_closure", ("crack closure", "裂纹闭合")),
 )
 
 
 def _matches(text: str, patterns: tuple[tuple[str, tuple[str, ...]], ...]) -> list[str]:
     lowered = text.casefold()
-    return [name for name, terms in patterns if any(term.casefold() in lowered for term in terms)]
+    def contains(term: str) -> bool:
+        normalized = term.casefold()
+        if normalized.isascii() and normalized.isalnum() and len(normalized) <= 3:
+            return bool(re.search(rf"(?<![a-z0-9]){re.escape(normalized)}(?![a-z0-9])", lowered))
+        return normalized in lowered
+
+    return [name for name, terms in patterns if any(contains(term) for term in terms)]
 
 
 def _first(text: str, mapping: tuple[tuple[str, tuple[str, ...]], ...]) -> str:
@@ -140,6 +158,10 @@ def parse_query_frame(query: str, parsed_entities: dict[str, Any] | None = None)
         ("effective_driving_force", ("delta keff", "Δkeff", "有效驱动力")),
         ("plastic_zone", ("plastic zone", "塑性区")),
         ("crack_deflection", ("crack deflection", "裂纹偏转")),
+        ("slip_transfer", ("slip transfer", "滑移传递")),
+        ("oxidation", ("oxidation", "氧化")),
+        ("hydrogen_assisted", ("hydrogen", "氢相关", "氢致")),
+        ("fish_eye", ("fish-eye", "fish eye", "鱼眼")),
     ))
     if "residual_stress" in independent and crack_stage in {"SHORT_CRACK", "CRACK_PROPAGATION"}:
         mechanisms = list(dict.fromkeys([*mechanisms, "crack_closure", "effective_driving_force"]))
