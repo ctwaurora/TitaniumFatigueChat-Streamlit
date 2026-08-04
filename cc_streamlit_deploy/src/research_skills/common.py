@@ -8,6 +8,10 @@ from src.research_skills.contracts import SkillInput
 
 
 BANNED_PLACEHOLDERS = ("目标因素", "问题中的目标因素", "某个因素", "疲劳响应")
+FORMULA_NOISE_TERMS = (
+    "figure ", "fig. ", "table ", "international journal", "et al.",
+    "representative ", "defect type", "batch ", "copyright",
+)
 
 
 def entity_labels(value: SkillInput) -> tuple[str, str]:
@@ -46,6 +50,37 @@ def evidence_counts(value: SkillInput) -> tuple[int, int, int]:
     )
 
 
+def is_usable_formula_record(row: dict[str, Any]) -> bool:
+    """Return whether an extracted record is compact enough to quote verbatim."""
+    equation = str(row.get("equation") or row.get("formula") or "").strip()
+    lowered = equation.casefold()
+    if not equation or len(equation) > 220:
+        return False
+    if any(term in lowered for term in FORMULA_NOISE_TERMS):
+        return False
+    if not any(operator in equation for operator in ("=", "≈", "∝", "≤", "≥")):
+        return False
+    return len(equation.split()) <= 24
+
+
+def usable_formulas(value: SkillInput) -> list[dict[str, Any]]:
+    """Return equation-like records that are safe to quote as formulas."""
+    return [
+        row
+        for row in value.formula_records or (value.evidence_bundle or {}).get("formulas") or []
+        if is_usable_formula_record(row)
+    ]
+
+
+def is_noisy_evidence_excerpt(value: Any) -> bool:
+    """Identify broken captions/page furniture that should not reach evidence cards."""
+    text = str(value or "").strip()
+    lowered = text.casefold()
+    control_character = any(ord(char) < 32 and char not in "\n\r\t" for char in text)
+    noise_hits = sum(term in lowered for term in FORMULA_NOISE_TERMS)
+    return not text or control_character or noise_hits >= 2
+
+
 def bundle_prompt(value: SkillInput) -> str:
     """Return the compact EvidenceBundle supplied to a concrete Skill."""
     import json
@@ -74,6 +109,8 @@ def traceable_cards(value: SkillInput, limit: int = 30) -> list[dict[str, Any]]:
         ("CONDITION_DEPENDENT", value.condition_dependent_evidence),
     ):
         for row in rows:
+            if is_noisy_evidence_excerpt(row.get("original_text")):
+                continue
             cards.append({
                 "role": role,
                 "title": row.get("title") or "题名未报告",

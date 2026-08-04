@@ -535,9 +535,8 @@ def format_model_comparison_markdown(result: Dict[str, Any]) -> str:
         lines.append("未检测到相关的候选模型。\n")
         return "".join(lines)
 
-    lines.append("## 📐 多模型对比分析\n")
-    lines.append(f"> 检测到变量：{'、'.join(result.get('detected_variables', ['无']))}\n")
-    lines.append(f"> 比较 {result['total_models']} 个候选模型\n\n")
+    lines.append("## 多模型对比分析\n")
+    lines.append(f"> 问题变量：{'、'.join(result.get('detected_variables', ['无']))}\n\n")
 
     # ── 数据可用性概览 ──
     if data_summary:
@@ -556,26 +555,54 @@ def format_model_comparison_markdown(result: Dict[str, Any]) -> str:
         lines.append("\n")
 
     # ── 模型对比主表 ──
-    lines.append("### 模型对比总表\n\n")
-    lines.append("| 模型 | 适用关系 | 输入参数 | 输出结果 | 适用条件 | 不适用情况 | 当前数据足够？ | 推荐等级 |\n")
-    lines.append("|---|---|---|---|---|---|---|---|\n")
+    lines.append("### 公式适用范围与可比性\n\n")
+    lines.append("比较前依次核对单位、输入变量、材料/工艺状态、应力比、疲劳区间和裂纹阶段。预测对象不同的公式不执行数值并列。\n\n")
+    lines.append("| 公式 | 预测对象 | 必要输入 | 适用区间 | 是否考虑缺陷 | 是否考虑应力比 | 是否可直接比较 |\n")
+    lines.append("|---|---|---|---|---|---|---|\n")
+
+    def prediction_target(model: Dict[str, Any]) -> str:
+        relation = str(model.get("applicable_variables") or "").casefold()
+        if "fatigue_life" in relation or "nf" in relation:
+            return "疲劳寿命 Nf"
+        if "fatigue_limit" in relation or "σw" in relation:
+            return "疲劳极限 σw"
+        if "da_dn" in relation or "da/dn" in relation:
+            return "裂纹扩展速率 da/dN"
+        if "allowable" in relation or "boundary" in relation:
+            return "缺陷容限边界"
+        return str(model.get("output_results", ["预测对象需核对"])[0])
+
+    targets = [prediction_target(model) for model in comparisons]
 
     for model in comparisons:
         mid = model.get("model_id", "")
         name = model.get("model_name_cn", model.get("model_name", ""))
-        applicable = model.get("applicable_variables", "")
         inputs = "; ".join(model.get("input_parameters", [])[:3])
-        outputs = "; ".join(model.get("output_results", [])[:2])
         conditions = "; ".join(model.get("applicable_conditions", [])[:2])
-        inapp = "; ".join(model.get("inapplicable_cases", [])[:2])
-        data_ready = model.get("data_ready", False)
-        data_tag = "✅ 足够" if data_ready else "❌ 需补充"
-        rec = model.get("recommendation_level", "")
-        rec_icon = {"recommended": "🟢 推荐", "conditional": "🟡 条件推荐", "not_recommended": "🔴 不推荐"}.get(rec, rec)
-
-        lines.append(f"| {name} | {applicable} | {inputs} | {outputs} | {conditions} | {inapp} | {data_tag} | {rec_icon} |\n")
+        combined = " ".join((name, str(model.get("formula") or ""), str(model.get("applicable_variables") or ""))).casefold()
+        defect = "是" if any(term in combined for term in ("defect", "pore", "area", "缺陷")) else "否/需外加修正"
+        ratio = "是" if "walker" in combined or "(1-r)" in combined else "通常固定R；跨R需修正"
+        target = prediction_target(model)
+        same_target_count = targets.count(target)
+        comparable = (
+            "条件满足后可与同目标公式比较" if same_target_count > 1
+            else "否；仅可作机制层面对照"
+        )
+        lines.append(f"| {name} | {target} | {inputs} | {conditions} | {defect} | {ratio} | {comparable} |\n")
 
     lines.append("\n")
+
+    lines.append("### 统一输入下的结果比较\n\n")
+    comparable_ready = [
+        model for model in comparisons
+        if model.get("data_ready") and targets.count(prediction_target(model)) > 1
+    ]
+    if len(comparable_ready) < 2:
+        lines.append(
+            "当前没有至少两个同时满足相同预测对象、单位、材料状态、应力比和阶段要求且参数完整的公式，"
+            "因此不生成虚假的数值结果表。Basquin预测寿命、Murakami预测疲劳极限、Paris预测裂纹扩展速率，"
+            "三者只能比较输入假设和机制，不能直接比较数值。\n\n"
+        )
 
     # ── 各模型详细信息 ──
     lines.append("### 各模型详细说明\n\n")
@@ -616,7 +643,9 @@ def format_model_comparison_markdown(result: Dict[str, Any]) -> str:
                 lines.append(f"- {m}\n")
             lines.append("\n")
 
-        lines.append(f"**推荐等级**: {rec_icon}\n\n")
+        rec = model.get("recommendation_level", "")
+        rec_text = {"recommended": "推荐", "conditional": "条件推荐", "not_recommended": "不推荐"}.get(rec, rec)
+        lines.append(f"**推荐等级**: {rec_text}\n\n")
         lines.append("---\n")
 
     # ── 总体建议 ──

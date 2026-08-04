@@ -6,9 +6,15 @@ import re
 from typing import Any
 
 from src.research_topics import query_mentions_pores
+from src.research_skills.common import is_usable_formula_record
 
 
 COUNT_TALK = re.compile(r"(?:提供|检索到|召回|使用|共有|共检索)\s*\d+\s*(?:条|篇).{0,10}(?:证据|文献)")
+EVIDENCE_COUNT_PHRASES = (
+    "本地正式库提供", "条支持证据", "条反向证据", "条条件依赖证据",
+    "Evidence数量", "支持证据数量", "反向证据数量", "条件证据数量",
+    "当前使用多少篇文献", "本次调用了多少条证据", "检索池", "候选池", "reranker数量",
+)
 PLACEHOLDERS = ("目标因素", "问题中的目标因素", "某个因素", "疲劳响应发生变化")
 PORE_PATTERN = re.compile(r"孔隙|孔洞|气孔|√area|\bpore\b|porosity", re.I)
 
@@ -34,6 +40,8 @@ def validate_answer_quality(
         failures.append("empty_answer")
     if COUNT_TALK.search(answer):
         failures.append("visible_evidence_count_talk")
+    if any(term.casefold() in answer.casefold() for term in EVIDENCE_COUNT_PHRASES):
+        failures.append("visible_evidence_count_talk")
     if any(term in answer for term in PLACEHOLDERS):
         failures.append("vague_placeholder")
     for term in SKILL_REQUIREMENTS.get(skill_name, ()):
@@ -44,6 +52,12 @@ def validate_answer_quality(
             failures.append("missing_section_or_concept:falsification")
         if not any(term in answer for term in ("验证", "检验", "复现")):
             failures.append("missing_section_or_concept:validation")
+    if skill_name == "scientific_analysis_skill":
+        direct_block = answer.split("###", 1)[0]
+        if not any(term in direct_block for term in ("提高", "降低", "增大", "减小", "相关", "影响", "作用")):
+            failures.append("direct_answer_missing_scientific_conclusion")
+        if not any(term in answer for term in ("机制", "驱动力", "应力集中", "裂纹", "组织")):
+            failures.append("direct_answer_missing_mechanism")
 
     citations = evidence_bundle.get("citation_index") or {}
     known_ids = set(citations)
@@ -113,7 +127,10 @@ def validate_answer_quality(
     if cited_pages and not cited_pages.issubset(valid_pages):
         failures.append("invalid_page_reference")
 
-    formulas = evidence_bundle.get("formulas") or []
+    formulas = [
+        item for item in evidence_bundle.get("formulas") or []
+        if is_usable_formula_record(item)
+    ]
     formula_topic = "FORMULA_MODEL" in (evidence_bundle.get("topics") or [])
     if formulas and (formula_topic or "公式" in question) and not any(
         str(item.get("formula_id")) in answer and str(item.get("equation")) in answer
@@ -153,15 +170,45 @@ def validate_answer_quality(
         for term in ("数据要求", "拟合", "替代解释"):
             if term not in answer:
                 failures.append(f"hypothesis_missing:{term}")
+        has_model = bool(re.search(r"(?:β\d|log10?|log\(|Nf|da/dN).{0,120}=|=.{0,120}(?:β\d|log10?|Nf|da/dN)", answer, re.I | re.S))
+        data_limited = "数据不足以确定函数形式" in answer or "不足以确定具体函数形式" in answer
+        if not has_model and not data_limited:
+            failures.append("hypothesis_missing_fittable_formula")
+        if not all(term in answer for term in ("单位", "预测方向")):
+            failures.append("hypothesis_missing_variable_units_or_direction")
     if skill_name == "research_gap_skill":
         if not any(term in answer for term in ("候选证据缺口", "真实研究空白", "本地文献库不足", "已有研究已经")):
             failures.append("gap_status_not_classified")
         if "缺失条件" not in answer and "缺口矩阵" not in answer:
             failures.append("gap_condition_matrix_missing")
+        for term in ("已经解决的问题", "尚未解决的具体问题", "反向证据检索结果", "逐层缩小"):
+            if term not in answer:
+                failures.append(f"gap_missing:{term}")
+        if not any(term in answer for term in (
+            "A. 得到支持的具体研究空白",
+            "B. 候选证据缺口，尚需外部文献验证",
+            "C. 候选空白被反向证据推翻",
+        )):
+            failures.append("gap_status_not_one_of_ABC")
+        vague_only = len(answer) < 500 and any(term in answer for term in ("关系尚不明确", "需要进一步研究", "文献不足"))
+        if vague_only:
+            failures.append("gap_overly_generic")
     if skill_name == "experiment_design_skill":
         for term in ("水平", "测量", "协变量", "样本量", "run-out", "统计模型"):
             if term.casefold() not in answer.casefold():
                 failures.append(f"experiment_missing:{term}")
+        table_requirements = (
+            ("表1：变量定义表", "| 变量类型 | 变量 |"),
+            ("表2：实验分组表", "| 组别 |"),
+            ("表3：预测与证伪表", "| 检验项目 | 假设成立时的预测结果 |"),
+        )
+        for label, header in table_requirements:
+            if label not in answer or header not in answer:
+                failures.append(f"experiment_missing_table:{label}")
+        if answer.count("|---") < 3:
+            failures.append("experiment_markdown_tables_missing")
+        if not any(term in answer for term in ("回归", "似然比", "置信区间", "生存分析", "统计模型")):
+            failures.append("experiment_statistical_test_missing")
     if "研究已经证明" in answer and any(term in answer for term in ("系统推断", "候选模型", "候选假设")):
         failures.append("system_inference_presented_as_fact")
     if "条件" not in answer and "适用范围" not in answer:
@@ -188,7 +235,7 @@ def precise_refusal(skill_name: str, failures: list[str], evidence_bundle: dict[
     query_context = f"针对问题“{original_query}”，" if original_query else ""
     return (
         "## 直接结论\n\n"
-        f"{query_context}本次生成未通过科研真实性门禁，因此不显示未经充分约束的结论。\n\n"
+        f"{query_context}当前证据不足以形成满足具体性与可证伪要求的科研答案。以下列出需要补充的文献或实验条件。\n\n"
         "## 当前不能确定的内容\n\n"
         f"当前正式证据缺少或无法一致核对：{details}。需要补足这些证据后才能由 {skill_name} 继续生成。\n\n"
         "## 仍需补足的证据\n\n"

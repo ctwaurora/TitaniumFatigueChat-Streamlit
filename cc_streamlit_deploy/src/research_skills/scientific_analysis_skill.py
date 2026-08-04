@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.research_skills.common import base_quality_gate, bundle_prompt, entity_labels, evidence_level_instruction, missing_evidence, primary_citation, query_variables, traceable_cards
+from src.research_skills.common import base_quality_gate, bundle_prompt, entity_labels, evidence_level_instruction, missing_evidence, primary_citation, query_variables, traceable_cards, usable_formulas
 from src.research_skills.contracts import SkillInput, SkillOutput
 
 
@@ -38,28 +38,53 @@ def _fallback(value: SkillInput) -> tuple[str, str]:
     consensus = synthesis.get("consensus") or []
     conflicts = synthesis.get("conflicts") or []
     mismatches = synthesis.get("condition_mismatches") or []
-    formulas = bundle.get("formulas") or []
+    formulas = usable_formulas(value)
     frame = value.query_frame or bundle.get("query_frame") or {}
     if not consensus:
         return "本地正式证据不足，无法对该变量关系给出可追溯结论。", "当前缺少可核验的直接证据、条件与反向结果。"
     support_cite = primary_citation(value)
     counter_cite = primary_citation(value, "COUNTER")
-    direct = f"现有正式证据支持在已报告条件内分析{iv or '所问自变量'}对{dv or '所问结果'}的作用，但不能跨越未匹配条件直接外推。{consensus[0]} {support_cite}"
+    variables = set(frame.get("independent_variables") or []) | set(frame.get("dependent_variables") or [])
+    pore_life = "pore_size" in variables and bool({"fatigue_life", "fatigue_life_Nf"} & variables)
+    if pore_life:
+        direct = (
+            "在L-PBF Ti-6Al-4V中，孔隙尺寸增大（常用√area表征）、即出现较大的孔隙时，通常与疲劳寿命降低相关，"
+            "未熔合缺陷增大时也可出现相同方向的趋势，"
+            "因为更大的等效初始缺陷会提高局部应力集中并缩短裂纹起裂或早期扩展阶段。"
+            "但√area不是独立决定量：缺陷距自由表面的距离、形貌、表面粗糙度、残余应力、"
+            "微观组织、应力幅/应力比以及HIP或热处理状态都会改变其成为主裂纹源的概率。"
+            f"因此不能把单一√area阈值外推到所有HCF/VHCF和表面状态。{support_cite}"
+        )
+    else:
+        direct = f"现有正式证据支持在已报告条件内分析{iv or '所问自变量'}对{dv or '所问结果'}的作用，但不能跨越未匹配条件直接外推。{support_cite}"
     formula_text = "未检索到通过可信结构检查的文献原公式；现有证据支持趋势，但不足以确定具体函数形式。"
     if formulas:
         item = formulas[0]
         formula_text = f"{item['equation']}（Formula ID：{item['formula_id']}，页码：{item['page_number']}；适用条件：{item.get('applicable_conditions') or '原文未完整报告'}）"
     mechanism = consensus[1] if len(consensus) > 1 else "证据未充分分离各机制贡献，不能把相关性写成单因素因果。"
+    if pore_life:
+        mechanism = (
+            "√area增大 → 缺陷等效初始裂纹尺度和局部应力集中提高 → 起裂所需循环数减少，"
+            "并可能更早进入短裂纹扩展阶段 → Nf降低。缺陷接近自由表面时自由表面放大局部驱动力，"
+            "相同√area的危害可能更强；压缩残余应力、HIP后缺陷闭合或有利组织屏障可削弱该链条，"
+            "而粗糙表面、拉伸残余应力和较高应力幅可增强该链条。后两类判断属于条件化综合，需匹配试验验证。"
+        )
     if "residual_stress" in (frame.get("independent_variables") or []):
         mechanism = "残余拉应力升高 → 局部平均应力与有效裂纹驱动力提高 → 裂纹闭合减弱 → 相同外加ΔK下ΔKeff提高 → 短裂纹da/dN可能升高；压缩残余应力的链条方向相反，但必须核对循环松弛。该链条包含跨文献综合和待直接验证环节。"
     formula_boundary = ""
     if frame.get("crack_stage") == "SHORT_CRACK" and formulas and any("paris" in str(item.get("equation") or "").casefold() for item in formulas):
         formula_boundary = "该Paris类关系只能作为长裂纹基线，不能直接视为短裂纹定量模型。"
+    boundary_text = (
+        "结论仅适用于材料牌号、L-PBF工艺、热处理/HIP、表面状态、残余应力、载荷模式、"
+        "应力比和疲劳区间可比的试样；HCF与VHCF、表面与内部起裂不得直接合并。"
+        if pore_life else
+        ("；".join(mismatches) if mismatches else "只能适用于证据卡中明确报告的材料、处理、表面和加载条件。")
+    )
     reasoning = f"""### 具体机制
 {mechanism}
 
 ### 实验条件和适用边界
-{'；'.join(mismatches) if mismatches else '只能适用于证据卡中明确报告的材料、处理、表面和加载条件。'}
+{boundary_text}
 
 ### 文献冲突及反向观点
 {(conflicts[0] + ' ' + counter_cite) if conflicts else '当前检索结果未提供可明确复核的相反结论；这不等于不存在反向证据。'}

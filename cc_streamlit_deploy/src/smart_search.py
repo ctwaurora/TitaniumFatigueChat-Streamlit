@@ -17,6 +17,7 @@ from src.deepseek_client import DeepSeekClient, DeepSeekRequestError
 from src.evidence_bundle import build_evidence_bundle
 from src.query_frame import parse_query_frame
 from src.query_understanding import understand_user_query
+from src.research_skills.common import is_noisy_evidence_excerpt
 from src.research_skills.contracts import SkillInput
 from src.research_skills.router import get_research_skill
 from src.unified_rag import answer_research_question
@@ -202,6 +203,7 @@ def _evidence_markdown(
     )
     for label, rows in groups:
         lines.extend(["", f"### {label}", ""])
+        rows = [row for row in rows if not is_noisy_evidence_excerpt(row.get("original_text"))]
         if not rows:
             lines.append("本地证据不足。")
             continue
@@ -452,6 +454,18 @@ def run_smart_search(
     skill_input = _build_skill_input(
         question, parsed_entities, result, dataset_version
     )
+
+    def validated_deterministic_fallback():
+        fallback_output = skill.generate(skill_input)
+        fallback_answer = skill.render_output(fallback_output)
+        fallback_quality = validate_answer_quality(
+            fallback_answer,
+            question=question,
+            skill_name=fallback_output.skill_name,
+            evidence_bundle=skill_input.evidence_bundle,
+        )
+        return fallback_output, fallback_answer, fallback_quality
+
     synthesis = ""
     llm_call_count = 0
     settings = get_deepseek_settings()
@@ -513,15 +527,24 @@ def run_smart_search(
             if repaired_quality["passed"]:
                 skill_output, answer, quality = repaired_output, repaired_answer, repaired_quality
             else:
-                quality = repaired_quality
+                fallback_output, fallback_answer, fallback_quality = validated_deterministic_fallback()
+                if fallback_quality["passed"]:
+                    skill_output, answer, quality = fallback_output, fallback_answer, fallback_quality
+                else:
+                    quality = fallback_quality
+                    answer = precise_refusal(
+                        skill_output.skill_name, quality["failures"], skill_input.evidence_bundle
+                    )
+        except (DeepSeekRequestError, ValueError, OSError) as exc:
+            diagnostics["llm_error"] = f"REPAIR_{type(exc).__name__}:{exc}"
+            fallback_output, fallback_answer, fallback_quality = validated_deterministic_fallback()
+            if fallback_quality["passed"]:
+                skill_output, answer, quality = fallback_output, fallback_answer, fallback_quality
+            else:
+                quality = fallback_quality
                 answer = precise_refusal(
                     skill_output.skill_name, quality["failures"], skill_input.evidence_bundle
                 )
-        except (DeepSeekRequestError, ValueError, OSError) as exc:
-            diagnostics["llm_error"] = f"REPAIR_{type(exc).__name__}:{exc}"
-            answer = precise_refusal(
-                skill_output.skill_name, quality["failures"], skill_input.evidence_bundle
-            )
     elif not quality["passed"]:
         answer = precise_refusal(
             skill_output.skill_name, quality["failures"], skill_input.evidence_bundle

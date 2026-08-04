@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.research_skills.common import base_quality_gate, bundle_prompt, entity_labels, evidence_level_instruction, missing_evidence, primary_citation, query_variables, traceable_cards
+from src.research_skills.common import base_quality_gate, bundle_prompt, entity_labels, evidence_level_instruction, missing_evidence, primary_citation, query_variables, traceable_cards, usable_formulas
 from src.research_skills.contracts import SkillInput, SkillOutput
 
 
@@ -13,7 +13,7 @@ QUALITY_METRICS = ("experiment_design_completeness", "confounder_control", "form
 
 def build_prompt(value: SkillInput) -> str:
     return f"""你正在独立执行 experiment_design_skill。问题：{value.user_query}
-必须重新核对EvidenceBundle，不得把任何上一步自然语言当作事实。输出：研究对象（具体材料/工艺/热处理/表面）；核心假设；自变量水平设计原则；因变量指标、单位和测量；控制变量；协变量；基准/处理/交互/阴性或阳性对照；预实验与正式样本量估计；加载条件；表征；数据与公式拟合；具体预测；至少两条推翻结果；最低成本方案；完整方案；风险混杂。
+必须重新核对EvidenceBundle，不得把任何上一步自然语言当作事实。以Markdown表格为主体，至少输出变量定义表、实验分组表、预测与证伪表；并说明研究对象、载荷、样本量、表征、统计模型、最低成本与完整方案。
 不得随意给固定样本数或无来源阈值。每个证据约束标Evidence ID和页码，不报告证据数量。用户未问孔隙时不得自动设计孔隙实验。
 {evidence_level_instruction()}
 EvidenceBundle：{bundle_prompt(value)}"""
@@ -39,36 +39,90 @@ def _fallback(value: SkillInput) -> tuple[str, str, list[str]]:
         f"{iv}主效应和预注册交互项的置信区间均覆盖最小效应，且留出批次预测没有改善。",
         f"独立批次的{dv}变化方向与预测相反，或预期中介量不变而结果仍出现。",
     ]
+    formulas = usable_formulas(value)
     formula_note = "没有通过结构检查的文献公式，先比较预注册候选模型，不填造系数。"
-    if bundle.get("formulas"):
-        item = bundle["formulas"][0]
+    if formulas:
+        item = formulas[0]
         formula_note = f"拟合文献原公式 {item['equation']}（Formula ID：{item['formula_id']}，页码：{item['page_number']}），仅在其单位和适用条件一致时比较。"
+    frame = value.query_frame or bundle.get("query_frame") or {}
+    variables = set(frame.get("independent_variables") or []) | set(frame.get("dependent_variables") or [])
+    pore_life = "pore_size" in variables and bool({"fatigue_life", "fatigue_life_Nf"} & variables)
+    if pore_life:
+        hypothesis = (
+            "在材料、表面、残余应力和载荷条件匹配后，√area增大将降低Nf，且该效应受d/√area调节；"
+            "近表面缺陷中的尺寸效应预计更强。若尺寸主效应与尺寸×位置交互均不改善独立批次预测，"
+            f"则推翻或削弱该假设。{primary_citation(value)}"
+        )
+        formula_note = (
+            "拟合待验证候选模型log10(Nf)=β0−β1log10(σa)−β2log10(√area)+β3(d/√area)"
+            "+β4R+β5σres+β6[log10(√area)×d/√area]+ε；该式并非文献原公式，β参数不预填数值。"
+        )
+        variable_table = """| 变量类型 | 变量 | 建议水平或范围 | 单位 | 测量方法 | 设计目的 |
+|---|---|---|---|---|---|
+| 自变量 | √area | 按本批实际缺陷分布和XCT分辨率设置3—4级或保留连续值 | µm | 疲劳前XCT；断口SEM复核 | 检验尺寸主效应 |
+| 自变量 | 缺陷距表面距离d | 表面、近表面、内部；边界按XCT分辨率预注册 | µm | XCT三维定位 | 检验位置效应 |
+| 因变量 | Nf | 连续记录至失效或run-out | cycle | 疲劳试验机 | 寿命终点 |
+| 控制变量 | 应力幅σa | 各组保持一致或按预实验S-N曲线分层 | MPa | 载荷控制与校准 | 排除载荷差异 |
+| 控制变量 | 表面粗糙度Ra | 统一加工状态并实测 | µm | 轮廓仪/三维形貌 | 排除表面效应 |
+| 协变量 | 残余应力σres | 每组实测，不预填数值 | MPa | XRD | 调整残余应力影响 |
+| 协变量 | 组织尺度 | 同批取样并量化 | µm | EBSD/金相 | 调整组织屏障影响 |"""
+        group_table = """| 组别 | 缺陷尺寸 | 缺陷位置 | 表面状态 | 热处理/HIP状态 | 载荷条件 | 主要比较 |
+|---|---|---|---|---|---|---|
+| G1 | 较小级/连续低分位 | 表面或近表面 | 统一加工 | 固定并报告 | 同σa、R、频率和环境 | 位置基线 |
+| G2 | 较大级/连续高分位 | 表面或近表面 | 同G1 | 同G1 | 同G1 | 表面侧尺寸效应 |
+| G3 | 较小级/连续低分位 | 内部 | 同G1 | 同G1 | 同G1 | 小尺寸位置效应 |
+| G4 | 较大级/连续高分位 | 内部 | 同G1 | 同G1 | 同G1 | 尺寸×位置交互 |
+| G5（验证） | 覆盖全范围 | 混合但盲法判定 | 独立批次同工艺 | 同主试验 | 同主试验 | 外部验证 |"""
+        prediction_table = """| 检验项目 | 假设成立时的预测结果 | 推翻或削弱假设的结果 | 统计检验 |
+|---|---|---|---|
+| √area主效应 | √area增大时log10(Nf)下降 | 控制其他变量后效应接近0或方向不稳定 | 回归系数、Bootstrap置信区间 |
+| 尺寸×位置交互 | 近表面缺陷中的尺寸效应更强 | 交互项不显著或方向相反 | 交互回归/似然比检验 |
+| 裂纹起源 | 较大或近表面缺陷更常成为主裂纹源 | 起源概率与尺寸、位置无关 | Logistic/竞争风险模型 |
+| 外部验证 | 完整模型优于基线模型 | 完整模型不优于基线模型 | RMSE/MAE、AIC/BIC、交叉验证 |"""
+        loading_protocol = (
+            "载荷模式优先采用与正式证据一致的轴向恒幅疲劳；应力比R、频率和温度/环境必须在组间固定并报告。"
+            "具体应力水平需根据材料静力学性能和预实验S-N曲线确定。终止循环数由目标HCF/VHCF区间和设备能力预注册，"
+            "不得从其他材料直接移植；失效定义为完全断裂或达到预注册裂纹/刚度终点，未失效试样记为run-out并按删失处理。"
+        )
+    else:
+        variable_table = f"""| 变量类型 | 变量 | 建议水平或范围 | 单位 | 测量方法 | 设计目的 |
+|---|---|---|---|---|---|
+| 自变量 | {iv} | 文献范围与设备能力交集，经预实验冻结 | 按原始物理量 | 校准后的对应表征方法 | 检验主效应 |
+| 因变量 | {dv} | 连续记录至预注册终点 | 保持原始SI单位 | 对应疲劳试验/裂纹测量 | 量化结果 |
+| 控制变量 | 材料、表面、热处理、R和频率 | 组间固定 | 各自SI单位 | 制程与载荷记录 | 排除混杂 |
+| 协变量 | 残余应力、组织尺度、实际载荷 | 实测 | 各自SI单位 | XRD/EBSD/载荷校准 | 调整共变 |"""
+        group_table = f"""| 组别 | {iv}水平 | 材料/表面/热处理 | 载荷条件 | 主要比较 |
+|---|---|---|---|---|
+| G1基线 | 低水平或基准 | 固定 | 固定R、频率和环境 | 基线 |
+| G2主效应 | 高水平 | 同G1 | 同G1 | {iv}主效应 |
+| G3交互 | 高水平×关键条件 | 同批次 | 同G1 | 交互效应 |
+| G4验证 | 覆盖全范围 | 独立批次 | 同主试验 | 外部验证 |"""
+        prediction_table = f"""| 检验项目 | 假设成立时的预测结果 | 推翻或削弱假设的结果 | 统计检验 |
+|---|---|---|---|
+| 主效应 | {iv}改变时{dv}按预注册方向变化 | 效应接近0或方向不稳定 | 回归系数及置信区间 |
+| 交互效应 | 关键条件显著调节主效应 | 交互项不显著或方向相反 | 交互回归/似然比检验 |
+| 外部验证 | 完整模型优于基线 | 完整模型无改进 | RMSE/MAE、交叉验证 |"""
+        loading_protocol = "应力水平、R、频率、终止循环数和失效终点均由匹配文献、设备能力与预实验冻结，不填写无来源数值。"
     reasoning = f"""### 研究对象
 {object_text}。
 
 ### 核心假设
 {hypothesis}
 
-### 自变量水平
-{iv}采用连续变量或低/中/高水平取决于工艺可控性；水平先从文献范围和设备能力取交集，再用预实验响应分布冻结。存在两个核心变量时优先全因子或响应面设计，并检查处理手段是否同时改变组织、表面或残余应力。
+### 表1：变量定义表
+{variable_table}
 
-### 因变量
-{dv}；记录原始单位、测量分辨率和删失/run-out状态。裂纹扩展问题采用裂纹复制、柔度法或原位成像按预注册裂纹长度区间计算da/dN；寿命问题记录起裂寿命、总寿命Nf和run-out，并保留仪器误差。
+### 表2：实验分组表
+{group_table}
 
-### 控制变量
-材料批次、制造窗口、试样几何、热处理、表面状态、应力比、频率、温度和环境全部固定或纳入模型。
-
-### 协变量
-按主题测量残余应力、组织尺度、建造方向、表面粗糙度及实际载荷；只纳入有物理依据且在试验前定义的协变量。
-
-### 分组和对照
-同批次基准组；{iv}处理组；{iv}×关键条件交互组；保持处理流程但不改变{iv}的阴性对照，或采用已有有效处理的阳性对照。试样在材料批次内区组化并随机分配，测试顺序随机化，操作者对组别盲法判定起裂位置。
+### 表3：预测与证伪表
+{prediction_table}
 
 ### 样本建议
 预实验用于估计方差、删失率和最小有意义效应；正式样本量由目标功效、显著性水平、效应量、组数及失访/run-out率计算，不预填固定数量。
 
 ### 加载条件
-按证据匹配应力幅或ΔK、应力比、频率、温度、环境、run-out和LCF/HCF/VHCF或裂纹扩展区间，并在注册后固定。
+{loading_protocol}
 
 ### 表征方法
 根据假设选择XRD残余应力、EBSD组织、表面轮廓、裂纹复制/DIC、SEM断口；只有缺陷是问题变量时才加入micro-CT。
