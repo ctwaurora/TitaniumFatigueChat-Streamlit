@@ -754,6 +754,18 @@ def build_unified_rag(
 
 
 def load_unified_documents(base_dir: Path = BASE_DIR) -> List[Dict[str, Any]]:
+    from src.cloud_evidence_bundle import (
+        cloud_bundle_required,
+        require_cloud_bundle,
+    )
+
+    if cloud_bundle_required(base_dir):
+        bundle = require_cloud_bundle(base_dir)
+        assert bundle is not None
+        return [
+            dict(bundle.document_lookup[doc_id])
+            for doc_id in bundle.document_ids
+        ]
     paths = rag_paths(base_dir)
     manifest = _read_json(paths["manifest"], {})
     if (
@@ -796,11 +808,30 @@ def _load_vector_cached(base_dir_text: str, version: str) -> Tuple[Any, np.ndarr
 
 
 def _rag_version(base_dir: Path) -> str:
+    from src.cloud_evidence_bundle import (
+        cloud_bundle_required,
+        require_cloud_bundle,
+    )
+
+    if cloud_bundle_required(base_dir):
+        bundle = require_cloud_bundle(base_dir)
+        assert bundle is not None
+        return bundle.dataset_version
     manifest = _read_json(rag_paths(base_dir)["manifest"], {})
     return str(manifest.get("built_at") or "missing")
 
 
 def _load_documents_by_ids(base_dir: Path, document_ids: Sequence[str]) -> List[Dict[str, Any]]:
+    from src.cloud_evidence_bundle import (
+        cloud_bundle_required,
+        cloud_documents_by_ids,
+        require_cloud_bundle,
+    )
+
+    if cloud_bundle_required(base_dir):
+        bundle = require_cloud_bundle(base_dir)
+        assert bundle is not None
+        return cloud_documents_by_ids(document_ids, bundle)
     wanted = list(dict.fromkeys(str(value) for value in document_ids if value))
     lookup = rag_paths(base_dir)["document_lookup"]
     if not wanted or not lookup.exists():
@@ -821,6 +852,16 @@ def _load_documents_by_ids(base_dir: Path, document_ids: Sequence[str]) -> List[
 
 
 def _bm25_scores(query: str, base_dir: Path) -> Dict[str, float]:
+    from src.cloud_evidence_bundle import (
+        cloud_bm25_scores,
+        cloud_bundle_required,
+        require_cloud_bundle,
+    )
+
+    if cloud_bundle_required(base_dir):
+        bundle = require_cloud_bundle(base_dir)
+        assert bundle is not None
+        return cloud_bm25_scores(expand_question(query), bundle)
     payload = _load_bm25_cached(str(Path(base_dir).resolve()), _rag_version(base_dir))
     terms = _tokens(expand_question(query))
     n_docs = len(payload.get("document_ids") or [])
@@ -853,6 +894,16 @@ def _bm25_scores(query: str, base_dir: Path) -> Dict[str, float]:
 
 
 def _vector_scores(query: str, base_dir: Path) -> Dict[str, float]:
+    from src.cloud_evidence_bundle import (
+        cloud_bundle_required,
+        cloud_vector_scores,
+        require_cloud_bundle,
+    )
+
+    if cloud_bundle_required(base_dir):
+        bundle = require_cloud_bundle(base_dir)
+        assert bundle is not None
+        return cloud_vector_scores(expand_question(query), bundle)
     model, embeddings, ids = _load_vector_cached(
         str(Path(base_dir).resolve()), _rag_version(base_dir)
     )

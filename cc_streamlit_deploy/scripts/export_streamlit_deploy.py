@@ -43,7 +43,10 @@ EXCLUDED_CODE_FILES = {
 }
 
 CONFIG_FILES = ("config/task_profile.yaml",)
-SCRIPT_FILES = ("scripts/export_streamlit_deploy.py",)
+SCRIPT_FILES = (
+    "scripts/export_streamlit_deploy.py",
+    "scripts/export_cloud_evidence_bundle.py",
+)
 
 DATA_FILES = (
     "data/literature_database.csv",
@@ -81,8 +84,9 @@ FORBIDDEN_PART_SEQUENCES = {
     ("data", "tasks"),
     ("data", "deep_read"),
 }
-FORBIDDEN_SUFFIXES = {".pdf", ".pyc", ".pyo", ".jsonl", ".parquet"}
+FORBIDDEN_SUFFIXES = {".pdf", ".pyc", ".pyo", ".jsonl", ".parquet", ".npy", ".npz"}
 MAX_FILE_SIZE = 5 * 1024 * 1024
+CLOUD_BUNDLE_MAX_FILE_SIZE = 95 * 1024 * 1024
 
 SECRET_PATTERNS = (
     ("API token", re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b")),
@@ -268,7 +272,12 @@ def _contains_forbidden_parts(relative: Path) -> bool:
         width = len(sequence)
         if any(lowered[index:index + width] == sequence for index in range(len(lowered) - width + 1)):
             return True
-    return relative.suffix.lower() in FORBIDDEN_SUFFIXES
+    suffix = relative.suffix.lower()
+    if lowered[:2] == ("data", "cloud_bundle"):
+        if len(lowered) == 2:
+            return False
+        return suffix not in {".json", ".parquet", ".npy", ".npz"}
+    return suffix in FORBIDDEN_SUFFIXES
 
 
 def scan_deployment(output_dir: Path) -> List[Tuple[str, str]]:
@@ -281,7 +290,13 @@ def scan_deployment(output_dir: Path) -> List[Tuple[str, str]]:
             continue
         if not path.is_file():
             continue
-        if path.stat().st_size > MAX_FILE_SIZE:
+        size_limit = (
+            CLOUD_BUNDLE_MAX_FILE_SIZE
+            if tuple(part.lower() for part in relative.parts[:2])
+            == ("data", "cloud_bundle")
+            else MAX_FILE_SIZE
+        )
+        if path.stat().st_size > size_limit:
             violations.append((relative_name, "file exceeds 5 MiB"))
             continue
         try:
@@ -325,6 +340,16 @@ def export_deployment(
     destination = clean_output_directory(project, output_dir)
     copy_allowlist(project, destination)
     write_empty_cloud_library(project, destination)
+    try:
+        from scripts.export_cloud_evidence_bundle import export_cloud_evidence_bundle
+    except ModuleNotFoundError:
+        from export_cloud_evidence_bundle import export_cloud_evidence_bundle
+
+    export_cloud_evidence_bundle(
+        project,
+        destination / "data" / "cloud_bundle",
+        source_commit=source_commit(project),
+    )
     write_deploy_version(project, destination)
 
     violations = scan_deployment(destination)

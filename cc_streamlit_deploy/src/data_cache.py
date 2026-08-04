@@ -24,6 +24,13 @@ def _csv_path(name: str) -> Path:
 
 @st.cache_data(show_spinner="加载文献库...")
 def load_literature_database() -> pd.DataFrame:
+    from src.cloud_evidence_bundle import (
+        cloud_bundle_required,
+        load_cloud_bundle,
+    )
+
+    if cloud_bundle_required(BASE_DIR):
+        return load_cloud_bundle(BASE_DIR).formal_literature.copy()
     path = _csv_path("literature_database.csv")
     if path.exists():
         return pd.read_csv(path, encoding="utf-8-sig", on_bad_lines="skip")
@@ -41,6 +48,13 @@ def load_candidate_papers() -> pd.DataFrame:
 @st.cache_data(show_spinner="加载证据片段...")
 def load_evidence_snippets() -> pd.DataFrame:
     """Load only canonical trusted evidence; legacy CSV is never a fallback."""
+    from src.cloud_evidence_bundle import (
+        cloud_bundle_required,
+        load_cloud_bundle,
+    )
+
+    if cloud_bundle_required(BASE_DIR):
+        return load_cloud_bundle(BASE_DIR).evidence_records.copy()
     from src.stage1_store import load_trusted_evidence_rows
 
     return pd.DataFrame(load_trusted_evidence_rows())
@@ -210,6 +224,23 @@ def load_llm_client() -> Optional[Any]:
         return None
 
 
+@st.cache_resource(show_spinner="加载云端正式知识库...")
+def load_cloud_bundle_cached(base_dir_text: str, dataset_version: str):
+    """Cache one checksum-validated read-only Cloud Evidence Bundle."""
+    del dataset_version
+    from src.cloud_evidence_bundle import load_cloud_bundle
+
+    return load_cloud_bundle(Path(base_dir_text))
+
+
+@st.cache_resource(show_spinner=False)
+def load_skill_router_cached():
+    """Cache the immutable four-Skill router module."""
+    from src.research_skills import router
+
+    return router
+
+
 # ── 缓存失效触发 ────────────────────────────────────────────────────────
 
 def _read_json(path: Path) -> Dict[str, Any]:
@@ -369,7 +400,13 @@ def get_canonical_literature_counts(base_dir: Path = BASE_DIR) -> Dict[str, Any]
 def _stats_signature(base_dir: Path = BASE_DIR) -> str:
     # Constant-time cache key: expensive crawls are reserved for explicit
     # refresh commands that rewrite this durable snapshot.
-    paths = [base_dir / "data" / "system" / "corpus_statistics.json"]
+    from src.cloud_evidence_bundle import cloud_bundle_required, cloud_bundle_root
+
+    paths = (
+        [cloud_bundle_root(base_dir) / "manifest.json"]
+        if cloud_bundle_required(base_dir)
+        else [base_dir / "data" / "system" / "corpus_statistics.json"]
+    )
     payload = []
     for path in paths:
         try:
@@ -383,6 +420,32 @@ def _stats_signature(base_dir: Path = BASE_DIR) -> str:
 @st.cache_data
 def _get_system_stats_cached(signature: str) -> Dict[str, Any]:
     """Read canonical literature counts; signature invalidates cross-process writes."""
+    from src.cloud_evidence_bundle import cloud_bundle_required, load_cloud_bundle
+
+    if cloud_bundle_required(BASE_DIR):
+        bundle = load_cloud_bundle(BASE_DIR)
+        manifest = bundle.manifest
+        return {
+            "n_papers": int(manifest["formal_literature_count"]),
+            "unique_literature_count": int(manifest["formal_literature_count"]),
+            "active_canonical_primary_record_count": int(
+                manifest["formal_literature_count"]
+            ),
+            "formal_indexed_count": int(manifest["formal_literature_count"]),
+            "indexed_count": int(manifest["formal_rag_count"]),
+            "evidence_record_count": int(manifest["evidence_record_count"]),
+            "condition_evidence_record_count": int(
+                manifest["condition_evidence_record_count"]
+            ),
+            "formula_record_count": int(manifest["formula_record_count"]),
+            "rag_chunk_count": int(manifest["rag_chunk_count"]),
+            "traceable_literature_count": int(
+                manifest["traceable_literature_count"]
+            ),
+            "local_pdf_file_count": 0,
+            "storage_mode": "CLOUD_READ_ONLY",
+            "dataset_version": str(manifest["dataset_version"]),
+        }
     canonical = get_canonical_literature_counts(BASE_DIR)
     return {
         # Backward-compatible name now points to canonical unique literature.
@@ -411,6 +474,13 @@ def _file_version(*paths: Path) -> str:
 
 
 def literature_formula_version(base_dir: Path = BASE_DIR) -> str:
+    from src.cloud_evidence_bundle import (
+        cloud_bundle_required,
+        load_cloud_bundle,
+    )
+
+    if cloud_bundle_required(base_dir):
+        return load_cloud_bundle(base_dir).dataset_version
     snapshot = base_dir / "data/system/corpus_statistics.json"
     manifest = base_dir / "data/paper_manifest.jsonl"
     return _file_version(snapshot, manifest)
@@ -418,9 +488,75 @@ def literature_formula_version(base_dir: Path = BASE_DIR) -> str:
 
 @st.cache_data(show_spinner="加载公式索引…")
 def load_literature_formulas_cached(base_dir_text: str, dataset_version: str):
+    from src.cloud_evidence_bundle import (
+        cloud_bundle_required,
+        cloud_records,
+        load_cloud_bundle,
+    )
+
+    base_dir = Path(base_dir_text)
+    if cloud_bundle_required(base_dir):
+        from src.literature_formula_library import LITERATURE_FORMULA_SOURCE
+
+        bundle = load_cloud_bundle(base_dir)
+        papers = {
+            str(row.get("paper_id") or ""): row
+            for row in cloud_records(bundle.formal_literature)
+        }
+        output = []
+        for row in cloud_records(bundle.formula_records):
+            paper = papers.get(str(row.get("paper_id") or ""), {})
+            equation = str(row.get("equation") or "")
+            lower = equation.casefold()
+            formula_type = (
+                "裂纹扩展"
+                if "da/dn" in lower or "paris" in lower
+                else "S-N"
+                if "nf" in lower or "basquin" in lower
+                else "缺陷疲劳"
+                if "area" in lower or "murakami" in lower
+                else "其他"
+            )
+            output.append(
+                {
+                    "formula_id": row.get("formula_id"),
+                    "source_type": LITERATURE_FORMULA_SOURCE,
+                    "paper_id": row.get("paper_id"),
+                    "paper_title": paper.get("title") or "题名未记录",
+                    "authors_year": (
+                        f"{paper.get('authors') or '作者未记录'}，"
+                        f"{paper.get('year') or '年份未记录'}"
+                    ),
+                    "doi": paper.get("doi") or "未记录",
+                    "page_number": row.get("page_number"),
+                    "section": row.get("section") or "未分类",
+                    "equation_number": "",
+                    "original_formula": equation,
+                    "normalized_formula": equation,
+                    "normalized_latex": equation,
+                    "context_before_after": row.get("short_excerpt")
+                    or row.get("claim")
+                    or "",
+                    "symbol_definitions": [row.get("parameters") or "未报告"],
+                    "symbol_units": [row.get("units") or "未报告"],
+                    "parameter_values_units": [row.get("units") or "未报告"],
+                    "formula_type": formula_type,
+                    "formula_purpose": row.get("claim") or "正式RAG公式证据",
+                    "applicable_conditions": [
+                        row.get("applicable_conditions") or "未报告"
+                    ],
+                    "data_source": "cloud_bundle:formula_records.parquet",
+                    "author_scope": "按公式证据片段报告",
+                    "author_limitations": "不得超出正式证据适用条件",
+                    "evidence_status": "已确认",
+                    "manual_review_status": "CLOUD_FORMAL_RAG",
+                    "raw_review_status": "CLOUD_FORMAL_RAG",
+                }
+            )
+        return output
     from src.literature_formula_library import load_literature_formulas
 
-    return load_literature_formulas(Path(base_dir_text))
+    return load_literature_formulas(base_dir)
 
 
 def get_system_stats_cached() -> Dict[str, Any]:

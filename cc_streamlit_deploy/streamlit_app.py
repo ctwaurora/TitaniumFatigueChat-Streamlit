@@ -43,6 +43,10 @@ from src.app_auth import require_authentication
 if not require_authentication(st):
     st.stop()
 
+from src.cloud_evidence_bundle import cloud_bundle_status
+
+_CLOUD_BUNDLE_STATUS = cloud_bundle_status(BASE_DIR)
+
 
 @st.cache_resource(show_spinner=False)
 def _start_local_pdf_watcher(base_dir_text: str) -> bool:
@@ -55,7 +59,11 @@ def _start_local_pdf_watcher(base_dir_text: str) -> bool:
         return False
 
 
-_PDF_WATCHER_STARTED = _start_local_pdf_watcher(str(BASE_DIR))
+_PDF_WATCHER_STARTED = (
+    False
+    if _CLOUD_BUNDLE_STATUS["required"]
+    else _start_local_pdf_watcher(str(BASE_DIR))
+)
 
 
 @st.cache_resource(show_spinner=False)
@@ -83,7 +91,11 @@ def _start_search_index_prewarm(base_dir_text: str) -> threading.Thread:
     return thread
 
 
-_SEARCH_PREWARM_THREAD = _start_search_index_prewarm(str(BASE_DIR))
+_SEARCH_PREWARM_THREAD = (
+    _start_search_index_prewarm(str(BASE_DIR))
+    if not _CLOUD_BUNDLE_STATUS["required"] or _CLOUD_BUNDLE_STATUS["ready"]
+    else None
+)
 
 from src.interactive_modules import (
     EvidenceRelationExplorer,
@@ -1898,6 +1910,12 @@ def _render_smart_search_analysis_fragment() -> None:
                 args=(mode,),
             )
     st.caption(f"当前模式：{MODES[current_mode]['label']}")
+    cloud_blocked = (
+        _CLOUD_BUNDLE_STATUS["required"]
+        and not _CLOUD_BUNDLE_STATUS["ready"]
+    )
+    if cloud_blocked:
+        st.error("云端正式知识库未成功加载，当前禁止生成科研结论。")
     action = st.columns([1, 2, 1])[1]
     analyze_clicked = action.button(
         "🔍 开始分析",
@@ -1905,6 +1923,7 @@ def _render_smart_search_analysis_fragment() -> None:
         use_container_width=True,
         key="run_analysis_fragment_btn",
         on_click=_mark_smart_search_received,
+        disabled=cloud_blocked,
     )
     if analyze_clicked:
         current_question = st.session_state.get("user_question", "").strip()
@@ -2224,14 +2243,28 @@ with st.sidebar:
     )
 
     from src.data_cache import get_system_stats_cached
-    stats = get_system_stats_cached()
+    if _CLOUD_BUNDLE_STATUS["required"] and not _CLOUD_BUNDLE_STATUS["ready"]:
+        stats = {
+            "formal_indexed_count": 0,
+            "indexed_count": 0,
+            "evidence_record_count": 0,
+            "condition_evidence_record_count": 0,
+            "formula_record_count": 0,
+            "local_pdf_file_count": 0,
+            "traceable_literature_count": 0,
+        }
+    else:
+        stats = get_system_stats_cached()
     st.caption("正式文献库")
     st.metric("正式文献", stats["formal_indexed_count"])
-    st.metric("正式 RAG", stats["formal_indexed_count"])
+    st.metric("正式 RAG", stats.get("indexed_count", stats["formal_indexed_count"]))
     st.metric("EvidenceRecord", stats["evidence_record_count"])
     st.metric("ConditionEvidenceRecord", stats.get("condition_evidence_record_count", 0))
     st.metric("公式", stats.get("formula_record_count", 0))
-    st.metric("本地有效 PDF", stats["local_pdf_file_count"])
+    if _CLOUD_BUNDLE_STATUS["required"]:
+        st.metric("可追溯文献", stats.get("traceable_literature_count", 0))
+    else:
+        st.metric("本地有效 PDF", stats["local_pdf_file_count"])
 
     st.divider()
     st.caption("⚠️ 系统生成的是 candidate hypothesis，不得声称已被证明。")

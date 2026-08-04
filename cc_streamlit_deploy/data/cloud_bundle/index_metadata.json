@@ -1,0 +1,15 @@
+{
+  "schema_version": "cloud-evidence-bundle-1.0",
+  "document_count": 50287,
+  "vocabulary_size": 16000,
+  "vector_dimensions": 96,
+  "bm25": {
+    "k1": 1.5,
+    "b": 0.75,
+    "average_document_length": 34.504703521728516
+  },
+  "vector": {
+    "method": "tfidf_truncated_svd_cosine",
+    "dtype": "float16"
+  }
+}

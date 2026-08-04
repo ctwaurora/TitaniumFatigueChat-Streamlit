@@ -142,6 +142,15 @@ def validate_generated_answer(answer: str, question: str, module: str) -> dict[s
 
 
 def smart_search_dataset_version(base_dir: Path) -> str:
+    from src.cloud_evidence_bundle import (
+        cloud_bundle_required,
+        require_cloud_bundle,
+    )
+
+    if cloud_bundle_required(base_dir):
+        bundle = require_cloud_bundle(base_dir)
+        assert bundle is not None
+        return bundle.dataset_version
     parts = []
     for relative in ("data/rag/manifest.json", "data/system/corpus_statistics.json"):
         path = Path(base_dir) / relative
@@ -378,7 +387,43 @@ def run_smart_search(
     progress_callback: ProgressCallback | None = None,
     module: str = "research_analysis",
 ) -> dict[str, Any]:
+    from src.cloud_evidence_bundle import (
+        FAIL_CLOSED_MESSAGE,
+        cloud_bundle_status,
+    )
+
     started = time.perf_counter()
+    bundle_status = cloud_bundle_status(base_dir)
+    if bundle_status["required"] and not bundle_status["ready"]:
+        elapsed = round(time.perf_counter() - started, 4)
+        return {
+            "answer": FAIL_CLOSED_MESSAGE,
+            "first_stage": {
+                "retrieval_scope": "CLOUD_BUNDLE_FAIL_CLOSED",
+                "retrieved_paper_count": 0,
+                "evidence_count": 0,
+                "elapsed_seconds": elapsed,
+            },
+            "research_result": {
+                "supporting_evidence": [],
+                "counter_evidence": [],
+                "condition_dependent_evidence": [],
+                "retrieved_evidence_pool": [],
+                "insufficient": True,
+            },
+            "query_understanding": {},
+            "skill_output": {
+                "skill_name": "cloud_bundle_fail_closed",
+                "quality_gate": {"passed": False},
+            },
+            "diagnostics": {
+                "total_elapsed_seconds": elapsed,
+                "cloud_bundle_ready": False,
+                "cloud_bundle_error": bundle_status.get("error"),
+                "llm_executed": False,
+                "fail_closed": True,
+            },
+        }
     started_epoch_ms = time.time_ns() / 1_000_000
     if progress_callback:
         progress_callback({"stage": "UNDERSTANDING", "message": "正在识别查询意图与主题。"})
@@ -421,19 +466,28 @@ def run_smart_search(
             str(Path(base_dir).resolve()), dataset_version, effective, query_frame_hash, top_k
         )
     )
-    try:
+    if bundle_status["required"] and bundle_status["ready"]:
+        from src.cloud_evidence_bundle import cloud_records, load_cloud_bundle
+
+        cloud_bundle = load_cloud_bundle(base_dir)
         manifest = {
-            row["paper_id"]: row
-            for row in (
-                json.loads(line)
-                for line in (Path(base_dir) / "data" / "paper_manifest.jsonl")
-                .read_text(encoding="utf-8")
-                .splitlines()
-                if line.strip()
-            )
+            str(row.get("paper_id") or ""): row
+            for row in cloud_records(cloud_bundle.formal_literature)
         }
-    except (OSError, json.JSONDecodeError, KeyError):
-        manifest = {}
+    else:
+        try:
+            manifest = {
+                row["paper_id"]: row
+                for row in (
+                    json.loads(line)
+                    for line in (Path(base_dir) / "data" / "paper_manifest.jsonl")
+                    .read_text(encoding="utf-8")
+                    .splitlines()
+                    if line.strip()
+                )
+            }
+        except (OSError, json.JSONDecodeError, KeyError):
+            manifest = {}
     for key in (
         "supporting_evidence", "counter_evidence", "condition_dependent_evidence",
         "retrieved_evidence_pool",
@@ -509,7 +563,12 @@ def run_smart_search(
             }
         )
     parsed_entities = resolve_question_entities(question)
-    skill = get_research_skill(module)
+    try:
+        from src.data_cache import load_skill_router_cached
+
+        skill = load_skill_router_cached().get_research_skill(module)
+    except Exception:
+        skill = get_research_skill(module)
     skill_input = _build_skill_input(
         question, parsed_entities, result, dataset_version
     )

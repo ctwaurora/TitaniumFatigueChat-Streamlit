@@ -1,5 +1,5 @@
 TitaniumFatigueChat Streamlit deployment manifest
-file_count=135
+file_count=152
 
 .gitignore
 .streamlit/config.toml
@@ -7,6 +7,21 @@ file_count=135
 app.py
 config/task_profile.yaml
 data/candidate_papers.csv
+data/cloud_bundle/bm25_document_frequency.npy
+data/cloud_bundle/bm25_document_lengths.npy
+data/cloud_bundle/bm25_index.npz
+data/cloud_bundle/condition_evidence_records.parquet
+data/cloud_bundle/evidence_records.parquet
+data/cloud_bundle/formal_literature.parquet
+data/cloud_bundle/formula_records.parquet
+data/cloud_bundle/index_document_ids.json
+data/cloud_bundle/index_metadata.json
+data/cloud_bundle/index_vocabulary.json
+data/cloud_bundle/manifest.json
+data/cloud_bundle/rag_chunks.parquet
+data/cloud_bundle/vector_components.npy
+data/cloud_bundle/vector_embeddings.npy
+data/cloud_bundle/vector_idf.npy
 data/condition_evidence_dataset.csv
 data/conflict_claims.csv
 data/domain_dictionary.csv
@@ -27,6 +42,7 @@ DEPLOY_STREAMLIT_COMMUNITY_CLOUD.md
 DEPLOY_VERSION.json
 README.md
 requirements.txt
+scripts/export_cloud_evidence_bundle.py
 scripts/export_streamlit_deploy.py
 skills/__init__.py
 skills/card_skill.py
@@ -52,6 +68,7 @@ src/auto_oa_pipeline.py
 src/baseline_ablation_report.py
 src/benchmark.py
 src/case_study.py
+src/cloud_evidence_bundle.py
 src/condition_evidence.py
 src/condition_mechanism_map.py
 src/corpus_expansion.py
