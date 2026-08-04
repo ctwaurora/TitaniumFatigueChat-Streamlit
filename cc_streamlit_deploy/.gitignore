@@ -55,6 +55,8 @@ logs/
 *.rar
 *.jsonl
 *.parquet
+!data/cloud_bundle/
+!data/cloud_bundle/*.parquet
 *.h5
 *.hdf5
 *.pb
