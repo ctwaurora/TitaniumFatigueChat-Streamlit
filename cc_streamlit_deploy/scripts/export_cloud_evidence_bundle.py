@@ -109,6 +109,12 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _write_utf8_lf(path: Path, text: str) -> None:
+    """Write checksum-stable text without platform newline translation."""
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    path.write_bytes(normalized.encode("utf-8"))
+
+
 def _source_commit(project_root: Path) -> str:
     completed = subprocess.run(
         ["git", "rev-parse", "HEAD"],
@@ -160,13 +166,13 @@ def _build_indexes(rag_rows: list[dict[str, Any]], output_dir: Path) -> list[str
     sparse.save_npz(output_dir / "bm25_index.npz", counts, compressed=True)
     np.save(output_dir / "bm25_document_lengths.npy", lengths, allow_pickle=False)
     np.save(output_dir / "bm25_document_frequency.npy", document_frequency, allow_pickle=False)
-    (output_dir / "index_document_ids.json").write_text(
+    _write_utf8_lf(
+        output_dir / "index_document_ids.json",
         json.dumps(document_ids, ensure_ascii=False, separators=(",", ":")),
-        encoding="utf-8",
     )
-    (output_dir / "index_vocabulary.json").write_text(
+    _write_utf8_lf(
+        output_dir / "index_vocabulary.json",
         json.dumps(vocabulary, ensure_ascii=False, separators=(",", ":")),
-        encoding="utf-8",
     )
 
     transformer = TfidfTransformer(norm="l2")
@@ -197,9 +203,9 @@ def _build_indexes(rag_rows: list[dict[str, Any]], output_dir: Path) -> list[str
             "dtype": "float16",
         },
     }
-    (output_dir / "index_metadata.json").write_text(
+    _write_utf8_lf(
+        output_dir / "index_metadata.json",
         json.dumps(index_metadata, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
     )
     return [
         "bm25_index.npz",
@@ -463,9 +469,9 @@ def export_cloud_evidence_bundle(
             "maximum_rag_excerpt_characters": MAX_RAG_EXCERPT,
         },
     }
-    (destination / "manifest.json").write_text(
+    _write_utf8_lf(
+        destination / "manifest.json",
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
     )
     return manifest
 

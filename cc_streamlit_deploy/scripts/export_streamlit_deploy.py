@@ -26,6 +26,7 @@ ROOT_FILES = (
     "app.py",
     "requirements.txt",
     ".gitignore",
+    ".gitattributes",
     "README.md",
     "DEPLOY_STREAMLIT_COMMUNITY_CLOUD.md",
 )

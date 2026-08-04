@@ -1,6 +1,6 @@
 {
-  "source_commit": "f2dd0eaf40c21f25ee6b47197896028a7cce2d4e",
-  "export_time": "2026-08-04T19:21:44+00:00",
-  "deploy_manifest_hash": "3f4d72cbe59aa733413cf4b206e4caa783d5e2aeee1dfe7f374139b3412117d2",
+  "source_commit": "c1e57ad524415eb3d26928222002ff727c4dcd2e",
+  "export_time": "2026-08-04T19:39:40+00:00",
+  "deploy_manifest_hash": "5c21b6e80b8d4dfb6947adbcec23a223e389b87004f59cfef64224ac847319d6",
   "application_version": "3.2.0-cloud-oa"
 }

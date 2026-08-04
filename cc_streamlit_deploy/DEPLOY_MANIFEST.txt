@@ -1,6 +1,7 @@
 TitaniumFatigueChat Streamlit deployment manifest
-file_count=152
+file_count=153
 
+.gitattributes
 .gitignore
 .streamlit/config.toml
 .streamlit/secrets.example.toml
