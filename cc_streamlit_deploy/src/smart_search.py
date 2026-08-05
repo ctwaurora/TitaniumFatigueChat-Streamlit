@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.answer_quality import precise_refusal, validate_answer_quality
+from src.claim_verification import apply_claim_guard
 from src.api_keys import get_deepseek_settings
 from src.deepseek_client import DeepSeekClient, DeepSeekRequestError
 from src.evidence_bundle import build_evidence_bundle
@@ -20,6 +21,8 @@ from src.query_understanding import understand_user_query
 from src.research_skills.common import is_noisy_evidence_excerpt
 from src.research_skills.contracts import SkillInput
 from src.research_skills.router import get_research_skill
+from src.feature_flags import feature_enabled
+from src.task_telemetry import SkillRunTelemetry
 from src.unified_rag import answer_research_question
 from src.variable_mapper import extract_variable_pair
 
@@ -393,6 +396,7 @@ def run_smart_search(
     )
 
     started = time.perf_counter()
+    telemetry = SkillRunTelemetry() if feature_enabled("TFC_SKILL_TELEMETRY", default=True) else None
     bundle_status = cloud_bundle_status(base_dir)
     if bundle_status["required"] and not bundle_status["ready"]:
         elapsed = round(time.perf_counter() - started, 4)
@@ -454,6 +458,8 @@ def run_smart_search(
         }
     normalization_complete_epoch_ms = time.time_ns() / 1_000_000
     dataset_version = smart_search_dataset_version(base_dir)
+    if telemetry:
+        telemetry.transition("RETRIEVING")
     retrieval_started = time.perf_counter()
     retrieval_started_epoch_ms = time.time_ns() / 1_000_000
     # All four skills require support, counter and condition-dependent evidence.
@@ -572,6 +578,12 @@ def run_smart_search(
     skill_input = _build_skill_input(
         question, parsed_entities, result, dataset_version
     )
+    if telemetry:
+        telemetry.count(
+            retrieved_papers=len(result.get("retrieved_papers") or []),
+            evidence=sum(len(result.get(key) or []) for key in ("supporting_evidence", "counter_evidence", "condition_dependent_evidence")),
+        )
+        telemetry.transition("VERIFYING")
 
     def validated_deterministic_fallback():
         fallback_output = skill.generate(skill_input)
@@ -587,6 +599,8 @@ def run_smart_search(
     synthesis = ""
     llm_call_count = 0
     settings = get_deepseek_settings()
+    if telemetry:
+        telemetry.transition("REASONING")
     if use_llm and settings.configured:
         try:
             from src.data_cache import load_llm_client
@@ -667,6 +681,12 @@ def run_smart_search(
         answer = precise_refusal(
             skill_output.skill_name, quality["failures"], skill_input.evidence_bundle
         )
+    claim_guard = {"enabled": False, "changed_claim_count": 0}
+    if feature_enabled("TFC_CLAIM_VERIFICATION", default=True):
+        answer, claim_guard = apply_claim_guard(answer, skill_input.evidence_bundle)
+    diagnostics["claim_guard"] = claim_guard
+    if telemetry:
+        telemetry.transition("PUBLISHING")
     answer += "\n\n" + evidence_markdown
     diagnostics["total_elapsed_seconds"] = round(time.perf_counter() - started, 4)
     diagnostics["stage_timestamps_epoch_ms"]["t10_final_answer"] = round(
@@ -679,6 +699,10 @@ def run_smart_search(
     diagnostics["identified_topics"] = result.get("identified_topics") or []
     diagnostics["evidence_bundle_paper_count"] = len(skill_input.evidence_bundle.get("papers") or [])
     diagnostics["plausible_formula_count"] = len(skill_input.evidence_bundle.get("formulas") or [])
+    if telemetry:
+        telemetry.count(model_calls=llm_call_count)
+        telemetry.transition("COMPLETED")
+        diagnostics["skill_run_telemetry"] = telemetry.as_dict()
     if progress_callback:
         progress_callback(
             {

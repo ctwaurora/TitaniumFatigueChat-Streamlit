@@ -53,7 +53,7 @@ PROFILES: dict[str, DomainProfile] = {
     "defect_size_life": DomainProfile(
         "defect_size_life", "缺陷尺寸与疲劳寿命",
         ("孔隙尺寸√area", "缺陷位置d/√area", "应力幅σa"), ("疲劳寿命Nf",),
-        "在可比的L-PBF Ti-6Al-4V条件内，较大的√area通常对应更短的疲劳寿命Nf，但尺寸效应受缺陷位置、表面状态、残余应力和HIP状态调节，不能解释为单一阈值。",
+        "在可比的L-PBF Ti-6Al-4V条件内，孔隙尺寸增大（即√area较大）通常对应更短的疲劳寿命Nf，但尺寸效应受缺陷位置、表面状态、残余应力和HIP状态调节，不能解释为单一阈值。",
         "√area增大使等效初始裂纹尺度和局部驱动力提高，起裂循环数减少；自由表面、拉伸残余应力和粗糙度可放大该效应，HIP闭合缺陷或压缩残余应力可削弱它。",
         "必须匹配材料批次、HIP/热处理、表面状态、σa、R、HCF/VHCF区间及run-out定义。",
         "同批次下√area与d/√area的独立贡献、交互项以及HCF/VHCF边界尚需配对验证。",

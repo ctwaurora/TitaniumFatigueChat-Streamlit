@@ -83,9 +83,9 @@ def is_noisy_evidence_excerpt(value: Any) -> bool:
 
 def bundle_prompt(value: SkillInput) -> str:
     """Return the compact EvidenceBundle supplied to a concrete Skill."""
-    import json
+    from src.evidence_compression import evidence_prompt_json
 
-    return json.dumps(value.evidence_bundle, ensure_ascii=False, separators=(",", ":"))
+    return evidence_prompt_json(value.evidence_bundle)
 
 
 def primary_citation(value: SkillInput, role: str = "SUPPORT") -> str:

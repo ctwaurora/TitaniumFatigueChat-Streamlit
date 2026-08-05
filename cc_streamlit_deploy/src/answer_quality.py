@@ -7,6 +7,8 @@ from typing import Any
 
 from src.research_topics import query_mentions_pores
 from src.research_skills.common import is_usable_formula_record
+from src.claim_verification import verify_answer_claims
+from src.feature_flags import feature_enabled
 
 
 COUNT_TALK = re.compile(r"(?:提供|检索到|召回|使用|共有|共检索)\s*\d+\s*(?:条|篇).{0,10}(?:证据|文献)")
@@ -230,6 +232,20 @@ def validate_answer_quality(
     if not any(term in answer for term in ("反向", "反证", "冲突", "相反")):
         failures.append("counter_evidence_not_addressed")
 
+    claim_verification = (
+        verify_answer_claims(answer, evidence_bundle)
+        if feature_enabled("TFC_CLAIM_VERIFICATION", default=True)
+        else {"passed": True, "disabled": True, "critical_failures": []}
+    )
+    if (
+        feature_enabled("TFC_CLAIM_VERIFICATION_STRICT", default=False)
+        and not claim_verification["passed"]
+    ):
+        failures.extend(
+            f"claim_verification:{failure}"
+            for failure in claim_verification["critical_failures"]
+        )
+
     return {
         "passed": not failures,
         "failures": failures,
@@ -239,6 +255,7 @@ def validate_answer_quality(
         "query_frame_checked": bool(frame),
         "formula_applicability_checked": True,
         "evidence_level_checked": True,
+        "claim_verification": claim_verification,
     }
 
 
