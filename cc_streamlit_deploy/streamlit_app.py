@@ -1944,8 +1944,10 @@ def _render_smart_search_analysis_fragment() -> None:
             progress = st.status("正在检索正式文献库", expanded=True)
             progress.write("正在核对支持和反向证据")
             progress.write("正在生成完整回答")
+            # Preserve the user's scientific claim for Skill routing and quality
+            # gates. run_smart_search performs its own guarded retrieval rewrite.
             answer_text = generate_comprehensive_answer(
-                effective_question, current_mode, use_llm=True,
+                current_question, current_mode, use_llm=True,
             )
             progress.update(label="分析完成", state="complete", expanded=False)
             st.session_state.answer = answer_text
@@ -2807,6 +2809,7 @@ elif current_page == "formula_explain":
     st.divider()
 
     from src.data_cache import load_literature_formulas_cached, literature_formula_version
+    from src.formula_validation import compare_confirmed_formulas
     literature_formulas = load_literature_formulas_cached(
         str(BASE_DIR), literature_formula_version(BASE_DIR)
     )
@@ -2863,6 +2866,18 @@ elif current_page == "formula_explain":
             f"待人工复核 {summary['pending_review']} 条；"
             f"图像或不可可靠解析 {summary['image_review_required']} 条。"
         )
+        comparison_question = st.text_input(
+            "公式比较问题",
+            placeholder="例如：比较短裂纹与长裂纹扩展公式的适用条件",
+            key="confirmed_formula_comparison_question",
+        )
+        if st.button(
+            "比较已确认公式",
+            type="primary",
+            disabled=not comparison_question.strip(),
+            key="compare_confirmed_formulas",
+        ):
+            st.markdown(compare_confirmed_formulas(comparison_question, literature_formulas))
         formula_df = pd.DataFrame(
             [formula_to_table_row(row) for row in filtered_formulas],
             columns=FORMULA_TABLE_FIELDS,

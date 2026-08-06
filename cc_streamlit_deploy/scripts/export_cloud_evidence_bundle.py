@@ -313,26 +313,56 @@ def export_cloud_evidence_bundle(
 
     formula_rows: list[dict[str, Any]] = []
     formula_counts: Counter[str] = Counter()
-    formula_source = project / "data/rag/formula_documents.jsonl"
-    for row in _read_jsonl(formula_source):
+    from src.literature_formula_library import load_literature_formulas
+
+    for row in load_literature_formulas(project):
         paper_id = str(row.get("paper_id") or "")
         if paper_id not in formal_ids:
             continue
         formula_counts[paper_id] += 1
         formula_rows.append(
             {
-                "formula_id": str(row.get("doc_id") or ""),
+                "formula_id": str(row.get("formula_id") or ""),
                 "paper_id": paper_id,
-                "equation": _clean_text(row.get("equation"), 800),
-                "parameters": _safe_scalar(row.get("parameters")),
-                "units": _safe_scalar(row.get("units")),
+                "equation": _clean_text(
+                    row.get("formula_expression")
+                    or row.get("original_formula")
+                    or row.get("normalized_formula"),
+                    800,
+                ),
+                "equation_number": str(row.get("equation_number") or ""),
+                "formula_family": str(row.get("formula_family") or ""),
+                "parameters": _safe_scalar(
+                    row.get("confirmed_variables")
+                    or row.get("symbol_definitions")
+                ),
+                "variable_definitions": _safe_scalar(
+                    row.get("confirmed_variables")
+                    or row.get("symbol_definitions")
+                ),
+                "units": _safe_scalar(
+                    row.get("confirmed_units") or row.get("symbol_units")
+                ),
                 "applicable_conditions": _safe_scalar(row.get("applicable_conditions")),
-                "claim": _clean_text(row.get("claim"), MAX_EVIDENCE_EXCERPT),
+                "claim": _clean_text(
+                    row.get("formula_purpose") or row.get("claim"),
+                    MAX_EVIDENCE_EXCERPT,
+                ),
                 "short_excerpt": _clean_text(
-                    row.get("original_text"), MAX_EVIDENCE_EXCERPT
+                    row.get("context_before_after") or row.get("original_text"),
+                    MAX_EVIDENCE_EXCERPT,
+                ),
+                "source_context": _clean_text(
+                    row.get("context_before_after") or row.get("original_text"),
+                    MAX_EVIDENCE_EXCERPT,
                 ),
                 "page_number": int(float(row.get("page_number") or 0)),
                 "section": _clean_text(row.get("section"), 160),
+                "review_status": str(row.get("raw_review_status") or ""),
+                "validation_status": str(row.get("validation_status") or ""),
+                "validation_basis": _clean_text(
+                    row.get("validation_basis"), 300
+                ),
                 "confidence": float(row.get("confidence") or 0),
             }
         )

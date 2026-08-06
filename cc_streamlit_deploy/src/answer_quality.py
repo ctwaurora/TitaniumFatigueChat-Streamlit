@@ -9,6 +9,7 @@ from src.research_topics import query_mentions_pores
 from src.research_skills.common import is_usable_formula_record
 from src.claim_verification import verify_answer_claims
 from src.feature_flags import feature_enabled
+from src.science_output_postprocessor import science_text_quality_audit
 
 
 COUNT_TALK = re.compile(r"(?:提供|检索到|召回|使用|共有|共检索)\s*\d+\s*(?:条|篇).{0,10}(?:证据|文献)")
@@ -46,6 +47,19 @@ def validate_answer_quality(
         failures.append("visible_evidence_count_talk")
     if any(term in answer for term in PLACEHOLDERS):
         failures.append("vague_placeholder")
+    text_quality = science_text_quality_audit(answer)
+    if not text_quality["passed"]:
+        failures.extend(
+            f"scientific_text_quality:{name}"
+            for name, values in (
+                ("duplicate_word", text_quality["duplicate_word_hits"]),
+                ("repeated_punctuation", text_quality["repeated_punctuation_hits"]),
+                ("raw_field_name", text_quality["raw_field_names"]),
+                ("raw_markdown_or_object", text_quality["raw_markdown_or_object_hits"]),
+                ("incomplete_sentence", text_quality["incomplete_sentence_lines"]),
+            )
+            if values
+        )
     for term in SKILL_REQUIREMENTS.get(skill_name, ()):
         if term not in answer:
             failures.append(f"missing_section_or_concept:{term}")
@@ -192,8 +206,15 @@ def validate_answer_quality(
             failures.append("hypothesis_missing_fittable_formula")
         if not all(term in answer for term in ("单位", "预测方向")):
             failures.append("hypothesis_missing_variable_units_or_direction")
+        variables = set(frame.get("independent_variables") or []) | set(frame.get("dependent_variables") or [])
+        if {"residual_stress", "microstructure"} <= variables:
+            for token in ("M0", "M1", "M2", "M3", "M4", "lα", "σres·lα", "σres·T"):
+                if token not in answer:
+                    failures.append(f"joint_hypothesis_missing:{token}")
+            if "并非文献原公式" not in answer:
+                failures.append("joint_candidate_models_mislabeled")
     if skill_name == "research_gap_skill":
-        if not any(term in answer for term in ("候选证据缺口", "真实研究空白", "本地文献库不足", "已有研究已经")):
+        if not any(term in answer for term in ("confirmed_gap", "candidate_evidence_gap", "coverage_gap", "false_gap", "候选证据缺口", "真实研究空白", "本地文献库不足", "已有研究已经")):
             failures.append("gap_status_not_classified")
         if "缺失条件" not in answer and "缺口矩阵" not in answer:
             failures.append("gap_condition_matrix_missing")
@@ -225,6 +246,17 @@ def validate_answer_quality(
             failures.append("experiment_markdown_tables_missing")
         if not any(term in answer for term in ("回归", "似然比", "置信区间", "生存分析", "统计模型")):
             failures.append("experiment_statistical_test_missing")
+        variables = set(frame.get("independent_variables") or []) | set(frame.get("dependent_variables") or [])
+        if {"residual_stress", "microstructure"} <= variables:
+            has_direct_interaction = any(
+                item.get("retrieval_subtask") == "residual_stress_microstructure_interaction_query"
+                and item.get("verified_evidence_role") == "DIRECT_SUPPORT"
+                for item in evidence_bundle.get("papers", [])
+                for item in item.get("principal_claims", [])
+            )
+            required_tier = "EVIDENCE-SUPPORTED DESIGN" if has_direct_interaction else "PROVISIONAL FALSIFICATION DESIGN"
+            if required_tier not in answer:
+                failures.append(f"experiment_design_tier_missing:{required_tier}")
     if "研究已经证明" in answer and any(term in answer for term in ("系统推断", "候选模型", "候选假设")):
         failures.append("system_inference_presented_as_fact")
     if "条件" not in answer and "适用范围" not in answer:
@@ -237,6 +269,8 @@ def validate_answer_quality(
         if feature_enabled("TFC_CLAIM_VERIFICATION", default=True)
         else {"passed": True, "disabled": True, "critical_failures": []}
     )
+    if claim_verification.get("misaligned_evidence_count"):
+        failures.append("claim_verification:evidence_role_mismatch")
     if (
         feature_enabled("TFC_CLAIM_VERIFICATION_STRICT", default=False)
         and not claim_verification["passed"]
@@ -256,6 +290,7 @@ def validate_answer_quality(
         "formula_applicability_checked": True,
         "evidence_level_checked": True,
         "claim_verification": claim_verification,
+        "scientific_text_quality": text_quality,
     }
 
 
@@ -269,11 +304,17 @@ def precise_refusal(skill_name: str, failures: list[str], evidence_bundle: dict[
         "应补充同材料状态、同载荷历史的直接文献与交互试验。\n\n"
         if skill_name == "hypothesis_generation_skill" else ""
     )
+    skill_label = {
+        "scientific_analysis_skill": "科研分析",
+        "research_gap_skill": "研究空白",
+        "hypothesis_generation_skill": "假设生成",
+        "experiment_design_skill": "实验验证方案",
+    }.get(skill_name, "当前科研模块")
     return (
         "## 直接结论\n\n"
         f"{query_context}当前证据不足以形成满足具体性与可证伪要求的科研答案。以下列出需要补充的文献或实验条件。\n\n"
         "## 当前不能确定的内容\n\n"
-        f"当前正式证据缺少或无法一致核对：{details}。需要补足这些证据后才能由 {skill_name} 继续生成。\n\n"
+        f"当前正式证据缺少或无法一致核对：{details}。需要补足这些证据后才能由{skill_label}继续生成。\n\n"
         "## 仍需补足的证据\n\n"
         f"{hypothesis_note}"
         "需要补充同材料状态、同疲劳阶段的匹配实验，核对公式参数及单位，并检索能够支持或推翻主结论的直接研究。"

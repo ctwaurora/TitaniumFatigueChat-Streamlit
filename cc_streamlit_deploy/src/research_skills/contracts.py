@@ -20,6 +20,8 @@ class SkillInput:
     previous_output: "SkillOutput | None" = None
     evidence_bundle: dict[str, Any] = field(default_factory=dict)
     query_frame: dict[str, Any] = field(default_factory=dict)
+    alternative_mechanism_evidence: list[dict[str, Any]] = field(default_factory=list)
+    supporting_context_evidence: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass

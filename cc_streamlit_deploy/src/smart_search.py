@@ -21,6 +21,7 @@ from src.query_understanding import understand_user_query
 from src.research_skills.common import is_noisy_evidence_excerpt
 from src.research_skills.contracts import SkillInput
 from src.research_skills.router import get_research_skill
+from src.science_output_postprocessor import postprocess_science_output, science_text_quality_audit
 from src.feature_flags import feature_enabled
 from src.task_telemetry import SkillRunTelemetry
 from src.unified_rag import answer_research_question
@@ -34,6 +35,20 @@ OUT_OF_SCOPE_PATTERN = re.compile(
     r"lithium[- ]?ion|battery|cathode|anode|electrolyte|photovoltaic|semiconductor",
     re.IGNORECASE,
 )
+
+_FORMULA_QUERY_FAMILIES = {
+    "paris": "Paris",
+    "walker": "Walker",
+    "nasgro": "NASGRO",
+    "forman": "Forman",
+    "murakami": "Murakami",
+    "basquin": "Basquin",
+    "coffin": "Coffin-Manson",
+    "goodman": "Goodman",
+    "swt": "SWT",
+    "el haddad": "El Haddad / Kitagawa-Takahashi",
+    "kitagawa": "El Haddad / Kitagawa-Takahashi",
+}
 
 ENTITY_LABELS = {
     "pore_size": "孔隙尺寸（√area）",
@@ -124,6 +139,84 @@ def resolve_question_entities(question: str) -> dict[str, Any]:
         "classification": classification,
         "specific": bool(independent and dependent),
     }
+
+
+@functools.lru_cache(maxsize=4)
+def _confirmed_formula_index(
+    base_dir_text: str, dataset_version: str
+) -> tuple[dict[str, Any], ...]:
+    from src.data_cache import load_literature_formulas_cached
+    from src.formula_validation import CONFIRMED, validate_formula_collection
+
+    rows = load_literature_formulas_cached(base_dir_text, dataset_version)
+    return tuple(
+        row
+        for row in validate_formula_collection(rows)
+        if row.get("validation_status") == CONFIRMED
+    )
+
+
+def _confirmed_formulas_for_query(
+    question: str,
+    *,
+    base_dir: Path,
+    dataset_version: str,
+) -> list[dict[str, Any]]:
+    query = " ".join(str(question or "").casefold().split())
+    requested = {
+        family for marker, family in _FORMULA_QUERY_FAMILIES.items() if marker in query
+    }
+    if not requested and any(
+        marker in query
+        for marker in ("裂纹扩展", "短裂纹", "长裂纹", "da/dn", "crack growth")
+    ):
+        requested.add("Paris")
+    if not requested:
+        return []
+
+    selected = [
+        row
+        for row in _confirmed_formula_index(
+            str(Path(base_dir).resolve()), dataset_version
+        )
+        if str(row.get("formula_family") or "") in requested
+    ]
+    output = []
+    for row in selected[:8]:
+        conditions = row.get("applicable_conditions") or []
+        output.append(
+            {
+                "doc_id": row.get("formula_id"),
+                "formula_id": row.get("formula_id"),
+                "paper_id": row.get("paper_id"),
+                "title": row.get("paper_title") or "题名未报告",
+                "page_number": row.get("page_number"),
+                "section": row.get("section") or "",
+                "index_type": "formula",
+                "equation": row.get("formula_expression")
+                or row.get("original_formula"),
+                "original_text": row.get("context_before_after") or "",
+                "parameters": row.get("confirmed_variables")
+                or row.get("symbol_definitions")
+                or [],
+                "units": row.get("confirmed_units")
+                or row.get("symbol_units")
+                or [],
+                "applicable_conditions": {
+                    "source_scope": conditions if isinstance(conditions, list) else conditions
+                },
+                "equation_number": row.get("equation_number") or "",
+                "review_status": "CONFIRMED",
+                "raw_review_status": "CONFIRMED",
+                "material_scope": row.get("material_scope") or "",
+                "fatigue_stage": row.get("fatigue_stage") or "",
+                "crack_stage": row.get("crack_stage") or "",
+                "stress_ratio_scope": row.get("stress_ratio_scope") or "",
+                "assumptions": row.get("confirmed_assumptions") or [],
+                "confidence": row.get("extraction_confidence") or 1.0,
+            }
+        )
+    return output
 
 
 def validate_generated_answer(answer: str, question: str, module: str) -> dict[str, Any]:
@@ -248,9 +341,11 @@ def _evidence_markdown(
     sufficiency = result["evidence_sufficiency"]
     lines = ["## 文献证据", ""]
     groups = (
-        ("支持证据", result["supporting_evidence"]),
-        ("反向证据", result["counter_evidence"]),
+        ("文献直接支持", result["supporting_evidence"]),
+        ("真正反证", result["counter_evidence"]),
         ("条件依赖证据", result["condition_dependent_evidence"]),
+        ("替代机制", result.get("alternative_mechanism_evidence") or []),
+        ("支持性背景", result.get("supporting_context_evidence") or []),
     )
     for label, rows in groups:
         lines.extend(["", f"### {label}", ""])
@@ -282,9 +377,10 @@ def _first_stage_markdown(
     selected: list[tuple[str, dict[str, Any]]] = []
     seen_papers: set[str] = set()
     groups = (
-        ("支持", result.get("supporting_evidence") or [], 3),
-        ("反向", result.get("counter_evidence") or [], 1),
+        ("直接支持", result.get("supporting_evidence") or [], 2),
+        ("真正反证", result.get("counter_evidence") or [], 1),
         ("条件依赖", result.get("condition_dependent_evidence") or [], 1),
+        ("替代机制", result.get("alternative_mechanism_evidence") or [], 1),
     )
     for label, rows, limit in groups:
         added = 0
@@ -351,21 +447,33 @@ def _build_skill_input(
     parsed_entities: dict[str, Any],
     result: dict[str, Any],
     dataset_version: str,
+    base_dir: Path | None = None,
 ) -> SkillInput:
     support = list(result.get("supporting_evidence") or [])
     counter = list(result.get("counter_evidence") or [])
     conditional = list(result.get("condition_dependent_evidence") or [])
-    retrieved = list(result.get("retrieved_evidence_pool") or support + counter + conditional)
+    alternative = list(result.get("alternative_mechanism_evidence") or [])
+    supporting_context = list(result.get("supporting_context_evidence") or [])
+    retrieved = list(result.get("retrieved_evidence_pool") or support + counter + conditional + alternative + supporting_context)
+    retrieved.extend(
+        _confirmed_formulas_for_query(
+            question,
+            base_dir=base_dir or Path.cwd(),
+            dataset_version=dataset_version,
+        )
+    )
     condition_evidence = [
         row for row in retrieved if row.get("experimental_conditions")
     ]
     query_frame = parse_query_frame(question, parsed_entities)
     bundle = build_evidence_bundle(
-        question, support, counter, conditional, retrieved_pool=retrieved,
+        question, support, counter, conditional,
+        alternative=alternative,
+        supporting_context=supporting_context,
+        retrieved_pool=retrieved,
         query_frame=query_frame.as_dict(), dataset_version=dataset_version,
     )
-    formula_ids = {row["formula_id"] for row in bundle.formulas}
-    formula_records = [row for row in retrieved if str(row.get("doc_id") or "") in formula_ids]
+    formula_records = list(bundle.formulas)
     return SkillInput(
         user_query=question,
         parsed_entities=parsed_entities,
@@ -378,6 +486,8 @@ def _build_skill_input(
         dataset_version=dataset_version,
         evidence_bundle=bundle.as_dict(),
         query_frame=query_frame.as_dict(),
+        alternative_mechanism_evidence=alternative,
+        supporting_context_evidence=supporting_context,
     )
 
 
@@ -412,6 +522,8 @@ def run_smart_search(
                 "supporting_evidence": [],
                 "counter_evidence": [],
                 "condition_dependent_evidence": [],
+                "alternative_mechanism_evidence": [],
+                "supporting_context_evidence": [],
                 "retrieved_evidence_pool": [],
                 "insufficient": True,
             },
@@ -496,7 +608,7 @@ def run_smart_search(
             manifest = {}
     for key in (
         "supporting_evidence", "counter_evidence", "condition_dependent_evidence",
-        "retrieved_evidence_pool",
+        "alternative_mechanism_evidence", "supporting_context_evidence", "retrieved_evidence_pool",
     ):
         for row in result.get(key) or []:
             paper = manifest.get(str(row.get("paper_id") or ""), {})
@@ -550,6 +662,8 @@ def run_smart_search(
                 "supporting_evidence",
                 "counter_evidence",
                 "condition_dependent_evidence",
+                "alternative_mechanism_evidence",
+                "supporting_context_evidence",
             )
         ),
         "preview_paper_count": first_stage_markdown.count("- **["),
@@ -576,18 +690,18 @@ def run_smart_search(
     except Exception:
         skill = get_research_skill(module)
     skill_input = _build_skill_input(
-        question, parsed_entities, result, dataset_version
+        question, parsed_entities, result, dataset_version, base_dir
     )
     if telemetry:
         telemetry.count(
             retrieved_papers=len(result.get("retrieved_papers") or []),
-            evidence=sum(len(result.get(key) or []) for key in ("supporting_evidence", "counter_evidence", "condition_dependent_evidence")),
+            evidence=sum(len(result.get(key) or []) for key in ("supporting_evidence", "counter_evidence", "condition_dependent_evidence", "alternative_mechanism_evidence", "supporting_context_evidence")),
         )
         telemetry.transition("VERIFYING")
 
     def validated_deterministic_fallback():
         fallback_output = skill.generate(skill_input)
-        fallback_answer = skill.render_output(fallback_output)
+        fallback_answer = postprocess_science_output(skill.render_output(fallback_output))
         fallback_quality = validate_answer_quality(
             fallback_answer,
             question=question,
@@ -626,7 +740,7 @@ def run_smart_search(
         except (DeepSeekRequestError, ValueError, OSError) as exc:
             diagnostics["llm_error"] = f"{type(exc).__name__}:{exc}"
     skill_output = skill.generate(skill_input, synthesis=synthesis)
-    answer = skill.render_output(skill_output)
+    answer = postprocess_science_output(skill.render_output(skill_output))
     quality = validate_answer_quality(
         answer,
         question=question,
@@ -649,7 +763,7 @@ def run_smart_search(
             )
             llm_call_count += 1
             repaired_output = skill.generate(skill_input, synthesis=repaired)
-            repaired_answer = skill.render_output(repaired_output)
+            repaired_answer = postprocess_science_output(skill.render_output(repaired_output))
             repaired_quality = validate_answer_quality(
                 repaired_answer,
                 question=question,
@@ -685,6 +799,8 @@ def run_smart_search(
     if feature_enabled("TFC_CLAIM_VERIFICATION", default=True):
         answer, claim_guard = apply_claim_guard(answer, skill_input.evidence_bundle)
     diagnostics["claim_guard"] = claim_guard
+    answer = postprocess_science_output(answer)
+    diagnostics["scientific_text_quality"] = science_text_quality_audit(answer)
     if telemetry:
         telemetry.transition("PUBLISHING")
     answer += "\n\n" + evidence_markdown

@@ -12,6 +12,13 @@ FORMULA_NOISE_TERMS = (
     "figure ", "fig. ", "table ", "international journal", "et al.",
     "representative ", "defect type", "batch ", "copyright",
 )
+ENTITY_LABEL_ALIASES = {
+    "短裂纹扩展速率": ("短裂纹扩展速率", "短裂纹da/dN", "短裂纹", "da/dN"),
+    "裂纹扩展速率": ("裂纹扩展速率", "da/dN"),
+    "疲劳寿命": ("疲劳寿命", "Nf"),
+    "残余应力": ("残余应力", "σres"),
+    "微观组织": ("微观组织", "显微组织", "α片层", "织构"),
+}
 
 
 def entity_labels(value: SkillInput) -> tuple[str, str]:
@@ -52,6 +59,9 @@ def evidence_counts(value: SkillInput) -> tuple[int, int, int]:
 
 def is_usable_formula_record(row: dict[str, Any]) -> bool:
     """Return whether an extracted record is compact enough to quote verbatim."""
+    status = str(row.get("evidence_status") or row.get("validation_status") or "").upper()
+    if status and status not in {"已确认", "CONFIRMED", "VERIFIED", "HUMAN_CONFIRMED"}:
+        return False
     equation = str(row.get("equation") or row.get("formula") or "").strip()
     lowered = equation.casefold()
     if not equation or len(equation) > 220:
@@ -89,15 +99,29 @@ def bundle_prompt(value: SkillInput) -> str:
 
 
 def primary_citation(value: SkillInput, role: str = "SUPPORT") -> str:
+    role_aliases = {
+        "SUPPORT": {"SUPPORT", "DIRECT_SUPPORT"},
+        "COUNTER": {"COUNTER", "DIRECT_COUNTER"},
+        "ALTERNATIVE_MECHANISM": {"ALTERNATIVE_MECHANISM"},
+        "CONDITION_DEPENDENT": {"CONDITION_DEPENDENT"},
+    }
+    accepted_roles = role_aliases.get(role, {role})
     citation_index = (value.evidence_bundle or {}).get("citation_index") or {}
     for paper in value.evidence_bundle.get("papers") or []:
         for claim in paper.get("principal_claims") or []:
-            if claim.get("role") != role:
+            if claim.get("role") not in accepted_roles:
                 continue
             if citation_index and str(claim.get("evidence_id")) not in citation_index:
                 continue
             return f"[Evidence ID：{claim.get('evidence_id')}，页码：{claim.get('page_number')}]"
-    rows = value.support_evidence if role == "SUPPORT" else value.counter_evidence
+    rows_by_role = {
+        "SUPPORT": value.support_evidence,
+        "COUNTER": value.counter_evidence,
+        "ALTERNATIVE_MECHANISM": value.alternative_mechanism_evidence,
+        "CONDITION_DEPENDENT": value.condition_dependent_evidence,
+        "SUPPORTING_CONTEXT": value.supporting_context_evidence,
+    }
+    rows = rows_by_role.get(role, [])
     for row in rows:
         evidence_id = str(row.get("doc_id") or row.get("evidence_id") or "")
         if citation_index and evidence_id not in citation_index:
@@ -106,12 +130,61 @@ def primary_citation(value: SkillInput, role: str = "SUPPORT") -> str:
     return ""
 
 
+def facet_evidence(value: SkillInput, subtask: str) -> list[dict[str, Any]]:
+    rows = [
+        *value.support_evidence,
+        *value.counter_evidence,
+        *value.condition_dependent_evidence,
+        *value.alternative_mechanism_evidence,
+        *value.supporting_context_evidence,
+    ]
+    return [row for row in rows if row.get("retrieval_subtask") == subtask]
+
+
+def facet_citation(value: SkillInput, subtask: str, *, direct_only: bool = True) -> str:
+    rows = facet_evidence(value, subtask)
+    if direct_only:
+        rows = [row for row in rows if row.get("verified_evidence_role") == "DIRECT_SUPPORT"]
+    for row in rows:
+        evidence_id = str(row.get("doc_id") or row.get("evidence_id") or "")
+        page = row.get("page_number")
+        if evidence_id and page:
+            return f"[Evidence ID：{evidence_id}，页码：{page}]"
+    return ""
+
+
+def has_direct_interaction_evidence(value: SkillInput) -> bool:
+    return any(
+        row.get("retrieval_subtask") == "residual_stress_microstructure_interaction_query"
+        and row.get("verified_evidence_role") == "DIRECT_SUPPORT"
+        for row in value.support_evidence
+    )
+
+
+def joint_short_crack_candidate_models() -> str:
+    return """以下均为系统提出、需要预注册和拟合的候选模型，并非文献原公式。
+
+M0（基础驱动力基线）：`log(da/dN)=β0+β1log(ΔKeff)+u_specimen`
+
+M1（残余应力模型）：`log(da/dN)=β0+β1log(ΔKeff)+β2σres+β3log(a)+β4R+u_specimen`
+
+M2（微观组织模型）：`log(da/dN)=β0+β1log(ΔKeff)+β2lα+β3T+β4log(a)+u_specimen`
+
+M3（加性联合模型）：`log(da/dN)=β0+β1log(ΔKeff)+β2σres+β3lα+β4T+β5log(a)+β6R+u_specimen`
+
+M4（交互模型）：`log(da/dN)=β0+β1log(ΔKeff)+β2σres+β3lα+β4T+β5σres·lα+β6σres·T+β7log(a)+β8R+u_specimen`
+
+变量定义：da/dN为裂纹扩展速率（m/cycle）；ΔKeff为有效应力强度因子范围（MPa√m）；σres为裂纹路径附近残余应力（MPa，拉应力为正）；lα为α片层宽度（µm）；T为预注册的织构或裂纹相对取向无量纲指标；a为裂纹长度（m或mm，全程统一）；R为应力比；u_specimen为试样随机效应。"""
+
+
 def traceable_cards(value: SkillInput, limit: int = 30) -> list[dict[str, Any]]:
     cards = []
     for role, rows in (
-        ("SUPPORT", value.support_evidence),
-        ("COUNTER", value.counter_evidence),
+        ("DIRECT_SUPPORT", value.support_evidence),
+        ("DIRECT_COUNTER", value.counter_evidence),
         ("CONDITION_DEPENDENT", value.condition_dependent_evidence),
+        ("ALTERNATIVE_MECHANISM", value.alternative_mechanism_evidence),
+        ("SUPPORTING_CONTEXT", value.supporting_context_evidence),
     ):
         for row in rows:
             if is_noisy_evidence_excerpt(row.get("original_text")):
@@ -136,6 +209,8 @@ def missing_evidence(value: SkillInput) -> list[str]:
         missing.append("缺少直接支持证据")
     if not value.counter_evidence:
         missing.append("未召回明确反向证据")
+    if not value.alternative_mechanism_evidence:
+        missing.append("未召回可核验的替代机制证据")
     if not value.condition_dependent_evidence:
         missing.append("缺少条件依赖证据")
     if not value.condition_evidence:
@@ -155,7 +230,12 @@ def base_quality_gate(
     iv, dv = entity_labels(value)
     banned = [term for term in BANNED_PLACEHOLDERS if term in text]
     missing_terms = [term for term in required_terms if term not in text]
-    missing_entities = [label for label in (iv, dv) if label and label.split("（", 1)[0] not in text]
+    missing_entities = []
+    for label in (iv, dv):
+        base_label = label.split("（", 1)[0]
+        aliases = ENTITY_LABEL_ALIASES.get(base_label, (base_label,))
+        if label and not any(alias in text for alias in aliases):
+            missing_entities.append(label)
     traceable = all(
         card.get("title") and card.get("page_number") and card.get("evidence_id")
         for card in traceable_cards(value)

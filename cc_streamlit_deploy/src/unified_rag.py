@@ -36,6 +36,14 @@ from src.research_topics import (
     query_mentions_pores,
 )
 from src.query_frame import parse_query_frame
+from src.claim_evidence_verifier import (
+    ALTERNATIVE_MECHANISM,
+    CONDITION_DEPENDENT,
+    DIRECT_COUNTER,
+    DIRECT_SUPPORT,
+    SUPPORTING_CONTEXT,
+    classify_evidence_for_claim,
+)
 from src.stage1_store import BASE_DIR, load_paper_manifest, update_paper_rag_status
 
 
@@ -1225,6 +1233,37 @@ def retrieve_condition_dependent_evidence(
     ][:top_k]
 
 
+def build_evidence_retrieval_subtasks(question: str) -> List[Dict[str, str]]:
+    """Create entity-driven retrieval facets without hard-coding one question."""
+    frame = parse_query_frame(question)
+    variables = set(frame.independent_variables) | set(frame.dependent_variables)
+    microstructure_variables = {
+        "microstructure", "alpha_lath_width", "prior_beta_grain", "crystallographic_texture"
+    }
+    if "residual_stress" in variables and variables & microstructure_variables:
+        subject = " ".join(
+            value for value in (frame.manufacturing_process, frame.alloy_grade) if value
+        ) or "titanium alloy"
+        return [
+            {
+                "name": "residual_stress_evidence_query",
+                "search_query": f"{subject} residual stress fatigue crack growth da/dN Delta Keff crack closure cyclic relaxation",
+                "claim_query": "残余应力影响裂纹扩展速率da/dN",
+            },
+            {
+                "name": "microstructure_evidence_query",
+                "search_query": f"{subject} alpha alpha-prime microstructure lath prior beta grain texture EBSD short crack path growth transition",
+                "claim_query": "微观组织影响短裂纹路径与扩展速率da/dN",
+            },
+            {
+                "name": "residual_stress_microstructure_interaction_query",
+                "search_query": f"{subject} residual stress microstructure simultaneous measurement same specimen short crack growth interaction",
+                "claim_query": "残余应力与α或α′微观组织在同一试样共同影响短裂纹扩展速率da/dN",
+            },
+        ]
+    return [{"name": "primary_evidence_query", "search_query": question, "claim_query": question}]
+
+
 @dataclass
 class SufficiencyThresholds:
     min_direct_papers: int = 3
@@ -1336,34 +1375,91 @@ def answer_research_question(
     include_counter: bool = True,
 ) -> Dict[str, Any]:
     started = time.perf_counter()
-    # One enlarged retrieval pool is shared by support, counter, condition and
-    # formula selection. This avoids repeated corpus scans and guarantees that
-    # the selected Skill sees one coherent ranking.
-    shared_query = question
-    if include_counter:
-        shared_query += " alternative mechanism no significant effect condition dependent"
-    base = retrieve_research_evidence(
-        shared_query,
-        required_variables=identify_variables(question),
-        top_k=max(60, top_k * 6),
-        base_dir=base_dir,
+    subtasks = build_evidence_retrieval_subtasks(question)
+    required_variables = identify_variables(question)
+
+    # Warm shared immutable indexes before starting facet workers. Without
+    # this, concurrent cold-cache calls can deserialize the same index three
+    # times and contend on Python BM25 initialization.
+    from src.cloud_evidence_bundle import cloud_bundle_required, require_cloud_bundle
+
+    if cloud_bundle_required(base_dir):
+        require_cloud_bundle(base_dir)
+    else:
+        version = _rag_version(base_dir)
+        root_text = str(Path(base_dir).resolve())
+        paths = rag_paths(base_dir)
+        if paths["bm25_cache"].exists() or paths["bm25"].exists():
+            _load_bm25_cached(root_text, version)
+        if all(
+            paths[key].exists()
+            for key in ("vector_model", "vector_embeddings", "vector_ids")
+        ):
+            _load_vector_cached(root_text, version)
+
+    def execute_subtask(subtask: Dict[str, str]) -> tuple[Dict[str, str], Dict[str, Any]]:
+        search_query = subtask["search_query"]
+        return subtask, retrieve_research_evidence(
+            search_query,
+            required_variables=identify_variables(subtask["claim_query"]),
+            top_k=max(20, top_k * 2),
+            base_dir=base_dir,
+        )
+
+    with ThreadPoolExecutor(max_workers=min(3, len(subtasks))) as executor:
+        subtask_results = list(executor.map(execute_subtask, subtasks))
+
+    pooled_by_id: Dict[str, Dict[str, Any]] = {}
+    role_audits: list[dict[str, Any]] = []
+    verifier_started = time.perf_counter()
+    for subtask, result in subtask_results:
+        for source in result["results"]:
+            item = dict(source)
+            item["retrieval_subtask"] = subtask["name"]
+            assessment = classify_evidence_for_claim(
+                subtask["claim_query"], item, query_frame=parse_query_frame(question).as_dict()
+            )
+            item["verified_evidence_role"] = assessment.role
+            item["evidence_role_reason"] = assessment.reason
+            item["claim_concept_coverage"] = assessment.concept_coverage
+            role_audits.append({
+                "subtask": subtask["name"],
+                "claim_query": subtask["claim_query"],
+                **assessment.as_dict(),
+            })
+            doc_id = str(item.get("doc_id") or "")
+            previous = pooled_by_id.get(doc_id)
+            if previous is None or float(item.get("rerank_score") or 0) > float(previous.get("rerank_score") or 0):
+                pooled_by_id[doc_id] = item
+            elif previous:
+                previous.setdefault("matched_retrieval_subtasks", []).append(subtask["name"])
+    pool = sorted(
+        pooled_by_id.values(), key=lambda row: float(row.get("rerank_score") or 0), reverse=True
     )
-    pool = list(base["results"])
-    counter_candidates = [row for row in pool if _counter_signal(row.get("text") or row.get("claim") or "")]
-    counter = []
-    if include_counter:
-        for row in counter_candidates[:top_k]:
-            item = dict(row)
-            item["counter_evidence_validated"] = True
-            item["counter_relation"] = "EXPLICIT_COUNTER_SIGNAL"
-            counter.append(item)
-    counter_ids = {row.get("doc_id") for row in counter}
-    supporting = [row for row in pool if row.get("doc_id") not in counter_ids][:top_k]
-    conditional = [
-        row
-        for row in pool
-        if any((row.get("experimental_conditions") or {}).values())
-    ][:top_k]
+    verifier_elapsed = round(time.perf_counter() - verifier_started, 6)
+
+    def selected(role: str, limit: int = top_k) -> List[Dict[str, Any]]:
+        rows = [row for row in pool if row.get("verified_evidence_role") == role]
+        # Keep at least one strong row from each retrieval facet before filling by rank.
+        output: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for subtask in subtasks:
+            candidate = next((row for row in rows if row.get("retrieval_subtask") == subtask["name"]), None)
+            if candidate and str(candidate.get("doc_id") or "") not in seen_ids:
+                output.append(candidate)
+                seen_ids.add(str(candidate.get("doc_id") or ""))
+        output.extend(row for row in rows if str(row.get("doc_id") or "") not in seen_ids)
+        return output[:limit]
+
+    supporting = selected(DIRECT_SUPPORT)
+    supporting_context = selected(SUPPORTING_CONTEXT)
+    counter = selected(DIRECT_COUNTER) if include_counter else []
+    conditional = selected(CONDITION_DEPENDENT)
+    alternative = selected(ALTERNATIVE_MECHANISM)
+    base = max(
+        (result for _, result in subtask_results),
+        key=lambda result: len(result.get("results") or []),
+    )
     sufficiency = evaluate_evidence_sufficiency(
         supporting,
         counter,
@@ -1375,13 +1471,15 @@ def answer_research_question(
         "retrieved_papers": sorted(
             {
                 row["paper_id"]
-                for row in supporting + counter + conditional
+                for row in supporting + counter + conditional + alternative + supporting_context
                 if row.get("paper_id")
             }
         ),
         "supporting_evidence": supporting,
         "counter_evidence": counter,
         "condition_dependent_evidence": conditional,
+        "alternative_mechanism_evidence": alternative,
+        "supporting_context_evidence": supporting_context,
         "retrieved_evidence_pool": pool,
         "identified_topics": identify_topics(question),
         "insufficient": sufficiency["status"] == "INSUFFICIENT",
@@ -1402,6 +1500,20 @@ def answer_research_question(
                 "retrieved_paper_count",
             )
         },
+        "retrieval_subtasks": subtasks,
+        "claim_evidence_role_audit": role_audits,
+        "evidence_role_counts": dict(Counter(row.get("verified_evidence_role") for row in pool)),
+        "claim_evidence_verifier_seconds": verifier_elapsed,
+        "retrieval_subtask_metrics": [
+            {
+                "name": subtask["name"],
+                "elapsed_seconds": result.get("elapsed_seconds"),
+                "retrieved_evidence_count": len(result.get("results") or []),
+                "retrieved_paper_count": result.get("retrieved_paper_count"),
+                "cache_hit": result.get("cache_hit", False),
+            }
+            for subtask, result in subtask_results
+        ],
         "retrieval_phase_seconds": dict(base.get("phase_seconds") or {}),
         "first_evidence_ready_seconds": round(time.perf_counter() - started, 6),
     }

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.research_skills.common import base_quality_gate, bundle_prompt, entity_labels, evidence_level_instruction, missing_evidence, primary_citation, query_variables, traceable_cards, usable_formulas
+from src.research_skills.common import base_quality_gate, bundle_prompt, entity_labels, evidence_level_instruction, facet_citation, has_direct_interaction_evidence, missing_evidence, primary_citation, query_variables, traceable_cards, usable_formulas
 from src.research_skills.contracts import SkillInput, SkillOutput
 from src.research_skills.domain_profiles import profile_prompt_block, select_domain_profile
 
@@ -37,10 +37,74 @@ def _fallback(value: SkillInput) -> tuple[str, str]:
     conflicts = cross.get("conflicts") or []
     missing = cross.get("missing_conditions") or []
     formulas = usable_formulas(value)
-    if not consensus or not value.counter_evidence:
-        return "当前只能判定为候选证据缺口，尚不足以确认为研究空白。", "当前正式文献库不足以判断该问题是否构成真实研究空白；需要补足直接证据、反向证据与匹配实验条件。"
     frame = value.query_frame or bundle.get("query_frame") or {}
     profile = select_domain_profile(value)
+    if profile.key == "residual_microstructure_short_crack":
+        interaction_direct = has_direct_interaction_evidence(value)
+        residual_cite = facet_citation(value, "residual_stress_evidence_query")
+        micro_cite = facet_citation(value, "microstructure_evidence_query")
+        status = "coverage_gap" if interaction_direct else "candidate_evidence_gap"
+        direct = (
+            f"本问题应归为 {status}（B. 候选证据缺口，尚需外部文献验证），"
+            "不能仅凭本地库未检得记录就宣称为已确认的新颖研究空白。"
+        )
+        counter_text = (
+            f"检出可比条件下的真正反证，空白必须继续缩小。{primary_citation(value, 'COUNTER')}"
+            if value.counter_evidence else
+            "没有检出满足同材料、同载荷和明确否定条件的真正反证；这不等于外部文献中不存在反证。"
+        )
+        alternative_text = (
+            f"已检出组织取向、滑移或裂纹路径等替代机制。{primary_citation(value, 'ALTERNATIVE_MECHANISM')}"
+            if value.alternative_mechanism_evidence else
+            "当前替代机制覆盖仍有限。"
+        )
+        reasoning = f"""### 具体研究空白标题
+同试样匹配条件下残余应力—α/α′组织对短裂纹驱动力及转变判据的联合量化缺口
+
+### 1. 已经解决的问题
+现有正式库分别包含短裂纹、残余应力、组织/织构与裂纹路径的相关研究。残余应力侧直接引文：{residual_cite or '当前无满足完整主张的直接引文'}；组织侧直接引文：{micro_cite or '当前无满足L-PBF匹配条件的直接引文'}。
+
+### 2. 尚未解决的具体问题
+当前尚未证明在同一L-PBF Ti-6Al-4V试样、同一R与ΔK历史下，σres、α片层宽度lα和织构指标T如何共同解释短裂纹da/dN、ΔKeff以及短—长裂纹转变。
+当前缺少的不是宽泛相关性描述，而是同试样、同载荷下的联合测量与独立批次复现。
+
+### 为什么已有研究不能直接回答
+分别讨论残余应力或组织的论文不能证明交互项；材料制备、热处理、表面状态、裂纹长度、R和测量方法不匹配时也不能横向合并。
+
+### 3. 真正反证与反向证据检索结果
+{counter_text}
+
+### 替代机制核验
+{alternative_text} 替代机制用于解释竞争路径，不标为真正反证。
+
+### 逐层缩小空白搜索
+| 细化层级 | 核验内容 | 当前判断 |
+|---|---|---|
+| 宽泛关系 | 残余应力和组织是否分别与裂纹行为有关 | 本地库已有部分覆盖 |
+| 条件匹配 | 是否为L-PBF Ti-6Al-4V且表面、R、ΔK历史一致 | 覆盖不完整 |
+| 联合测量 | 是否在同试样同步测量σres、lα/T、ΔKeff和da/dN | 未形成可确认覆盖 |
+| 转变判据 | 是否给出裂纹长度/组织尺度、闭合建立或长裂纹关系适用点 | 未统一 |
+| 外部验证 | 是否在独立制造批次复现 | 尚需验证 |
+
+### 证据缺口矩阵
+| 维度 | 已覆盖 | 缺失的匹配比较 |
+|---|---|---|
+| 残余应力 | 相关背景或单因素研究 | σres—开闭载荷—ΔKeff—da/dN同步链 |
+| 微观组织 | 组织/织构与裂纹路径研究 | lα、T与同一裂纹轨迹的定量匹配 |
+| 联合作用 | 宽泛共同影响表述 | σres·lα和σres·T交互项 |
+| 转变 | 短裂纹和长裂纹概念 | 可复现的转变判据 |
+
+### 具体研究问题与可证伪假设
+在表面、R、ΔK历史和裂纹长度匹配后，加入σres·lα与σres·T交互项是否能稳定改善短裂纹da/dN和转变点预测？若交互项在独立批次不显著或方向不能复现，则共同作用假设被削弱。
+
+### 4. 研究空白分类
+{status}。需要外部系统检索和专家复核后，才可能升级为confirmed_gap；若找到同条件联合测量研究，则应降为false_gap或更窄的coverage_gap。
+
+### 最低成本验证
+先复用同批次试样，统一表面后补测XRD残余应力、EBSD织构/片层尺度与复制法短裂纹轨迹；精确R、ΔK和样本量由直接文献与预实验冻结。"""
+        return direct, reasoning
+    if not consensus or not value.counter_evidence:
+        return "当前只能判定为候选证据缺口，尚不足以确认为研究空白。", "当前正式文献库不足以判断该问题是否构成真实研究空白；需要补足直接证据、反向证据与匹配实验条件。"
     if not frame.get("requested_formulas"):
         formulas = []
     variables = set(frame.get("independent_variables") or []) | set(frame.get("dependent_variables") or [])

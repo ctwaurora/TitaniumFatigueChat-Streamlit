@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.research_skills.common import base_quality_gate, bundle_prompt, entity_labels, evidence_level_instruction, missing_evidence, primary_citation, query_variables, traceable_cards, usable_formulas
+from src.research_skills.common import base_quality_gate, bundle_prompt, entity_labels, evidence_level_instruction, joint_short_crack_candidate_models, missing_evidence, primary_citation, query_variables, traceable_cards, usable_formulas
 from src.research_skills.contracts import SkillInput, SkillOutput
 from src.research_skills.domain_profiles import profile_prompt_block, select_domain_profile
 
@@ -33,13 +33,16 @@ def _fallback(value: SkillInput) -> tuple[str, str, list[str]]:
     bundle = value.evidence_bundle or {}
     cross = bundle.get("synthesis") or {}
     formulas = usable_formulas(value)
-    if not (value.support_evidence and iv and dv):
-        return "本地正式证据不足，无法形成有来源的可证伪假设。", "需要明确变量并补足直接证据与实验条件。", []
-    support_cite = primary_citation(value)
-    counter_cite = primary_citation(value, "COUNTER")
-    hypothesis = f"候选假设：在材料、热处理、表面状态和载荷条件匹配后，{iv}通过改变局部裂纹驱动力或微观屏障作用，使{dv}出现可重复、可拟合的条件化变化。{support_cite}"
     frame = value.query_frame or bundle.get("query_frame") or {}
     profile = select_domain_profile(value)
+    joint_profile = profile.key == "residual_microstructure_short_crack"
+    provisional_joint = joint_profile and bool(value.retrieved_evidence) and bool(iv and dv)
+    if not ((value.support_evidence and iv and dv) or provisional_joint):
+        return "本地正式证据不足，无法形成有来源的可证伪假设。", "需要明确变量并补足直接证据与实验条件。", []
+    support_cite = primary_citation(value)
+    alternative_cite = primary_citation(value, "ALTERNATIVE_MECHANISM")
+    counter_cite = primary_citation(value, "COUNTER")
+    hypothesis = f"候选假设：在材料、热处理、表面状态和载荷条件匹配后，{iv}通过改变局部裂纹驱动力或微观屏障作用，使{dv}出现可重复、可拟合的条件化变化。{support_cite}"
     if not frame.get("requested_formulas"):
         formulas = []
     independent = frame.get("independent_variables") or []
@@ -69,6 +72,8 @@ def _fallback(value: SkillInput) -> tuple[str, str, list[str]]:
             "d为缺陷距自由表面的距离，单位µm；d/√area为归一化缺陷深度，无量纲；R为应力比，无量纲；"
             "σres为缺陷附近残余应力，单位MPa；β0—β6为待实验数据拟合的参数；ε为未解释误差项。"
         )
+    elif joint_profile:
+        formula = joint_short_crack_candidate_models()
     elif formulas:
         item = formulas[0]
         formula = f"文献原公式：{item['equation']}；Formula ID：{item['formula_id']}；页码：{item['page_number']}；参数：{item.get('parameters') or '未报告'}；单位：{item.get('units') or '未报告'}；适用条件：{item.get('applicable_conditions') or '未完整报告'}。"
@@ -83,6 +88,12 @@ def _fallback(value: SkillInput) -> tuple[str, str, list[str]]:
             "尺寸×位置交互项置信区间覆盖0，或其方向在独立制造批次中无法复现。",
             "仅含应力幅和表面粗糙度的基线模型达到与完整模型相当的交叉验证性能。",
             "XCT与断口SEM不支持较大或近表面缺陷更易成为主裂纹源。",
+        ]
+    elif joint_profile:
+        falsifiers = [
+            "匹配ΔKeff后，σres主效应以及σres·lα、σres·T交互项均不显著，且M4不改善留出误差。",
+            "加入lα和T后，原先归因于残余应力的效应被组织变量完全解释，M1不再优于M2。",
+            "σres·lα或σres·T的预注册方向在独立制造批次中不能复现。",
         ]
     else:
         falsifiers = list(profile.falsifiers)
@@ -103,6 +114,14 @@ def _fallback(value: SkillInput) -> tuple[str, str, list[str]]:
         "| 尺寸—位置模型 | 基线+√area+d/√area | 检验位置独立贡献 | 外部验证误差、调整R² |\n"
         "| 交互模型 | 基线+√area+d/√area+尺寸×位置 | 检验近表面效应增强 | 似然比检验、交叉验证、Bootstrap区间 |"
         if pore_life else
+        "| 模型 | 变量 | 回答的问题 | 比较方法 |\n"
+        "|---|---|---|---|\n"
+        "| M0 | ΔKeff、试样随机效应 | 有效驱动力基线能解释多少变异 | AIC/BIC、留出RMSE/MAE |\n"
+        "| M1 | M0+σres、a、R | 残余应力是否有增量解释力 | M0/M1似然比、交叉验证 |\n"
+        "| M2 | M0+lα、T、a | 可测组织变量是否有增量解释力 | M0/M2似然比、交叉验证 |\n"
+        "| M3 | M0+σres+lα+T+a+R | 两类主效应是否可加 | 与M1/M2比较AIC/BIC |\n"
+        "| M4 | M3+σres·lα+σres·T | 是否存在可复现交互 | M3/M4似然比、留出批次与预注册方向 |"
+        if joint_profile else
         "| 模型层级 | 主题变量 | 目的 | 评价指标 |\n"
         "|---|---|---|---|\n"
         f"| {profile.title}基线 | {profile.confounders} | 建立主题基准 | {profile.title}留出误差与信息准则 |\n"
@@ -111,8 +130,16 @@ def _fallback(value: SkillInput) -> tuple[str, str, list[str]]:
     )
     extra_falsifiers = ""
     if len(falsifiers) > 2:
-        extra_falsifiers = f"\n3. {falsifiers[2]}\n4. {falsifiers[3]}"
+        extra_falsifiers = "".join(
+            f"\n{index}. {criterion}"
+            for index, criterion in enumerate(falsifiers[2:], start=3)
+        )
     support_finding = (cross.get("consensus") or ["现有证据只支持条件化趋势。"]) [0]
+    support_line = (
+        f"{profile.title}直接支持依据：{support_finding} {support_cite}"
+        if support_cite else
+        f"【证据不足】{profile.title}尚无可支持联合主张的直接证据。"
+    )
     counter_finding = (cross.get("conflicts") or [""])[0]
     if not counter_finding or counter_finding.startswith("不同文献报告的结果方向不一致"):
         counter_finding = (
@@ -135,7 +162,10 @@ def _fallback(value: SkillInput) -> tuple[str, str, list[str]]:
 {prediction_text}
 
 ### 支持、反向与替代解释
-{profile.title}支持依据：{support_finding} {support_cite}\n{profile.title}反向边界：{counter_finding} {counter_cite}\n{profile.title}替代解释包括{profile.confounders}。
+{support_line}\n{profile.title}反向边界：{counter_finding} {counter_cite}\n替代机制证据：{profile.confounders}。{alternative_cite}
+
+### 交互证据边界
+{"当前正式文献库尚未找到在同试样、同载荷条件下直接量化残余应力—微观组织交互的证据；M4只能作为待验证候选模型。" if joint_profile else "是否加入交互项由问题变量和直接证据共同决定。"}
 
 ### 明确证伪判据
 1. 证伪判据一：{falsifiers[0]}\n2. 证伪判据二：{falsifiers[1]}{extra_falsifiers}
@@ -159,12 +189,18 @@ def generate(value: SkillInput, synthesis: str = "") -> SkillOutput:
     combined = complete or f"{direct}\n{reasoning}"
     gate = base_quality_gate(value, combined, skill_name=SKILL_NAME)
     gate["falsification_criteria_count"] = 2 if complete else len(falsifiers)
-    gate["passed"] = gate["passed"] and bool(value.support_evidence) and gate["falsification_criteria_count"] >= 2
-    independent, dependent = query_variables(value)
     profile = select_domain_profile(value)
+    evidence_basis = bool(value.support_evidence) or (
+        profile.key == "residual_microstructure_short_crack" and bool(value.retrieved_evidence)
+    )
+    gate["passed"] = gate["passed"] and evidence_basis and gate["falsification_criteria_count"] >= 2
+    gate["provisional_evidence_basis"] = not bool(value.support_evidence) and evidence_basis
+    independent, dependent = query_variables(value)
     variables = set(independent) | set(dependent)
     if profile.key == "defect_size_life":
         candidate_model = "log10(Nf)=β0−β1log10(σa)−β2log10(√area)+β3(d/√area)+β4R+β5σres+β6[log10(√area)×d/√area]+ε"
+    elif profile.key == "residual_microstructure_short_crack":
+        candidate_model = joint_short_crack_candidate_models()
     else:
         candidate_model = profile.model
     return SkillOutput(SKILL_NAME, complete or direct, "" if complete else reasoning, "候选假设不是已证实结论；条件不匹配时不得外推。", traceable_cards(value), gate, missing_evidence(value), {
@@ -176,7 +212,7 @@ def generate(value: SkillInput, synthesis: str = "") -> SkillOutput:
         "expected_function_form": "interaction_model",
         "literature_formula": (value.evidence_bundle or {}).get("formulas") or [],
         "proposed_candidate_model": candidate_model,
-        "parameters_to_fit": ["β0", "β1", "β2", "β3", "β4", "β5"],
+        "parameters_to_fit": [f"β{index}" for index in range(9)] if profile.key == "residual_microstructure_short_crack" else ["β0", "β1", "β2", "β3", "β4", "β5"],
         "data_requirements": "逐试样变量、条件、批次与独立验证集",
         "fitting_method": "预注册候选模型比较与留出验证",
         "validation_method": "独立材料批次复现",

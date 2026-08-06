@@ -254,7 +254,9 @@ def load_literature_formulas(base_dir: Path) -> List[Dict[str, Any]]:
                 "manual_review_status": audit_status,
                 "raw_review_status": raw_review_status or "TEXT_EXTRACTED",
             }
-            formulas.append(formula)
+            from src.formula_validation import validate_formula_candidate
+
+            formulas.append(validate_formula_candidate(formula))
     return formulas
 
 

@@ -517,8 +517,7 @@ def load_literature_formulas_cached(base_dir_text: str, dataset_version: str):
                 if "area" in lower or "murakami" in lower
                 else "其他"
             )
-            output.append(
-                {
+            formula = {
                     "formula_id": row.get("formula_id"),
                     "source_type": LITERATURE_FORMULA_SOURCE,
                     "paper_id": row.get("paper_id"),
@@ -530,14 +529,19 @@ def load_literature_formulas_cached(base_dir_text: str, dataset_version: str):
                     "doi": paper.get("doi") or "未记录",
                     "page_number": row.get("page_number"),
                     "section": row.get("section") or "未分类",
-                    "equation_number": "",
+                    "equation_number": row.get("equation_number") or "",
                     "original_formula": equation,
                     "normalized_formula": equation,
                     "normalized_latex": equation,
-                    "context_before_after": row.get("short_excerpt")
+                    "context_before_after": row.get("source_context")
+                    or row.get("short_excerpt")
                     or row.get("claim")
                     or "",
-                    "symbol_definitions": [row.get("parameters") or "未报告"],
+                    "symbol_definitions": [
+                        row.get("variable_definitions")
+                        or row.get("parameters")
+                        or "未报告"
+                    ],
                     "symbol_units": [row.get("units") or "未报告"],
                     "parameter_values_units": [row.get("units") or "未报告"],
                     "formula_type": formula_type,
@@ -548,11 +552,23 @@ def load_literature_formulas_cached(base_dir_text: str, dataset_version: str):
                     "data_source": "cloud_bundle:formula_records.parquet",
                     "author_scope": "按公式证据片段报告",
                     "author_limitations": "不得超出正式证据适用条件",
-                    "evidence_status": "已确认",
-                    "manual_review_status": "CLOUD_FORMAL_RAG",
-                    "raw_review_status": "CLOUD_FORMAL_RAG",
+                    "evidence_status": (
+                        "已确认"
+                        if row.get("validation_status") == "CONFIRMED"
+                        else "待人工复核"
+                    ),
+                    "manual_review_status": row.get("validation_status")
+                    or row.get("review_status")
+                    or "CLOUD_TEXT_EXTRACTED",
+                    "raw_review_status": (
+                        "CONFIRMED"
+                        if row.get("validation_status") == "CONFIRMED"
+                        else row.get("review_status") or "CLOUD_TEXT_EXTRACTED"
+                    ),
                 }
-            )
+            from src.formula_validation import validate_formula_candidate
+
+            output.append(validate_formula_candidate(formula))
         return output
     from src.literature_formula_library import load_literature_formulas
 

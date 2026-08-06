@@ -201,11 +201,19 @@ def build_evidence_bundle(
     supporting: list[dict[str, Any]],
     counter: list[dict[str, Any]],
     conditional: list[dict[str, Any]],
+    alternative: list[dict[str, Any]] | None = None,
+    supporting_context: list[dict[str, Any]] | None = None,
     retrieved_pool: list[dict[str, Any]] | None = None,
     query_frame: dict[str, Any] | None = None,
     dataset_version: str = "",
 ) -> EvidenceBundle:
-    role_rows = (("SUPPORT", supporting), ("COUNTER", counter), ("CONDITION_DEPENDENT", conditional))
+    role_rows = (
+        ("DIRECT_SUPPORT", supporting),
+        ("DIRECT_COUNTER", counter),
+        ("CONDITION_DEPENDENT", conditional),
+        ("ALTERNATIVE_MECHANISM", alternative or []),
+        ("SUPPORTING_CONTEXT", supporting_context or []),
+    )
     grouped: dict[str, list[tuple[str, dict[str, Any]]]] = defaultdict(list)
     seen: set[tuple[str, str]] = set()
     for role, rows in role_rows:
@@ -224,6 +232,21 @@ def build_evidence_bundle(
     for row in formula_source:
         formula_id = str(row.get("doc_id") or row.get("formula_id") or "")
         if formula_id in formula_seen or not is_plausible_formula(row):
+            continue
+        from src.formula_validation import CONFIRMED, validate_formula_candidate
+
+        validated_formula = validate_formula_candidate({
+            **row,
+            "formula_id": formula_id,
+            "original_formula": row.get("equation") or row.get("formula"),
+            "paper_title": row.get("title"),
+            "context_before_after": row.get("original_text") or row.get("claim"),
+            "symbol_definitions": row.get("parameters") or [],
+            "symbol_units": row.get("units") or [],
+            "equation_number": row.get("equation_number") or "",
+            "raw_review_status": row.get("review_status") or "",
+        })
+        if validated_formula["validation_status"] != CONFIRMED:
             continue
         formula_seen.add(formula_id)
         formula_rows.append({
@@ -255,6 +278,9 @@ def build_evidence_bundle(
             "calibration_dataset": str(row.get("calibration_dataset") or ""),
             "validation_dataset": str(row.get("validation_dataset") or ""),
             "extraction_confidence": float(row.get("confidence") or row.get("extraction_confidence") or 0.0),
+            "evidence_status": "已确认",
+            "validation_status": CONFIRMED,
+            "validation_basis": validated_formula.get("validation_basis"),
         })
 
     papers: list[PaperEvidenceSummary] = []
@@ -287,6 +313,11 @@ def build_evidence_bundle(
                     "title": str(row.get("title") or ""),
                     "page_number": row.get("page_number"),
                     "section": str(row.get("section") or ""),
+                    "claim": str(row.get("claim") or ""),
+                    "original_text": str(row.get("original_text") or row.get("text") or ""),
+                    "directness": str(row.get("directness") or ""),
+                    "evidence_role": role,
+                    "experimental_conditions": _clean_conditions(row.get("experimental_conditions")),
                 }
         conditions = _merge_conditions(rows)
         all_text = " ".join(_text(row) for row in rows)
@@ -340,16 +371,16 @@ def build_evidence_bundle(
             extraction_confidence=round(sum(float(row.get("confidence") or 0.0) for row in rows) / max(1, len(rows)), 4),
         ))
 
-    papers.sort(key=lambda paper: ("SUPPORT" not in paper.roles, paper.title.casefold()))
+    papers.sort(key=lambda paper: ("DIRECT_SUPPORT" not in paper.roles, paper.title.casefold()))
     matches, mismatches, covered = _condition_comparison(papers)
     directions = {direction for paper in papers for direction in paper.result_directions}
     consensus = [
         paper.principal_claims[0]["claim"]
-        for paper in papers if "SUPPORT" in paper.roles and paper.principal_claims
+        for paper in papers if "DIRECT_SUPPORT" in paper.roles and paper.principal_claims
     ][:4]
     conflicts = [
         paper.principal_claims[0]["claim"]
-        for paper in papers if "COUNTER" in paper.roles and paper.principal_claims
+        for paper in papers if "DIRECT_COUNTER" in paper.roles and paper.principal_claims
     ][:4]
     if len(directions - {"CONDITION_DEPENDENT_OR_UNRESOLVED"}) > 1:
         conflicts.insert(0, "不同文献报告的结果方向不一致，必须按材料、处理、表面、载荷和疲劳阶段分层解释。")
@@ -373,7 +404,7 @@ def build_evidence_bundle(
                 comparable.append([left.paper_id, right.paper_id])
     structured_conflicts = [
         {"paper_id": paper.paper_id, "finding": paper.principal_claims[0]["claim"], "conditions": paper.conditions, "classification": "CONDITION_DIFFERENCE" if mismatches else "POTENTIAL_TRUE_CONFLICT"}
-        for paper in papers if "COUNTER" in paper.roles and paper.principal_claims
+        for paper in papers if "DIRECT_COUNTER" in paper.roles and paper.principal_claims
     ]
     synthesis = CrossPaperSynthesis(
         consensus=consensus,
@@ -413,8 +444,8 @@ def build_evidence_bundle(
             experimental_conditions=paper.conditions, mechanism_chain=paper.mechanisms,
             quantitative_relationship=(paper.quantitative_results[0] if paper.quantitative_results else ""),
             applicable_formula_ids=[item["formula_id"] for item in paper.formulas],
-            supporting_evidence_ids=[item["evidence_id"] for item in paper.principal_claims if item["role"] == "SUPPORT"],
-            counter_evidence_ids=[item["evidence_id"] for item in paper.principal_claims if item["role"] == "COUNTER"],
+            supporting_evidence_ids=[item["evidence_id"] for item in paper.principal_claims if item["role"] == "DIRECT_SUPPORT"],
+            counter_evidence_ids=[item["evidence_id"] for item in paper.principal_claims if item["role"] == "DIRECT_COUNTER"],
             condition_dependent_evidence_ids=[item["evidence_id"] for item in paper.principal_claims if item["role"] == "CONDITION_DEPENDENT"],
             applicability_boundary=paper.applicability,
             unresolved_part=paper.limitations,

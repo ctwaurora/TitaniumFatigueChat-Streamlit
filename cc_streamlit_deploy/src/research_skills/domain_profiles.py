@@ -210,6 +210,22 @@ PROFILES: dict[str, DomainProfile] = {
         ("改变介质后Ni和da/dN均无可重复差异，且表面/氢指标不响应。", "环境差异在统一频率和温度后消失，原效应由热或速率混杂解释。"),
         "介质纯度/压力、频率、温度、表面膜、氢含量、R和裂纹阶段。",
     ),
+    "residual_microstructure_short_crack": DomainProfile(
+        "residual_microstructure_short_crack", "残余应力—微观组织对短裂纹的联合约束",
+        ("残余应力σres", "α片层宽度lα", "织构指标T"), ("短裂纹da/dN", "ΔKeff", "短—长裂纹转变"),
+        "残余应力和微观组织可分别改变局部裂纹驱动力与裂纹路径；只有同一试样、同一载荷下的联合测量才能证明二者的定量交互。",
+        "σres可能改变开闭载荷与有效驱动力；lα和T表征组织屏障间距与有利滑移取向。二者的主效应可以分别检验，但交互项必须由同步测量数据验证。",
+        "必须匹配Ti-6Al-4V材料批次、L-PBF工艺、热处理、表面、R、ΔK历史、裂纹长度、温度和环境，并同步测量σres、lα/T与da/dN。",
+        "当前关键缺口是同试样、同载荷下同时量化σres、lα/T、ΔKeff和短裂纹da/dN，并用可测判据确定短—长裂纹转变。",
+        "log(da/dN)=β0+β1log(ΔKeff)+β2σres+β3lα+β4T+β5σres·lα+β6σres·T+β7log(a)+β8R+u_specimen",
+        "系统提出、需要预注册和拟合的候选交互模型，并非文献原公式；应与M0—M3嵌套模型比较。",
+        "da/dN：m/cycle；ΔKeff：MPa√m；σres：MPa；lα与a：µm或m但全程统一；T与R：无量纲。",
+        "XRD或孔钻残余应力、EBSD织构与裂纹路径、金相片层宽度、复制法/DIC/原位成像、裂纹开闭载荷。",
+        "采用残余应力层×组织层的同批次因子设计；表面统一，外加R与ΔK历史匹配，并设置独立制造批次验证。",
+        "若存在联合效应，M4应稳定改善留出预测，且σres·lα或σres·T至少一个交互项在独立批次保持预注册方向。",
+        ("ΔKeff匹配后，σres项及其交互项均不显著。", "独立批次中交互方向不能复现，或组织变量完全解释原残余应力效应。"),
+        "材料/制造批次、热处理、表面、R、ΔK历史、裂纹长度、温度、环境和测量分辨率。",
+    ),
 }
 
 
@@ -223,6 +239,10 @@ def select_domain_profile(value: SkillInput) -> DomainProfile:
     variables = _variables(value)
     frame = value.query_frame or (value.evidence_bundle or {}).get("query_frame") or {}
     requested_formulas = set(frame.get("requested_formulas") or [])
+    if "residual_stress" in variables and variables & {
+        "microstructure", "alpha_lath_width", "prior_beta_grain", "crystallographic_texture"
+    }:
+        return PROFILES["residual_microstructure_short_crack"]
     if "environmental_medium" in variables or frame.get("environment"):
         return PROFILES["environment"]
     if "fatigue_regime" in variables and "crack_origin_location" in variables:

@@ -1,5 +1,5 @@
 TitaniumFatigueChat Streamlit deployment manifest
-file_count=157
+file_count=160
 
 .gitattributes
 .gitignore
@@ -69,6 +69,7 @@ src/auto_oa_pipeline.py
 src/baseline_ablation_report.py
 src/benchmark.py
 src/case_study.py
+src/claim_evidence_verifier.py
 src/claim_verification.py
 src/cloud_evidence_bundle.py
 src/condition_evidence.py
@@ -96,6 +97,7 @@ src/feature_flags.py
 src/formal_library_page.py
 src/formula_comparison.py
 src/formula_renderer.py
+src/formula_validation.py
 src/full_library_deep_read.py
 src/full_text_extractor.py
 src/hypothesis_candidate.py
@@ -145,6 +147,7 @@ src/research_skills/scientific_analysis_skill.py
 src/research_topics.py
 src/retrospective_validation.py
 src/sci_export.py
+src/science_output_postprocessor.py
 src/scientific_framework.py
 src/scorecard.py
 src/smart_search.py

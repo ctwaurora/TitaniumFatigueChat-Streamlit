@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.research_skills.common import base_quality_gate, bundle_prompt, entity_labels, evidence_level_instruction, missing_evidence, primary_citation, query_variables, traceable_cards, usable_formulas
+from src.research_skills.common import base_quality_gate, bundle_prompt, entity_labels, evidence_level_instruction, has_direct_interaction_evidence, missing_evidence, primary_citation, query_variables, traceable_cards, usable_formulas
 from src.research_skills.contracts import SkillInput, SkillOutput
 from src.research_skills.domain_profiles import profile_prompt_block, select_domain_profile
 
@@ -32,11 +32,18 @@ def _fallback(value: SkillInput) -> tuple[str, str, list[str]]:
     bundle = value.evidence_bundle or {}
     papers = bundle.get("papers") or []
     cross = bundle.get("synthesis") or {}
-    if not (value.support_evidence and iv and dv):
+    profile = select_domain_profile(value)
+    provisional_joint = (
+        profile.key == "residual_microstructure_short_crack"
+        and bool(value.retrieved_evidence)
+        and bool(iv and dv)
+    )
+    if not ((value.support_evidence and iv and dv) or provisional_joint):
         return "本地正式证据不足，无法把该问题扩展为可信实验方案。", "需要明确自变量、因变量和可匹配的材料与加载条件。", []
     conditions = (papers[0].get("conditions") if papers else {}) or {}
     object_text = f"{conditions.get('alloy_grade') or conditions.get('material') or '题目指定的钛合金'}，{conditions.get('manufacturing_process') or conditions.get('process') or '制造工艺需与证据匹配'}，热处理={conditions.get('heat_treatment') or '固定并报告'}，表面={conditions.get('surface_treatment') or conditions.get('surface_state') or '固定并报告'}"
     hypothesis = f"在其余条件匹配后，改变{iv}会通过问题对应的裂纹驱动力或组织机制改变{dv}；若控制协变量后效应消失，则推翻该假设。{primary_citation(value)}"
+    alternative_cite = primary_citation(value, "ALTERNATIVE_MECHANISM")
     falsifiers = [
         f"{iv}主效应和预注册交互项的置信区间均覆盖最小效应，且留出批次预测没有改善。",
         f"独立批次的{dv}变化方向与预测相反，或预期中介量不变而结果仍出现。",
@@ -47,7 +54,12 @@ def _fallback(value: SkillInput) -> tuple[str, str, list[str]]:
         item = formulas[0]
         formula_note = f"拟合文献原公式 {item['equation']}（Formula ID：{item['formula_id']}，页码：{item['page_number']}），仅在其单位和适用条件一致时比较。"
     frame = value.query_frame or bundle.get("query_frame") or {}
-    profile = select_domain_profile(value)
+    direct_interaction = has_direct_interaction_evidence(value)
+    design_tier = (
+        "EVIDENCE-SUPPORTED DESIGN"
+        if profile.key != "residual_microstructure_short_crack" or direct_interaction
+        else "PROVISIONAL FALSIFICATION DESIGN"
+    )
     frame_subject = str(frame.get("alloy_grade") or "").strip()
     if frame_subject and frame_subject.casefold() not in object_text.casefold():
         object_text = f"{frame_subject}；{object_text}"
@@ -118,11 +130,19 @@ def _fallback(value: SkillInput) -> tuple[str, str, list[str]]:
 | {profile.title}机制中介 | {profile.mechanism_chain} | {profile.title}中介量不响应或方向相反 | 主题中介/混合效应模型 |
 | {profile.title}外部验证 | `{profile.model}`优于主题基线 | {profile.falsifiers[1]} | {profile.title}留出误差与交叉验证 |"""
         loading_protocol = f"围绕{profile.title}，{profile.boundary} 精确水平、终止循环数和失效终点由匹配文献、设备能力与预实验冻结，不填写无来源数值。"
-    reasoning = f"""### 研究对象
+    reasoning = f"""### 设计等级
+{design_tier}
+
+{"当前直接证据足以约束主要变量和条件。" if design_tier == "EVIDENCE-SUPPORTED DESIGN" else "当前缺少同试样、同载荷下的定量交互证据；以下是预注册式候选验证框架，具体水平必须由预实验或直接文献确定。"}
+
+### 研究对象
 {object_text}。
 
 ### 核心假设
 {hypothesis}
+
+### 证据基础与替代机制
+当前交互主张没有直接引文；组织取向、滑移传递或裂纹路径可作为替代机制证据，但不构成残余应力主张的反证。{alternative_cite}
 
 ### 表1：变量定义表
 {variable_table}
@@ -136,17 +156,32 @@ def _fallback(value: SkillInput) -> tuple[str, str, list[str]]:
 ### 样本建议
 {profile.title}预实验先估计{'、'.join(profile.dependent)}的方差、run-out删失率和最小有意义效应；正式样本量针对{'×'.join(profile.independent[:2])}交互，由功效分析或仿真确定，不预填固定数量。
 
+### 自变量水平来源
+所有具体温度、应力比、频率、载荷水平和组织分层边界均由预实验或直接文献确定；冻结规则、设备约束和排除标准须在正式试验前预注册。
+
 ### 加载条件
 {loading_protocol}
 
 ### 表征方法
 {profile.measurements}
 
+### 制样与表面控制
+同一材料与制造批次内制样；热处理、几何尺寸和表面加工统一并逐件记录。表面缺陷影响通过统一加工与三维形貌复核控制，不把未测表面状态当作已消除。
+
+### 残余应力测量
+优先采用XRD或经适用性核验的孔钻法，记录测点、方向、深度与测量不确定度；疲劳前后复测以识别循环松弛。
+
+### 微观组织与短裂纹监测
+用EBSD/金相量化α片层宽度lα、织构指标T和裂纹相对取向；用复制法、DIC或原位成像连续记录裂纹长度a与da/dN，并同步确定开闭载荷或ΔKeff。
+
 ### 数据分析、统计模型和公式拟合
 {formula_note} {profile.title}的主题候选模型为`{profile.model}`；{profile.model_note} 围绕{'、'.join(profile.dependent)}选择统计结构，并用{profile.measurements}形成的机制指标复核参数；报告置信区间、共线性与独立批次预测误差。
 
 ### 预测结果
 若假设成立，{profile.predictions}
+
+### 支持假设的结果
+预注册主效应或交互项按预期方向改善独立批次预测，且相应机制中介量同步响应；只有同时满足统计与机制判据时才视为支持。
 
 ### 推翻假设的结果
 1. {falsifiers[0]}\n2. {falsifiers[1]}
@@ -155,7 +190,10 @@ def _fallback(value: SkillInput) -> tuple[str, str, list[str]]:
 围绕{profile.title}，最低成本版本采用{profile.factor_design}，优先检验{'×'.join(profile.independent[:2])}并同步测量一个主题机制指标。
 
 ### 完整验证方案与风险
-完整方案采用{profile.factor_design}，联合表征为{profile.measurements}，并用独立批次检验`{profile.model}`。主要风险来自{profile.confounders}；执行时必须维持{profile.boundary}"""
+完整方案采用{profile.factor_design}，联合表征为{profile.measurements}，并用独立批次检验`{profile.model}`。主要风险来自{profile.confounders}；执行时必须维持{profile.boundary}
+
+### 尚缺证据
+{"尚缺同试样、同载荷条件下同步测量σres、lα/T、ΔKeff和短裂纹da/dN的直接交互证据。" if design_tier == "PROVISIONAL FALSIFICATION DESIGN" else "精确参数范围仍需逐项核对来源文献并经预实验冻结。"}"""
     return f"建议采用证据匹配的分层对照设计验证：{hypothesis}", reasoning, falsifiers
 
 
@@ -166,11 +204,21 @@ def generate(value: SkillInput, synthesis: str = "") -> SkillOutput:
     gate = base_quality_gate(value, combined, skill_name=SKILL_NAME)
     gate["original_evidence_rechecked"] = bool(value.retrieved_evidence)
     gate["falsification_criteria_count"] = 2 if complete else len(falsifiers)
-    gate["passed"] = gate["passed"] and bool(value.support_evidence) and gate["original_evidence_rechecked"] and gate["falsification_criteria_count"] >= 2
-    independent, dependent = query_variables(value)
     profile = select_domain_profile(value)
+    evidence_basis = bool(value.support_evidence) or (
+        profile.key == "residual_microstructure_short_crack" and bool(value.retrieved_evidence)
+    )
+    gate["passed"] = gate["passed"] and evidence_basis and gate["original_evidence_rechecked"] and gate["falsification_criteria_count"] >= 2
+    gate["provisional_evidence_basis"] = not bool(value.support_evidence) and evidence_basis
+    independent, dependent = query_variables(value)
+    design_tier = (
+        "EVIDENCE-SUPPORTED DESIGN"
+        if profile.key != "residual_microstructure_short_crack" or has_direct_interaction_evidence(value)
+        else "PROVISIONAL FALSIFICATION DESIGN"
+    )
     return SkillOutput(SKILL_NAME, complete or direct, "" if complete else reasoning, f"{profile.title}的精确水平和样本量必须由预实验方差、设备能力与安全审查冻结。", traceable_cards(value), gate, missing_evidence(value), {
         "complete_answer": complete, "falsification_criteria": falsifiers, "quality_metrics": QUALITY_METRICS,
+        "design_tier": design_tier,
         "research_object": (value.query_frame or {}).get("alloy_grade") or (value.query_frame or {}).get("material"),
         "hypothesis": direct, "independent_variables": independent,
         "factor_levels": "文献范围∩设备能力，经预实验冻结；双因素优先全因子或响应面",

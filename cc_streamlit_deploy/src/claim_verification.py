@@ -6,6 +6,15 @@ import re
 from typing import Any
 
 from src.feature_flags import feature_enabled
+from src.claim_evidence_verifier import (
+    ALTERNATIVE_MECHANISM,
+    CONDITION_DEPENDENT,
+    DIRECT_COUNTER,
+    DIRECT_SUPPORT,
+    INSUFFICIENT,
+    SUPPORTING_CONTEXT,
+    verify_claim_evidence,
+)
 
 
 _SENTENCE = re.compile(r"(?<=[。！？!?])|\n+")
@@ -17,10 +26,14 @@ _SCIENTIFIC_SIGNAL = re.compile(
     re.I,
 )
 _NUMBER_WITH_UNIT = re.compile(r"\d+(?:\.\d+)?\s*(?:MPa|GPa|Hz|mm|µm|μm|%|cycles?)", re.I)
-_INFERENCE_MARKERS = ("系统推断", "可以推测", "候选模型", "待拟合", "尚未直接验证")
+_INFERENCE_MARKERS = (
+    "系统推断", "可以推测", "候选模型", "待拟合", "尚未直接验证",
+    "【系统候选推断】", "【条件化综合判断】", "【替代机制】", "【证据不足】",
+)
 _METHOD_OR_BOUNDARY_MARKERS = (
     "建议", "需要补充", "可采用", "应采用", "应补充", "当前不能确定",
-    "当前证据不足", "本地证据不足", "缺少", "不能外推", "不得外推", "用于验证",
+    "当前证据不足", "本地证据不足", "缺少", "不能外推", "不能跨", "不得外推",
+    "只支持在已报告条件", "用于验证",
 )
 
 
@@ -29,6 +42,11 @@ def _claim_sentences(answer: str) -> list[str]:
     claims = []
     for item in _SENTENCE.split(body):
         cleaned = re.sub(r"^#{1,6}\s+|^[-*]\s+", "", item).strip()
+        # A rendered Markdown table is a structured presentation block. Treating
+        # each pipe-delimited row as prose causes the guard label to corrupt the
+        # table and leak raw Markdown into Streamlit.
+        if cleaned.startswith("|") and cleaned.endswith("|"):
+            continue
         if claims and _EVIDENCE_LABEL.search(cleaned):
             claims[-1] = f"{claims[-1]} {cleaned}"
             continue
@@ -62,10 +80,40 @@ def verify_answer_claims(answer: str, evidence_bundle: dict[str, Any]) -> dict[s
         inference = any(marker in claim for marker in _INFERENCE_MARKERS)
         method_or_boundary = any(marker in claim for marker in _METHOD_OR_BOUNDARY_MARKERS)
         unsupported_numeric = bool(_NUMBER_WITH_UNIT.search(claim)) and not cited_ids and not inference and not method_or_boundary
+        cited_rows = []
+        for evidence_id in cited_ids:
+            row = dict(citations.get(evidence_id) or formulas.get(evidence_id) or {})
+            row.setdefault("evidence_id", evidence_id)
+            cited_rows.append(row)
+        semantic_available = any(
+            row.get("original_text") or row.get("claim") for row in cited_rows
+        )
+        semantic = (
+            verify_claim_evidence(
+                claim,
+                cited_rows,
+                query_frame=evidence_bundle.get("query_frame") or {},
+            )
+            if semantic_available else None
+        )
+        best_role = semantic["best_role"] if semantic else "LEGACY_TRACEABLE"
+        counter_claim = bool(re.search(r"反证|反向|无显著|没有显著|效应消失|方向相反", claim))
+        conditional_claim = bool(re.search(r"条件|仅在|取决于|不能外推|边界", claim))
+        alternative_claim = bool(re.search(r"替代机制|替代解释|另一种解释|不自动否定", claim))
+        context_claim = bool(re.search(r"背景|支持性上下文|相关事实|不能支持完整因果", claim))
+        role_supports_claim = (
+            best_role == DIRECT_SUPPORT
+            or (best_role == DIRECT_COUNTER and counter_claim)
+            or (best_role == CONDITION_DEPENDENT and conditional_claim)
+            or (best_role == ALTERNATIVE_MECHANISM and alternative_claim)
+            or (best_role == SUPPORTING_CONTEXT and context_claim)
+            or best_role == "LEGACY_TRACEABLE"
+        )
         status = (
-            "SUPPORTED" if cited_ids and not unknown_ids and not invalid_pages
-            else "SYSTEM_INFERENCE" if inference
+            "SYSTEM_INFERENCE" if inference
             else "METHOD_OR_BOUNDARY" if method_or_boundary
+            else "SUPPORTED" if cited_ids and not unknown_ids and not invalid_pages and role_supports_claim
+            else "MISALIGNED_EVIDENCE" if cited_ids and semantic_available
             else "UNSUPPORTED"
         )
         if unknown_ids:
@@ -74,6 +122,8 @@ def verify_answer_claims(answer: str, evidence_bundle: dict[str, Any]) -> dict[s
             critical_failures.append(f"claim_{index}:invalid_page")
         if unsupported_numeric:
             critical_failures.append(f"claim_{index}:unsupported_numeric_value")
+        if status == "MISALIGNED_EVIDENCE":
+            critical_failures.append(f"claim_{index}:evidence_role_mismatch:{best_role}")
         records.append({
             "claim_index": index,
             "claim_text": claim,
@@ -85,6 +135,8 @@ def verify_answer_claims(answer: str, evidence_bundle: dict[str, Any]) -> dict[s
             "system_inference": inference,
             "method_or_boundary": method_or_boundary,
             "unsupported_numeric_value": unsupported_numeric,
+            "verified_evidence_role": best_role,
+            "semantic_evidence_audit": semantic or {},
         })
     supported = sum(record["status"] == "SUPPORTED" for record in records)
     verifiable = [record for record in records if record["status"] != "METHOD_OR_BOUNDARY"]
@@ -95,6 +147,7 @@ def verify_answer_claims(answer: str, evidence_bundle: dict[str, Any]) -> dict[s
         "system_inference_count": sum(record["status"] == "SYSTEM_INFERENCE" for record in records),
         "method_or_boundary_count": sum(record["status"] == "METHOD_OR_BOUNDARY" for record in records),
         "unsupported_claim_count": sum(record["status"] == "UNSUPPORTED" for record in records),
+        "misaligned_evidence_count": sum(record["status"] == "MISALIGNED_EVIDENCE" for record in records),
         "grounded_claim_rate": round(supported / len(verifiable), 4) if verifiable else 1.0,
         "critical_failures": critical_failures,
         "claims": records,
@@ -109,16 +162,26 @@ def apply_claim_guard(answer: str, evidence_bundle: dict[str, Any]) -> tuple[str
     guarded = str(answer)
     changed = 0
     for record in before["claims"]:
-        if record["status"] != "UNSUPPORTED":
+        if record["status"] not in {"UNSUPPORTED", "MISALIGNED_EVIDENCE"}:
             continue
         claim = record["claim_text"]
         if claim not in guarded:
             continue
-        prefix = (
-            "本地证据不足，不能确认以下数值性陈述："
-            if record["unsupported_numeric_value"]
-            else "系统推断（当前引文未直接验证）："
-        )
+        verified_role = record.get("verified_evidence_role")
+        if record["unsupported_numeric_value"]:
+            prefix = "本地证据不足，不能确认以下数值性陈述："
+        elif verified_role == SUPPORTING_CONTEXT:
+            prefix = "【证据不足】该引文只支持背景，不能直接支持以下完整主张："
+        elif verified_role == CONDITION_DEPENDENT:
+            prefix = "【条件化综合判断】"
+        elif verified_role == ALTERNATIVE_MECHANISM:
+            prefix = "【替代机制】"
+        elif verified_role == DIRECT_COUNTER:
+            prefix = "【证据不足】该反向证据不能直接支持以下正向主张："
+        elif verified_role == INSUFFICIENT:
+            prefix = "【证据不足】"
+        else:
+            prefix = "系统推断（当前引文未直接验证）："
         cleaned = claim.lstrip("，,；; ")
         guarded = guarded.replace(claim, prefix + cleaned, 1)
         changed += 1
