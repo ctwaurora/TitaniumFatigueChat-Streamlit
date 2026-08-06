@@ -478,6 +478,12 @@ def _build_skill_input(
         query_frame=query_frame.as_dict(), dataset_version=dataset_version,
     )
     formula_records = list(bundle.formulas)
+    bundle_payload = bundle.as_dict()
+    bundle_payload["source_evidence_ids"] = sorted({
+        str(row.get("doc_id") or row.get("evidence_id") or "").strip()
+        for row in [*support, *counter, *conditional, *alternative, *supporting_context, *retrieved]
+        if row.get("doc_id") or row.get("evidence_id")
+    })
     return SkillInput(
         user_query=question,
         parsed_entities=parsed_entities,
@@ -488,7 +494,7 @@ def _build_skill_input(
         counter_evidence=counter,
         condition_dependent_evidence=conditional,
         dataset_version=dataset_version,
-        evidence_bundle=bundle.as_dict(),
+        evidence_bundle=bundle_payload,
         query_frame=query_frame.as_dict(),
         alternative_mechanism_evidence=alternative,
         supporting_context_evidence=supporting_context,
@@ -628,7 +634,8 @@ def run_smart_search(
     diagnostics["corrected_query"] = effective
     diagnostics["llm_executed"] = False
     diagnostics["llm_error"] = ""
-    diagnostics["generation_status"] = "EVIDENCE_GATE_REJECTED"
+    diagnostics["generation_status"] = "OUTPUT_INVALID"
+    diagnostics["completion_class"] = "EVIDENCE_GATE_REJECTED"
     diagnostics["model_error_category"] = ""
     diagnostics["dataset_version"] = dataset_version
     diagnostics["retrieval_elapsed_seconds"] = round(retrieval_elapsed, 4)
@@ -713,6 +720,7 @@ def run_smart_search(
             question=question,
             skill_name=fallback_output.skill_name,
             evidence_bundle=skill_input.evidence_bundle,
+            skill_output=fallback_output,
         )
         return fallback_output, fallback_answer, fallback_quality
 
@@ -761,6 +769,7 @@ def run_smart_search(
         question=question,
         skill_name=skill_output.skill_name,
         evidence_bundle=skill_input.evidence_bundle,
+        skill_output=skill_output,
     )
     repair_attempted = False
     if model_service_error is not None:
@@ -770,12 +779,24 @@ def run_smart_search(
             "也没有生成未经模型调用确认的科研结论。请稍后重试。\n\n"
             f"服务状态：MODEL_SERVICE_ERROR（{diagnostics.get('model_error_category') or 'MODEL_SERVICE_ERROR'}）"
         )
-        quality = {"passed": False, "status": "MODEL_SERVICE_ERROR", "failures": []}
+        quality = {
+            "passed": False,
+            "valid": False,
+            "successful": False,
+            "state": "MODEL_SERVICE_ERROR",
+            "status": "MODEL_SERVICE_ERROR",
+            "completion_class": "MODEL_SERVICE_ERROR",
+            "failures": [],
+            "scientific_failures": [],
+            "format_failures": [],
+        }
     elif diagnostics["llm_executed"] and not quality["passed"]:
         repair_attempted = True
         try:
             repair_prompt = skill.build_repair_prompt(
-                skill_input, draft=answer, failures=quality["failures"]
+                skill_input,
+                draft=answer,
+                failures=quality.get("scientific_failures") or quality["failures"],
             )
             repaired = client.chat(
                 [
@@ -792,6 +813,7 @@ def run_smart_search(
                 question=question,
                 skill_name=repaired_output.skill_name,
                 evidence_bundle=skill_input.evidence_bundle,
+                skill_output=repaired_output,
             )
             if repaired_quality["passed"]:
                 skill_output, answer, quality = repaired_output, repaired_answer, repaired_quality
@@ -802,7 +824,9 @@ def run_smart_search(
                 else:
                     quality = fallback_quality
                     answer = precise_refusal(
-                        skill_output.skill_name, quality["failures"], skill_input.evidence_bundle
+                        skill_output.skill_name,
+                        quality.get("scientific_failures") or quality["failures"],
+                        skill_input.evidence_bundle,
                     )
         except (DeepSeekRequestError, DeepSeekConfigurationError, ValueError, OSError) as exc:
             diagnostics["llm_error"] = f"REPAIR_{type(exc).__name__}:{exc}"
@@ -817,8 +841,17 @@ def run_smart_search(
                 # service problem, never an evidence-gate refusal.
     elif not quality["passed"]:
         answer = precise_refusal(
-            skill_output.skill_name, quality["failures"], skill_input.evidence_bundle
+            skill_output.skill_name,
+            quality.get("scientific_failures") or quality["failures"],
+            skill_input.evidence_bundle,
         )
+    if quality.get("state") == "CANDIDATE_EVIDENCE_GAP":
+        answer = answer.replace(
+            "A. 得到支持的具体研究空白",
+            "B. 候选证据缺口，尚需外部文献验证",
+        ).replace("confirmed_gap", "candidate_evidence_gap")
+    skill_output.quality_gate = dict(quality)
+    skill_output.specific_fields["result_state"] = quality.get("state")
     claim_guard = {"enabled": False, "changed_claim_count": 0}
     if feature_enabled("TFC_CLAIM_VERIFICATION", default=True):
         answer, claim_guard = apply_claim_guard(answer, skill_input.evidence_bundle)
@@ -835,9 +868,12 @@ def run_smart_search(
     diagnostics["timeout_exceeded"] = diagnostics["total_elapsed_seconds"] > 30
     diagnostics["specificity_gate"] = quality
     if diagnostics.get("generation_status") != "MODEL_SERVICE_ERROR":
-        diagnostics["generation_status"] = (
-            "GENERATION_COMPLETED" if quality.get("passed") else "EVIDENCE_GATE_REJECTED"
+        diagnostics["generation_status"] = quality.get("state") or "OUTPUT_INVALID"
+        diagnostics["completion_class"] = quality.get("completion_class") or (
+            "VALID_SCIENTIFIC_OUTPUT" if quality.get("valid") else "EVIDENCE_GATE_REJECTED"
         )
+    else:
+        diagnostics["completion_class"] = "MODEL_SERVICE_ERROR"
     diagnostics["llm_call_count"] = llm_call_count
     diagnostics["quality_repair_attempted"] = repair_attempted
     diagnostics["identified_topics"] = result.get("identified_topics") or []

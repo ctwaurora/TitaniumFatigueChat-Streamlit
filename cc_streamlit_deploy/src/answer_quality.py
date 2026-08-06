@@ -8,6 +8,7 @@ from typing import Any
 from src.research_topics import query_mentions_pores
 from src.research_skills.common import is_usable_formula_record
 from src.claim_verification import verify_answer_claims
+from src.claim_evidence_verifier import scientific_concepts
 from src.feature_flags import feature_enabled
 from src.science_output_postprocessor import science_text_quality_audit
 
@@ -30,17 +31,189 @@ SKILL_REQUIREMENTS = {
 }
 
 
+SKILL_STATES = {
+    "scientific_analysis_skill": {
+        "valid": {
+            "DIRECT_EVIDENCE_SYNTHESIS",
+            "CONDITIONAL_SYNTHESIS",
+            "INSUFFICIENT_FOR_CONCLUSION",
+        },
+        "successful": {"DIRECT_EVIDENCE_SYNTHESIS", "CONDITIONAL_SYNTHESIS"},
+    },
+    "research_gap_skill": {
+        "valid": {
+            "CONFIRMED_RESEARCH_GAP",
+            "CANDIDATE_EVIDENCE_GAP",
+            "CONDITION_COVERAGE_GAP",
+            "TOPIC_SUBSTANTIALLY_RESOLVED",
+            "INSUFFICIENT_FOR_GAP_ASSESSMENT",
+        },
+        "successful": {
+            "CONFIRMED_RESEARCH_GAP",
+            "CANDIDATE_EVIDENCE_GAP",
+            "CONDITION_COVERAGE_GAP",
+            "TOPIC_SUBSTANTIALLY_RESOLVED",
+        },
+    },
+    "hypothesis_generation_skill": {
+        "valid": {
+            "EVIDENCE_ANCHORED_HYPOTHESIS",
+            "PROVISIONAL_TESTABLE_HYPOTHESIS",
+            "NO_JUSTIFIED_HYPOTHESIS",
+        },
+        "successful": {
+            "EVIDENCE_ANCHORED_HYPOTHESIS",
+            "PROVISIONAL_TESTABLE_HYPOTHESIS",
+        },
+    },
+    "experiment_design_skill": {
+        "valid": {
+            "EVIDENCE_SUPPORTED_DESIGN",
+            "PROVISIONAL_FALSIFICATION_DESIGN",
+            "MINIMAL_VALIDATION_DESIGN",
+            "DESIGN_NOT_JUSTIFIED",
+        },
+        "successful": {
+            "EVIDENCE_SUPPORTED_DESIGN",
+            "PROVISIONAL_FALSIFICATION_DESIGN",
+            "MINIMAL_VALIDATION_DESIGN",
+        },
+    },
+}
+
+
+def _skill_output_parts(skill_output: Any) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    if skill_output is None:
+        return {}, []
+    if isinstance(skill_output, dict):
+        return (
+            dict(skill_output.get("specific_fields") or {}),
+            list(skill_output.get("evidence_cards") or []),
+        )
+    return (
+        dict(getattr(skill_output, "specific_fields", {}) or {}),
+        list(getattr(skill_output, "evidence_cards", []) or []),
+    )
+
+
+def _normalise_token(value: Any) -> str:
+    return re.sub(r"[^A-Z0-9]+", "_", str(value or "").upper()).strip("_")
+
+
+def _has_severe_claim_mismatch(
+    report: dict[str, Any], evidence_bundle: dict[str, Any]
+) -> bool:
+    """Reject only clear semantic mismatch, not every conservative heuristic miss."""
+    citations = evidence_bundle.get("citation_index") or {}
+    for record in report.get("claims") or []:
+        if record.get("status") != "MISALIGNED_EVIDENCE":
+            continue
+        claim_text = str(record.get("claim_text") or "")
+        if re.search(r"反向|反证|相反|条件|边界|限制|替代|不能外推", claim_text):
+            continue
+        claim_concepts = scientific_concepts(claim_text)
+        evidence_concepts: set[str] = set()
+        for evidence_id in record.get("evidence_ids") or []:
+            row = citations.get(evidence_id) or {}
+            evidence_concepts.update(
+                scientific_concepts(
+                    " ".join(
+                        str(row.get(key) or "")
+                        for key in ("claim", "original_text", "text")
+                    )
+                )
+            )
+        if claim_concepts and evidence_concepts and not (claim_concepts & evidence_concepts):
+            return True
+    return False
+
+
+def _normalised_skill_state(
+    *,
+    skill_name: str,
+    answer: str,
+    fields: dict[str, Any],
+    evidence_roles: set[str],
+    has_traceable_evidence: bool,
+    scientific_failures: list[str],
+) -> str:
+    if scientific_failures:
+        return "OUTPUT_INVALID"
+
+    if skill_name == "scientific_analysis_skill":
+        if "DIRECT_SUPPORT" in evidence_roles:
+            return "DIRECT_EVIDENCE_SYNTHESIS"
+        if evidence_roles & {"CONDITION_DEPENDENT", "SUPPORTING_CONTEXT", "ALTERNATIVE_MECHANISM"}:
+            return "CONDITIONAL_SYNTHESIS"
+        return "INSUFFICIENT_FOR_CONCLUSION"
+
+    if skill_name == "research_gap_skill":
+        raw = _normalise_token(fields.get("gap_status"))
+        field_text = str(fields.get("gap_status") or "").casefold()
+        if field_text:
+            if "COVERAGE" in raw or "条件覆盖" in field_text:
+                return "CONDITION_COVERAGE_GAP"
+            if "FALSE" in raw or "RESOLVED" in raw or "已被解决" in field_text or "推翻" in field_text:
+                return "TOPIC_SUBSTANTIALLY_RESOLVED"
+            if "CANDIDATE" in raw or "候选证据缺口" in field_text or raw.startswith("B"):
+                return "CANDIDATE_EVIDENCE_GAP"
+            if "CONFIRMED" in raw or "真实研究空白" in field_text or raw.startswith("A"):
+                return "CONFIRMED_RESEARCH_GAP"
+        text = answer.casefold()
+        if "条件覆盖" in text or "匹配条件缺口" in text:
+            return "CONDITION_COVERAGE_GAP"
+        if "已被解决" in text or "反向证据推翻" in text:
+            return "TOPIC_SUBSTANTIALLY_RESOLVED"
+        if "候选证据缺口" in text:
+            return "CANDIDATE_EVIDENCE_GAP"
+        if "真实研究空白" in text or "得到支持的具体研究空白" in text:
+            return "CONFIRMED_RESEARCH_GAP"
+        if has_traceable_evidence:
+            return "CANDIDATE_EVIDENCE_GAP"
+        return "INSUFFICIENT_FOR_GAP_ASSESSMENT"
+
+    independent = fields.get("independent_variables") or []
+    dependent = fields.get("dependent_variables") or []
+    falsifiers = fields.get("falsification_criteria") or []
+    if skill_name == "hypothesis_generation_skill":
+        hypothesis = str(fields.get("hypothesis_statement") or fields.get("hypothesis") or answer)
+        if not hypothesis.strip() or not independent or not dependent:
+            return "NO_JUSTIFIED_HYPOTHESIS"
+        if "DIRECT_SUPPORT" in evidence_roles and len(falsifiers) >= 2:
+            return "EVIDENCE_ANCHORED_HYPOTHESIS"
+        if has_traceable_evidence and len(falsifiers) >= 2:
+            return "PROVISIONAL_TESTABLE_HYPOTHESIS"
+        return "NO_JUSTIFIED_HYPOTHESIS"
+
+    if skill_name == "experiment_design_skill":
+        tier = _normalise_token(fields.get("design_tier"))
+        if tier == "EVIDENCE_SUPPORTED_DESIGN" and "DIRECT_SUPPORT" in evidence_roles:
+            return "EVIDENCE_SUPPORTED_DESIGN"
+        if tier == "PROVISIONAL_FALSIFICATION_DESIGN":
+            return "PROVISIONAL_FALSIFICATION_DESIGN"
+        if independent and dependent and fields.get("control_variables") and has_traceable_evidence:
+            return "MINIMAL_VALIDATION_DESIGN"
+        return "DESIGN_NOT_JUSTIFIED"
+
+    return "OUTPUT_INVALID"
+
+
 def validate_answer_quality(
     answer: str,
     *,
     question: str,
     skill_name: str,
     evidence_bundle: dict[str, Any],
+    skill_output: Any = None,
 ) -> dict[str, Any]:
     failures: list[str] = []
+    fields, evidence_cards = _skill_output_parts(skill_output)
     frame = evidence_bundle.get("query_frame") or {}
-    if not str(answer).strip():
+    stripped_answer = str(answer).strip()
+    if not stripped_answer:
         failures.append("empty_answer")
+    elif len(re.sub(r"[#*`|\s]", "", stripped_answer)) < 12:
+        failures.append("unparseable_or_severely_truncated_output")
     if COUNT_TALK.search(answer):
         failures.append("visible_evidence_count_talk")
     if any(term.casefold() in answer.casefold() for term in EVIDENCE_COUNT_PHRASES):
@@ -76,8 +249,21 @@ def validate_answer_quality(
             failures.append("direct_answer_missing_mechanism")
 
     citations = evidence_bundle.get("citation_index") or {}
-    known_ids = set(citations)
-    cited_ids = set(re.findall(r"\b(?:EV|COND_EV|FORMULA)_[A-Z0-9_]+\b", answer))
+    formula_ids = {
+        str(item.get("formula_id"))
+        for item in evidence_bundle.get("formulas") or []
+        if item.get("formula_id")
+    }
+    known_ids = set(citations) | formula_ids | {
+        str(item) for item in evidence_bundle.get("source_evidence_ids") or [] if item
+    }
+    card_ids = {
+        str(item.get("evidence_id") or "").strip()
+        for item in evidence_cards
+        if item.get("evidence_id")
+    }
+    labeled_ids = set(re.findall(r"Evidence\s*ID\s*[：:]\s*([A-Za-z0-9_.:-]+)", answer, re.I))
+    cited_ids = set(re.findall(r"\b(?:EV|COND_EV|FORMULA)_[A-Z0-9_]+\b", answer)) | labeled_ids | card_ids
     unknown_ids = sorted(cited_ids - known_ids - {
         str(item.get("formula_id")) for item in evidence_bundle.get("formulas") or []
     })
@@ -188,9 +374,10 @@ def validate_answer_quality(
         if pore_hits > pore_limit or any(PORE_PATTERN.search(heading) for heading in headings):
             failures.append("unsolicited_pore_centrality")
 
+    structured_falsifiers = fields.get("falsification_criteria") or []
     if skill_name in {"hypothesis_generation_skill", "experiment_design_skill"}:
         falsifiers = len(re.findall(r"(?:推翻|证伪|置信区间|无法复现|相反)", answer))
-        if falsifiers < 2:
+        if falsifiers < 2 and len(structured_falsifiers) < 2:
             failures.append("insufficient_falsification_criteria")
     if skill_name == "hypothesis_generation_skill":
         if not any(term in answer for term in ("文献原公式", "待拟合候选模型", "当前没有可核验公式")):
@@ -269,8 +456,11 @@ def validate_answer_quality(
         if feature_enabled("TFC_CLAIM_VERIFICATION", default=True)
         else {"passed": True, "disabled": True, "critical_failures": []}
     )
-    if claim_verification.get("misaligned_evidence_count"):
-        failures.append("claim_verification:evidence_role_mismatch")
+    severe_claim_mismatch = _has_severe_claim_mismatch(
+        claim_verification, evidence_bundle
+    )
+    if severe_claim_mismatch:
+        failures.append("claim_verification:severe_evidence_role_mismatch")
     if (
         feature_enabled("TFC_CLAIM_VERIFICATION_STRICT", default=False)
         and not claim_verification["passed"]
@@ -280,9 +470,112 @@ def validate_answer_quality(
             for failure in claim_verification["critical_failures"]
         )
 
+    object_value = (
+        fields.get("scientific_object")
+        or fields.get("research_object")
+        or frame.get("alloy_grade")
+        or frame.get("material")
+        or frame.get("manufacturing_process")
+    )
+    if not object_value:
+        for card in evidence_cards:
+            conditions = card.get("experimental_conditions") or {}
+            object_value = (
+                conditions.get("alloy_grade")
+                or conditions.get("material")
+                or conditions.get("manufacturing_process")
+                or conditions.get("process")
+            )
+            if object_value:
+                break
+    independent = fields.get("independent_variables") or frame.get("independent_variables") or []
+    dependent = fields.get("dependent_variables") or frame.get("dependent_variables") or []
+    if frame and not object_value:
+        failures.append("query_object_missing")
+    if skill_name in {"hypothesis_generation_skill", "experiment_design_skill"}:
+        if not independent:
+            failures.append("measurable_independent_variable_missing")
+        if not dependent:
+            failures.append("measurable_dependent_variable_missing")
+
+    scientific_prefixes = (
+        "empty_answer",
+        "unparseable_or_severely_truncated_output",
+        "unknown_evidence_id:",
+        "no_traceable_evidence_id",
+        "query_entity_missing:",
+        "invalid_page_reference",
+        "unverified_formula_claim",
+        "long_crack_formula_applied_to_short_crack",
+        "unsolicited_pore_centrality",
+        "fabricated_candidate_parameter",
+        "system_inference_presented_as_fact",
+        "query_object_missing",
+        "measurable_independent_variable_missing",
+        "measurable_dependent_variable_missing",
+        "claim_verification:severe_evidence_role_mismatch",
+    )
+    structured_variables = {str(item) for item in [*independent, *dependent]}
+    scientific_failures = []
+    for item in failures:
+        if not item.startswith(scientific_prefixes):
+            continue
+        if item == "query_entity_missing:alloy_grade" and object_value:
+            continue
+        if item.startswith("query_entity_missing:"):
+            entity = item.split(":", 1)[1]
+            if entity in structured_variables:
+                continue
+        scientific_failures.append(item)
+    if feature_enabled("TFC_CLAIM_VERIFICATION_STRICT", default=False):
+        scientific_failures.extend(
+            item for item in failures if item.startswith("claim_verification:")
+        )
+    if "insufficient_falsification_criteria" in failures and len(structured_falsifiers) < 2:
+        scientific_failures.append("insufficient_falsification_criteria")
+    for critical in claim_verification.get("critical_failures") or []:
+        if "unsupported_numeric_value" in critical:
+            scientific_failures.append(f"claim_verification:{critical}")
+    scientific_failures = list(dict.fromkeys(scientific_failures))
+    format_failures = [item for item in failures if item not in scientific_failures]
+    has_traceable_evidence = bool(cited_ids & known_ids)
+    evidence_roles = {
+        str(card.get("role") or "").upper()
+        for card in evidence_cards
+        if str(card.get("evidence_id") or "") in known_ids
+    }
+    state = _normalised_skill_state(
+        skill_name=skill_name,
+        answer=answer,
+        fields=fields,
+        evidence_roles=evidence_roles,
+        has_traceable_evidence=has_traceable_evidence,
+        scientific_failures=scientific_failures,
+    )
+    valid_states = SKILL_STATES.get(skill_name, {}).get("valid", set())
+    successful_states = SKILL_STATES.get(skill_name, {}).get("successful", set())
+    valid = state in valid_states
+    schema_repair = {
+        "applied": bool(format_failures or fields or evidence_cards),
+        "source": "skill_output_specific_fields_and_evidence_cards" if skill_output is not None else "answer_text",
+        "normalised_state": state,
+        "traceable_evidence_ids": sorted(cited_ids & known_ids),
+        "repaired_fields": sorted(key for key, value in fields.items() if value not in (None, "", [], {})),
+        "format_failures_retained_as_non_blocking": format_failures,
+    }
+
     return {
-        "passed": not failures,
+        "passed": valid,
+        "valid": valid,
+        "successful": state in successful_states,
+        "state": state,
+        "status": state,
+        "completion_class": "VALID_SCIENTIFIC_OUTPUT" if valid else "EVIDENCE_GATE_REJECTED",
         "failures": failures,
+        "scientific_failures": scientific_failures,
+        "format_failures": format_failures,
+        "repairable_format_failures": format_failures,
+        "schema_repair": schema_repair,
         "skill_name": skill_name,
         "citation_ids_checked": sorted(cited_ids),
         "pore_bias_checked": True,
