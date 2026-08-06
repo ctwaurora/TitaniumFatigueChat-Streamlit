@@ -1,9 +1,9 @@
 {
   "bundle_version": "1.0.0",
   "schema_version": "cloud-evidence-bundle-1.0",
-  "dataset_version": "5de26e061091f069cfc0d78b19e44b5f2124edcb56b872f5d1d148e6bf9b32fd",
-  "export_time": "2026-08-06T04:35:18+00:00",
-  "source_commit": "0b5b06bb3c05b3cd059c72ac25b58e06ef1d4a26",
+  "dataset_version": "feba4ed5a5551bc0f452d178640815b4269ddae57f71c53e8229d918b23d8593",
+  "export_time": "2026-08-06T08:26:07+00:00",
+  "source_commit": "c2ca6f82fbbc6b19d8a9f1e3b97c63b78ce0765f",
   "formal_literature_count": 210,
   "formal_rag_count": 210,
   "traceable_literature_count": 210,
