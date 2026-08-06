@@ -14,7 +14,11 @@ from typing import Any, Callable
 from src.answer_quality import precise_refusal, validate_answer_quality
 from src.claim_verification import apply_claim_guard
 from src.api_keys import get_deepseek_settings
-from src.deepseek_client import DeepSeekClient, DeepSeekRequestError
+from src.deepseek_client import (
+    DeepSeekClient,
+    DeepSeekConfigurationError,
+    DeepSeekRequestError,
+)
 from src.evidence_bundle import build_evidence_bundle
 from src.query_frame import parse_query_frame
 from src.query_understanding import understand_user_query
@@ -624,6 +628,8 @@ def run_smart_search(
     diagnostics["corrected_query"] = effective
     diagnostics["llm_executed"] = False
     diagnostics["llm_error"] = ""
+    diagnostics["generation_status"] = "EVIDENCE_GATE_REJECTED"
+    diagnostics["model_error_category"] = ""
     diagnostics["dataset_version"] = dataset_version
     diagnostics["retrieval_elapsed_seconds"] = round(retrieval_elapsed, 4)
     diagnostics["retrieval_cache_hit"] = cache_after.hits > cache_before.hits
@@ -712,6 +718,7 @@ def run_smart_search(
 
     synthesis = ""
     llm_call_count = 0
+    model_service_error: Exception | None = None
     settings = get_deepseek_settings()
     if telemetry:
         telemetry.transition("REASONING")
@@ -729,7 +736,7 @@ def run_smart_search(
                     {"role": "system", "content": "你是钛合金疲劳科研助手，必须严格服从证据引用约束。"},
                     {"role": "user", "content": skill.build_prompt(skill_input)},
                 ],
-                temperature=0.1, max_tokens=1600, timeout=12, connect_timeout=3, max_retries=0,
+                temperature=0.1, max_tokens=1600, timeout=60, connect_timeout=10, max_retries=3,
             )
             llm_call_count += 1
             diagnostics["llm_executed"] = True
@@ -737,8 +744,16 @@ def run_smart_search(
             diagnostics["llm_elapsed_seconds"] = round(
                 time.perf_counter() - llm_started, 4
             )
-        except (DeepSeekRequestError, ValueError, OSError) as exc:
+        except (DeepSeekRequestError, DeepSeekConfigurationError, ValueError, OSError) as exc:
+            model_service_error = exc
             diagnostics["llm_error"] = f"{type(exc).__name__}:{exc}"
+            diagnostics["model_error_category"] = getattr(exc, "category", "MODEL_SERVICE_ERROR")
+            diagnostics["generation_status"] = "MODEL_SERVICE_ERROR"
+    elif use_llm and not settings.configured:
+        model_service_error = DeepSeekConfigurationError("DEEPSEEK_API_KEY is not configured.")
+        diagnostics["llm_error"] = "DeepSeekConfigurationError:DEEPSEEK_API_KEY is not configured."
+        diagnostics["model_error_category"] = "CONFIGURATION_ERROR"
+        diagnostics["generation_status"] = "MODEL_SERVICE_ERROR"
     skill_output = skill.generate(skill_input, synthesis=synthesis)
     answer = postprocess_science_output(skill.render_output(skill_output))
     quality = validate_answer_quality(
@@ -748,7 +763,15 @@ def run_smart_search(
         evidence_bundle=skill_input.evidence_bundle,
     )
     repair_attempted = False
-    if diagnostics["llm_executed"] and not quality["passed"]:
+    if model_service_error is not None:
+        answer = (
+            "## 模型服务暂时不可用\n\n"
+            "DeepSeek模型服务本次未能完成请求，系统没有将网络故障解释为证据不足，"
+            "也没有生成未经模型调用确认的科研结论。请稍后重试。\n\n"
+            f"服务状态：MODEL_SERVICE_ERROR（{diagnostics.get('model_error_category') or 'MODEL_SERVICE_ERROR'}）"
+        )
+        quality = {"passed": False, "status": "MODEL_SERVICE_ERROR", "failures": []}
+    elif diagnostics["llm_executed"] and not quality["passed"]:
         repair_attempted = True
         try:
             repair_prompt = skill.build_repair_prompt(
@@ -759,7 +782,7 @@ def run_smart_search(
                     {"role": "system", "content": "你是科研回答质量修复器。只能使用给定EvidenceBundle，不得新增事实或引用。"},
                     {"role": "user", "content": repair_prompt},
                 ],
-                temperature=0.0, max_tokens=1400, timeout=10, connect_timeout=3, max_retries=0,
+                temperature=0.0, max_tokens=1400, timeout=60, connect_timeout=10, max_retries=3,
             )
             llm_call_count += 1
             repaired_output = skill.generate(skill_input, synthesis=repaired)
@@ -781,16 +804,17 @@ def run_smart_search(
                     answer = precise_refusal(
                         skill_output.skill_name, quality["failures"], skill_input.evidence_bundle
                     )
-        except (DeepSeekRequestError, ValueError, OSError) as exc:
+        except (DeepSeekRequestError, DeepSeekConfigurationError, ValueError, OSError) as exc:
             diagnostics["llm_error"] = f"REPAIR_{type(exc).__name__}:{exc}"
+            diagnostics["model_error_category"] = getattr(exc, "category", "MODEL_SERVICE_ERROR")
+            diagnostics["generation_status"] = "MODEL_SERVICE_ERROR"
             fallback_output, fallback_answer, fallback_quality = validated_deterministic_fallback()
             if fallback_quality["passed"]:
                 skill_output, answer, quality = fallback_output, fallback_answer, fallback_quality
             else:
                 quality = fallback_quality
-                answer = precise_refusal(
-                    skill_output.skill_name, quality["failures"], skill_input.evidence_bundle
-                )
+                # Keep the generated draft visible; a failed repair is a model
+                # service problem, never an evidence-gate refusal.
     elif not quality["passed"]:
         answer = precise_refusal(
             skill_output.skill_name, quality["failures"], skill_input.evidence_bundle
@@ -810,6 +834,10 @@ def run_smart_search(
     )
     diagnostics["timeout_exceeded"] = diagnostics["total_elapsed_seconds"] > 30
     diagnostics["specificity_gate"] = quality
+    if diagnostics.get("generation_status") != "MODEL_SERVICE_ERROR":
+        diagnostics["generation_status"] = (
+            "GENERATION_COMPLETED" if quality.get("passed") else "EVIDENCE_GATE_REJECTED"
+        )
     diagnostics["llm_call_count"] = llm_call_count
     diagnostics["quality_repair_attempted"] = repair_attempted
     diagnostics["identified_topics"] = result.get("identified_topics") or []
