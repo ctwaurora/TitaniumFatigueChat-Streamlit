@@ -1,4 +1,4 @@
-"""Create a secret-free Streamlit Community Cloud deployment copy."""
+﻿"""Create a secret-free Streamlit Community Cloud deployment copy."""
 
 from __future__ import annotations
 
@@ -43,7 +43,8 @@ EXCLUDED_CODE_FILES = {
     "skills/qwen_skill.py",
 }
 
-CONFIG_FILES = ("config/task_profile.yaml",)
+CONFIG_FILES = ("config/task_profile.yaml",
+    "config/evidence_weight_config.json",)
 SCRIPT_FILES = (
     "scripts/export_streamlit_deploy.py",
     "scripts/export_cloud_evidence_bundle.py",

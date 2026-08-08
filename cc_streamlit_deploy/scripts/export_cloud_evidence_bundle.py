@@ -22,6 +22,12 @@ from sklearn.feature_extraction.text import CountVectorizer, TfidfTransformer
 from sklearn.preprocessing import normalize
 
 
+if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
+    # subprocess(text=True) uses the Windows ANSI code page in the parent.
+    # Match it when a UTF-8-mode child prints a project path containing CJK.
+    sys.stdout.reconfigure(encoding="mbcs", errors="replace")
+
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))

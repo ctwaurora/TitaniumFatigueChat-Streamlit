@@ -18,6 +18,8 @@ SUPPORTING_CONTEXT = "SUPPORTING_CONTEXT"
 CONDITION_DEPENDENT = "CONDITION_DEPENDENT"
 ALTERNATIVE_MECHANISM = "ALTERNATIVE_MECHANISM"
 DIRECT_COUNTER = "DIRECT_COUNTER"
+LIMITATION_EVIDENCE = "LIMITATION_EVIDENCE"
+REVIEW_BACKGROUND = "REVIEW_BACKGROUND"
 INSUFFICIENT = "INSUFFICIENT"
 
 EVIDENCE_ROLES = (
@@ -26,6 +28,8 @@ EVIDENCE_ROLES = (
     CONDITION_DEPENDENT,
     ALTERNATIVE_MECHANISM,
     DIRECT_COUNTER,
+    LIMITATION_EVIDENCE,
+    REVIEW_BACKGROUND,
     INSUFFICIENT,
 )
 
@@ -69,6 +73,8 @@ _MECHANISM = re.compile(
     r"机制|归因|由于|主导|滑移|织构|组织|闭合|粗糙度|孔隙",
     re.I,
 )
+_LIMITATION = re.compile(r"\blimit(?:ation|ed|s)?\b|uncertain|insufficient|cannot be generalized|not reported|局限|不足|未报告", re.I)
+_REVIEW = re.compile(r"\breview\b|systematic review|meta-analysis|综述", re.I)
 
 
 def scientific_concepts(text: Any) -> set[str]:
@@ -161,10 +167,17 @@ def classify_evidence_for_claim(
     )
     explicit_counter = bool(_COUNTER.search(evidence_text))
     mechanism_only = bool(_MECHANISM.search(evidence_text)) and coverage < 0.67
+    is_review = bool(_REVIEW.search(" ".join((str(evidence.get("title") or ""), str(evidence.get("section") or "")))))
 
     role = INSUFFICIENT
     reason = "证据与主张的核心科学概念覆盖不足。"
-    if conflicts and coverage >= 0.45:
+    if is_review and coverage >= 0.20:
+        role = REVIEW_BACKGROUND
+        reason = "Review evidence is retained as background and cannot displace matched primary evidence."
+    elif _LIMITATION.search(evidence_text) and coverage >= 0.35:
+        role = LIMITATION_EVIDENCE
+        reason = "The source directly reports an applicability limit or unresolved condition."
+    elif conflicts and coverage >= 0.45:
         role = CONDITION_DEPENDENT
         reason = "核心概念相关，但材料、工艺或载荷条件不完全匹配。"
     elif explicit_counter and directness_score >= 0.95 and coverage >= 0.67 and condition_score >= 0.65:
@@ -211,9 +224,11 @@ def verify_claim_evidence(
     role_rank = {
         DIRECT_SUPPORT: 5,
         DIRECT_COUNTER: 4,
+        LIMITATION_EVIDENCE: 3,
         CONDITION_DEPENDENT: 3,
         ALTERNATIVE_MECHANISM: 2,
         SUPPORTING_CONTEXT: 1,
+        REVIEW_BACKGROUND: 1,
         INSUFFICIENT: 0,
     }
     best = max(assessments, key=lambda item: (role_rank[item.role], item.concept_coverage), default=None)

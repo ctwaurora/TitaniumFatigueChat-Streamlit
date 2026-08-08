@@ -1,0 +1,53 @@
+{
+  "schema_version": "evidence-weight-v1",
+  "dimension_weights": {
+    "relevance": 0.25,
+    "condition_match": 0.20,
+    "evidence_directness": 0.15,
+    "study_quality": 0.12,
+    "method_quality": 0.10,
+    "material_process_match": 0.10,
+    "temporal_version_quality": 0.08
+  },
+  "role_coefficients": {
+    "DIRECT_SUPPORT": 1.0,
+    "DIRECT_COUNTER": 1.0,
+    "CONDITION_DEPENDENT": 0.82,
+    "LIMITATION_EVIDENCE": 0.80,
+    "ALTERNATIVE_MECHANISM": 0.72,
+    "SUPPORTING_CONTEXT": 0.55,
+    "REVIEW_BACKGROUND": 0.40
+  },
+  "material_process_match": {
+    "lpbf_ti6al4v": 1.0,
+    "pbf_lb_m_ti6al4v": 0.95,
+    "ebm_ti6al4v": 0.78,
+    "other_am_ti6al4v": 0.72,
+    "wrought_ti6al4v": 0.62,
+    "other_alpha_beta_titanium": 0.45,
+    "other_metal": 0.20
+  },
+  "budget": {
+    "total": 12,
+    "role_caps": {
+      "DIRECT_SUPPORT": 5,
+      "CONDITION_DEPENDENT": 2,
+      "DIRECT_COUNTER": 2,
+      "LIMITATION_EVIDENCE": 2,
+      "ALTERNATIVE_MECHANISM": 1
+    },
+    "max_single_paper_fraction": 0.25
+  },
+  "diversity": {
+    "same_paper_penalty": 0.08,
+    "same_author_penalty": 0.04,
+    "same_condition_penalty": 0.03,
+    "same_method_penalty": 0.02
+  },
+  "supplement_priority_levels": {
+    "P0": "DIRECT_MATCHED_PRIMARY",
+    "P1": "CONDITIONAL_COUNTER_MECHANISM",
+    "P2": "REVIEW_ADJACENT_ALLOY",
+    "P3": "BACKGROUND"
+  }
+}

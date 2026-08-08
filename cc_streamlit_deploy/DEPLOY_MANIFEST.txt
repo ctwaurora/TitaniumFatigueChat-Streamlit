@@ -1,11 +1,12 @@
 TitaniumFatigueChat Streamlit deployment manifest
-file_count=160
+file_count=162
 
 .gitattributes
 .gitignore
 .streamlit/config.toml
 .streamlit/secrets.example.toml
 app.py
+config/evidence_weight_config.json
 config/task_profile.yaml
 data/candidate_papers.csv
 data/cloud_bundle/bm25_document_frequency.npy
@@ -92,6 +93,7 @@ src/evidence_extraction.py
 src/evidence_gate.py
 src/evidence_quality.py
 src/evidence_trace.py
+src/evidence_weighting.py
 src/exporter.py
 src/feature_flags.py
 src/formal_library_page.py

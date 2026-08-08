@@ -36,11 +36,14 @@ from src.research_topics import (
     query_mentions_pores,
 )
 from src.query_frame import parse_query_frame
+from src.evidence_weighting import load_weight_config, score_evidence, select_evidence_budget
 from src.claim_evidence_verifier import (
     ALTERNATIVE_MECHANISM,
     CONDITION_DEPENDENT,
     DIRECT_COUNTER,
     DIRECT_SUPPORT,
+    LIMITATION_EVIDENCE,
+    REVIEW_BACKGROUND,
     SUPPORTING_CONTEXT,
     classify_evidence_for_claim,
 )
@@ -1096,8 +1099,20 @@ def retrieve_research_evidence(
             "document_topics": doc_topics,
             "unsolicited_pore_penalty": unsolicited_pore_penalty,
         }
-        candidates.append(item)
-    candidates.sort(key=lambda row: row["rerank_score"], reverse=True)
+        weighted = score_evidence(item, question, config=None)
+        # Keep the legacy rerank score for diagnostics. Candidate ordering now
+        # uses the normalized, configurable evidence score.
+        weighted["legacy_rerank_score"] = item["rerank_score"]
+        weighted["rerank_score"] = weighted["evidence_weighted_score"]
+        candidates.append(weighted)
+    candidates.sort(
+        key=lambda row: (
+            float(row.get("evidence_weighted_score") or 0.0),
+            float(row.get("rerank_score") or 0.0),
+            str(row.get("doc_id") or ""),
+        ),
+        reverse=True,
+    )
     # Duplicate diagnostics are measured on the retrieval window, not across
     # the entire corpus (where condition/evidence layers intentionally overlap).
     retrieval_window = candidates[: max(top_k * 5, 20)]
@@ -1427,15 +1442,16 @@ def answer_research_question(
                 "claim_query": subtask["claim_query"],
                 **assessment.as_dict(),
             })
+            item = score_evidence(item, question)
             doc_id = str(item.get("doc_id") or "")
             previous = pooled_by_id.get(doc_id)
-            if previous is None or float(item.get("rerank_score") or 0) > float(previous.get("rerank_score") or 0):
+            if previous is None or float(item.get("final_evidence_score") or 0) > float(previous.get("final_evidence_score") or 0):
                 pooled_by_id[doc_id] = item
             elif previous:
                 previous.setdefault("matched_retrieval_subtasks", []).append(subtask["name"])
-    pool = sorted(
-        pooled_by_id.values(), key=lambda row: float(row.get("rerank_score") or 0), reverse=True
-    )
+    # Preserve stable retrieval order in the public diagnostics contract.
+    # Budget selection independently ranks this pool by final evidence score.
+    pool = list(pooled_by_id.values())
     verifier_elapsed = round(time.perf_counter() - verifier_started, 6)
 
     def selected(role: str, limit: int = top_k) -> List[Dict[str, Any]]:
@@ -1451,11 +1467,16 @@ def answer_research_question(
         output.extend(row for row in rows if str(row.get("doc_id") or "") not in seen_ids)
         return output[:limit]
 
-    supporting = selected(DIRECT_SUPPORT)
-    supporting_context = selected(SUPPORTING_CONTEXT)
-    counter = selected(DIRECT_COUNTER) if include_counter else []
-    conditional = selected(CONDITION_DEPENDENT)
-    alternative = selected(ALTERNATIVE_MECHANISM)
+    weight_config = load_weight_config(base_dir)
+    budgeted = select_evidence_budget(pool, question=question, config=weight_config)
+    selected_pool = budgeted["_selected"]
+    supporting = [row for row in selected_pool if row.get("verified_evidence_role") == DIRECT_SUPPORT]
+    supporting_context = [row for row in selected_pool if row.get("verified_evidence_role") == SUPPORTING_CONTEXT]
+    counter = [row for row in selected_pool if row.get("verified_evidence_role") == DIRECT_COUNTER] if include_counter else []
+    conditional = [row for row in selected_pool if row.get("verified_evidence_role") == CONDITION_DEPENDENT]
+    alternative = [row for row in selected_pool if row.get("verified_evidence_role") == ALTERNATIVE_MECHANISM]
+    limitations = [row for row in selected_pool if row.get("verified_evidence_role") == LIMITATION_EVIDENCE]
+    review_background = [row for row in selected_pool if row.get("verified_evidence_role") == REVIEW_BACKGROUND]
     base = max(
         (result for _, result in subtask_results),
         key=lambda result: len(result.get("results") or []),
@@ -1479,8 +1500,17 @@ def answer_research_question(
         "counter_evidence": counter,
         "condition_dependent_evidence": conditional,
         "alternative_mechanism_evidence": alternative,
+        "limitation_evidence": limitations,
+        "review_background_evidence": review_background,
         "supporting_context_evidence": supporting_context,
         "retrieved_evidence_pool": pool,
+        "selected_evidence_bundle": selected_pool,
+        "evidence_budget": {
+            "requested_total": int(weight_config["budget"]["total"]),
+            "selected_total": len(selected_pool),
+            "single_paper_max_fraction": float(weight_config["budget"]["max_single_paper_fraction"]),
+            "role_counts": dict(Counter(row.get("verified_evidence_role") for row in selected_pool)),
+        },
         "identified_topics": identify_topics(question),
         "insufficient": sufficiency["status"] == "INSUFFICIENT",
         "duplicate_removed": base["duplicate_removed"],
