@@ -246,8 +246,20 @@ def export_cloud_evidence_bundle(
         else:
             raise CloudBundleExportError(f"Unexpected directory in cloud bundle: {old}")
 
-    whitelist_payload = _read_json(project / "data/system/formal_rag_whitelist.json")
-    whitelist = {str(value) for value in whitelist_payload.get("paper_ids") or []}
+    verified_payload = _read_json(
+        project / "data/system/verified_dataset_v1_candidate_manifest.json"
+    )
+    if verified_payload.get("papers"):
+        whitelist = {
+            str(row.get("document_id") or "")
+            for row in verified_payload.get("papers") or []
+            if row.get("document_id")
+        }
+        if len(whitelist) != int(verified_payload.get("verified_paper_count") or -1):
+            raise CloudBundleExportError("Verified Dataset v1 manifest count mismatch")
+    else:
+        whitelist_payload = _read_json(project / "data/system/formal_rag_whitelist.json")
+        whitelist = {str(value) for value in whitelist_payload.get("paper_ids") or []}
     manifest_rows = {
         str(row.get("paper_id") or ""): row
         for row in _read_jsonl(project / "data/paper_manifest.jsonl")
@@ -261,7 +273,7 @@ def export_cloud_evidence_bundle(
     }
     if not formal_ids or formal_ids != whitelist:
         raise CloudBundleExportError(
-            "Formal whitelist and current FORMAL_INDEXED/INDEXED_STAGE3_UNIFIED records differ"
+            "Verified/formal whitelist and current FORMAL_INDEXED/INDEXED_STAGE3_UNIFIED records differ"
         )
 
     evidence_rows: list[dict[str, Any]] = []

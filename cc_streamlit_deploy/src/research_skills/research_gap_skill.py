@@ -8,6 +8,7 @@ from src.research_skills.domain_profiles import profile_prompt_block, select_dom
 
 
 SKILL_NAME = "research_gap_skill"
+PROMPT_VERSION = "research-gap-v1.0.0"
 TASK_DEFINITION = "在反证核验后识别具体、未被现有匹配条件研究解决的空白。"
 QUALITY_METRICS = ("gap_false_positive_rate", "counter_evidence_coverage", "condition_completeness", "citation_truthfulness")
 

@@ -2,14 +2,32 @@
 
 from __future__ import annotations
 
+import re
+
 from src.research_skills.common import base_quality_gate, bundle_prompt, entity_labels, evidence_level_instruction, has_direct_interaction_evidence, missing_evidence, primary_citation, query_variables, traceable_cards, usable_formulas
+from src.claim_evidence_verifier import scientific_concepts
 from src.research_skills.contracts import SkillInput, SkillOutput
 from src.research_skills.domain_profiles import profile_prompt_block, select_domain_profile
 
 
 SKILL_NAME = "experiment_design_skill"
+PROMPT_VERSION = "experiment-design-v1.0.0"
 TASK_DEFINITION = "把证据约束的假设转化为可执行、可拟合、可证伪的疲劳实验。"
 QUALITY_METRICS = ("experiment_design_completeness", "confounder_control", "formula_applicability", "falsifiability")
+
+
+def _has_direct_defect_size_location_interaction(value: SkillInput) -> bool:
+    for row in value.support_evidence:
+        if str(row.get("verified_evidence_role") or "") != "DIRECT_SUPPORT":
+            continue
+        concepts = scientific_concepts(
+            f"{row.get('claim') or ''} {row.get('original_text') or row.get('text') or ''}"
+        )
+        if {"defect_size", "defect_location"} <= concepts and concepts & {
+            "fatigue_life", "crack_initiation"
+        }:
+            return True
+    return False
 
 
 def build_prompt(value: SkillInput) -> str:
@@ -29,6 +47,9 @@ def build_repair_prompt(value: SkillInput, *, draft: str, failures: list[str]) -
 
 def _fallback(value: SkillInput) -> tuple[str, str, list[str]]:
     iv, dv = entity_labels(value)
+    independent, dependent = query_variables(value)
+    iv = iv or "、".join(independent)
+    dv = dv or "、".join(dependent)
     bundle = value.evidence_bundle or {}
     papers = bundle.get("papers") or []
     cross = bundle.get("synthesis") or {}
@@ -55,9 +76,16 @@ def _fallback(value: SkillInput) -> tuple[str, str, list[str]]:
         formula_note = f"拟合文献原公式 {item['equation']}（Formula ID：{item['formula_id']}，页码：{item['page_number']}），仅在其单位和适用条件一致时比较。"
     frame = value.query_frame or bundle.get("query_frame") or {}
     direct_interaction = has_direct_interaction_evidence(value)
+    direct_profile_interaction = (
+        direct_interaction
+        if profile.key == "residual_microstructure_short_crack"
+        else _has_direct_defect_size_location_interaction(value)
+        if profile.key in {"defect_size_life", "defect_location"}
+        else True
+    )
     design_tier = (
         "EVIDENCE-SUPPORTED DESIGN"
-        if profile.key != "residual_microstructure_short_crack" or direct_interaction
+        if direct_profile_interaction
         else "PROVISIONAL FALSIFICATION DESIGN"
     )
     frame_subject = str(frame.get("alloy_grade") or "").strip()
@@ -130,6 +158,13 @@ def _fallback(value: SkillInput) -> tuple[str, str, list[str]]:
 | {profile.title}机制中介 | {profile.mechanism_chain} | {profile.title}中介量不响应或方向相反 | 主题中介/混合效应模型 |
 | {profile.title}外部验证 | `{profile.model}`优于主题基线 | {profile.falsifiers[1]} | {profile.title}留出误差与交叉验证 |"""
         loading_protocol = f"围绕{profile.title}，{profile.boundary} 精确水平、终止循环数和失效终点由匹配文献、设备能力与预实验冻结，不填写无来源数值。"
+    if design_tier == "PROVISIONAL FALSIFICATION DESIGN":
+        hypothesis = re.sub(
+            r"\[Evidence ID[：:].*?\]", "", hypothesis
+        ).strip()
+        hypothesis = "【系统候选推断】尚未直接验证：" + hypothesis.replace(
+            "。 ", "。【系统候选推断】尚未直接验证："
+        )
     reasoning = f"""### 设计等级
 {design_tier}
 
@@ -213,7 +248,13 @@ def generate(value: SkillInput, synthesis: str = "") -> SkillOutput:
     independent, dependent = query_variables(value)
     design_tier = (
         "EVIDENCE-SUPPORTED DESIGN"
-        if profile.key != "residual_microstructure_short_crack" or has_direct_interaction_evidence(value)
+        if (
+            has_direct_interaction_evidence(value)
+            if profile.key == "residual_microstructure_short_crack"
+            else _has_direct_defect_size_location_interaction(value)
+            if profile.key in {"defect_size_life", "defect_location"}
+            else True
+        )
         else "PROVISIONAL FALSIFICATION DESIGN"
     )
     return SkillOutput(SKILL_NAME, complete or direct, "" if complete else reasoning, f"{profile.title}的精确水平和样本量必须由预实验方差、设备能力与安全审查冻结。", traceable_cards(value), gate, missing_evidence(value), {

@@ -59,6 +59,9 @@ _CONCEPTS: dict[str, tuple[str, ...]] = {
     "fatigue_life": ("fatigue life", "fatigue limit", "疲劳寿命", "疲劳极限", "hcf", "vhcf"),
     "hip": ("hot isostatic pressing", "hot-isostatic pressing", "hipping", "hip treatment", "热等静压"),
     "pore": ("pore", "porosity", "void", "孔隙", "孔洞"),
+    "defect_size": ("defect size", "pore size", "sqrt area", "√area", "缺陷尺寸", "孔隙尺寸"),
+    "defect_location": ("defect location", "distance from surface", "near-surface", "near surface", "internal defect", "surface defect", "缺陷位置", "距表面", "近表面", "内部缺陷", "表面缺陷"),
+    "crack_initiation": ("crack initiation", "crack origin", "裂纹起裂", "裂纹萌生", "起裂位置"),
 }
 
 _GENERIC_CONCEPTS = {"ti64", "l_pbf", "surface", "heat_treatment", "stress_ratio", "delta_k"}
@@ -103,6 +106,10 @@ def condition_match_score(
         "temperature": frame.get("temperature"),
         "environment": frame.get("environment"),
         "loading_mode": frame.get("loading_mode"),
+        "heat_treatment": " ".join(frame.get("post_processing") or []),
+        "surface_treatment": " ".join(frame.get("surface_condition") or []),
+        "fatigue_regime": frame.get("fatigue_stage"),
+        "crack_stage": frame.get("crack_stage"),
     }
     checked = matched = 0
     conflicts: list[str] = []
@@ -129,6 +136,10 @@ def condition_match_score(
 @dataclass(frozen=True)
 class EvidenceAssessment:
     evidence_id: str
+    document_id: str
+    page_number: Any
+    supporting_span: str
+    condition_provenance: dict[str, Any]
     role: str
     directness_score: float
     condition_match_score: float
@@ -199,6 +210,17 @@ def classify_evidence_for_claim(
     allow = role == DIRECT_SUPPORT
     return EvidenceAssessment(
         evidence_id=str(evidence.get("doc_id") or evidence.get("evidence_id") or ""),
+        document_id=str(evidence.get("paper_id") or evidence.get("document_id") or ""),
+        page_number=evidence.get("page_number") or evidence.get("page"),
+        supporting_span=str(evidence.get("original_text") or evidence.get("claim") or evidence.get("text") or ""),
+        condition_provenance={
+            key: (evidence.get("experimental_conditions") or evidence.get("conditions") or {}).get(key)
+            for key in (
+                "alloy_grade", "manufacturing_process", "surface_treatment",
+                "heat_treatment", "fatigue_regime", "crack_stage", "loading_mode",
+                "stress_ratio_R", "defect_size", "defect_location",
+            )
+        },
         role=role,
         directness_score=directness_score,
         condition_match_score=round(condition_score, 4),

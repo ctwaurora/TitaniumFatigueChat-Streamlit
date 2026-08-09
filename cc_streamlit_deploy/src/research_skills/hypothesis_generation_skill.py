@@ -8,6 +8,7 @@ from src.research_skills.domain_profiles import profile_prompt_block, select_dom
 
 
 SKILL_NAME = "hypothesis_generation_skill"
+PROMPT_VERSION = "hypothesis-generation-v1.0.0"
 TASK_DEFINITION = "生成有来源、公式约束、可拟合并可被明确推翻的候选假设。"
 QUALITY_METRICS = ("hypothesis_falsifiability", "formula_applicability", "condition_completeness", "unsupported_claim_rate")
 

@@ -1,0 +1,9 @@
+{
+  "schema_version": "private-rag-boundary-1.0",
+  "public_repository_contains_private_rag": false,
+  "runtime_sources": [
+    "TFC_PRIVATE_RAG_ROOT",
+    "TFC_PRIVATE_RAG_BUNDLE_URL"
+  ],
+  "fail_closed_when_unavailable": true
+}

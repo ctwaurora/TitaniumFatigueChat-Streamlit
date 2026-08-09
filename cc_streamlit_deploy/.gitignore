@@ -57,6 +57,9 @@ logs/
 *.parquet
 !data/cloud_bundle/
 !data/cloud_bundle/*.parquet
+data/cloud_bundle/
+*.npy
+*.npz
 *.h5
 *.hdf5
 *.pb
@@ -80,3 +83,4 @@ Desktop.ini
 *~
 
 .streamlit/secrets.toml
+runs/

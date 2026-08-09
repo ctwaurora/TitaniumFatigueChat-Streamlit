@@ -93,6 +93,10 @@ def is_noisy_evidence_excerpt(value: Any) -> bool:
 
 def bundle_prompt(value: SkillInput) -> str:
     """Return the compact EvidenceBundle supplied to a concrete Skill."""
+    if (value.evidence_bundle or {}).get("outbound_policy") == "MINIMAL_OUTBOUND_EVIDENCE":
+        import json
+
+        return json.dumps(value.evidence_bundle, ensure_ascii=False, separators=(",", ":"))
     from src.evidence_compression import evidence_prompt_json
 
     return evidence_prompt_json(value.evidence_bundle)

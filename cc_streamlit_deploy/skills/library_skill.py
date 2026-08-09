@@ -227,6 +227,9 @@ def _build_corpus_roles(card: dict) -> list:
 
 def cleanup_library_duplicates() -> int:
     """清理重复文献，合并 corpus_roles 和 source_folders。"""
+    from src.formal_pdf_protection import validate_formal_pdf_locks
+
+    validate_formal_pdf_locks(Path.cwd())
     papers = get_all_papers()
     if not papers:
         return 0

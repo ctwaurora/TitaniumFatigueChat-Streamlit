@@ -15,6 +15,7 @@ from src.claim_evidence_verifier import (
     SUPPORTING_CONTEXT,
     verify_claim_evidence,
 )
+from src.skill_scientific_evaluation import classify_claim
 
 
 _SENTENCE = re.compile(r"(?<=[。！？!?])|\n+")
@@ -134,12 +135,44 @@ def verify_answer_claims(answer: str, evidence_bundle: dict[str, Any]) -> dict[s
             "invalid_page_references": invalid_pages,
             "system_inference": inference,
             "method_or_boundary": method_or_boundary,
+            "claim_category": classify_claim(
+                claim,
+                system_inference=inference,
+                method_or_boundary=method_or_boundary,
+            ),
             "unsupported_numeric_value": unsupported_numeric,
             "verified_evidence_role": best_role,
             "semantic_evidence_audit": semantic or {},
+            "alignment_status": (
+                "PASS" if status == "SUPPORTED" and best_role == DIRECT_SUPPORT
+                else "CONDITIONAL" if status in {"SUPPORTED", "SYSTEM_INFERENCE"}
+                else "NOT_APPLICABLE" if status == "METHOD_OR_BOUNDARY"
+                else "FAIL"
+            ),
         })
     supported = sum(record["status"] == "SUPPORTED" for record in records)
     verifiable = [record for record in records if record["status"] != "METHOD_OR_BOUNDARY"]
+    cited_verifiable = [record for record in verifiable if record["evidence_ids"]]
+    traceable = [
+        record for record in cited_verifiable
+        if not record["unknown_evidence_ids"] and not record["invalid_page_references"]
+    ]
+    direct_presentations = [
+        record for record in cited_verifiable
+        if not any(marker in record["claim_text"] for marker in _INFERENCE_MARKERS)
+        and not re.search(r"条件|仅在|取决于|反证|反向|替代机制|背景", record["claim_text"])
+    ]
+    direct_correct = [
+        record for record in direct_presentations
+        if record["status"] == "SUPPORTED" and record["verified_evidence_role"] == DIRECT_SUPPORT
+    ]
+    condition_scores = []
+    for record in cited_verifiable:
+        assessments = (record.get("semantic_evidence_audit") or {}).get("assessments") or []
+        if assessments:
+            condition_scores.append(max(float(row.get("condition_match_score") or 0) for row in assessments))
+    aligned = sum(record["alignment_status"] in {"PASS", "CONDITIONAL"} for record in verifiable)
+    unsupported = sum(record["alignment_status"] == "FAIL" for record in verifiable)
     return {
         "passed": not critical_failures,
         "claim_count": len(records),
@@ -148,7 +181,11 @@ def verify_answer_claims(answer: str, evidence_bundle: dict[str, Any]) -> dict[s
         "method_or_boundary_count": sum(record["status"] == "METHOD_OR_BOUNDARY" for record in records),
         "unsupported_claim_count": sum(record["status"] == "UNSUPPORTED" for record in records),
         "misaligned_evidence_count": sum(record["status"] == "MISALIGNED_EVIDENCE" for record in records),
-        "grounded_claim_rate": round(supported / len(verifiable), 4) if verifiable else 1.0,
+        "claim_evidence_alignment_rate": round(aligned / len(verifiable), 4) if verifiable else 1.0,
+        "direct_evidence_precision": round(len(direct_correct) / len(direct_presentations), 4) if direct_presentations else 1.0,
+        "condition_match_rate": round(sum(condition_scores) / len(condition_scores), 4) if condition_scores else 1.0,
+        "unsupported_claim_rate": round(unsupported / len(verifiable), 4) if verifiable else 0.0,
+        "citation_traceability_rate": round(len(traceable) / len(cited_verifiable), 4) if cited_verifiable else 1.0,
         "critical_failures": critical_failures,
         "claims": records,
     }

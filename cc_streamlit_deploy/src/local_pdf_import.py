@@ -33,6 +33,7 @@ from src.stage1_store import (
     validate_pdf_bytes,
 )
 from src.unified_rag import build_unified_rag, rag_paths
+from src.formal_pdf_protection import validate_formal_pdf_locks
 
 
 ProgressCallback = Callable[[str, Dict[str, Any]], None]
@@ -738,6 +739,7 @@ def scan_and_import_local_pdfs(
     report_name: str = "pdf_storage_unification_report.json",
 ) -> Dict[str, Any]:
     """Copy unique bytes, preserve sources, and run the existing Stage-2/3 path."""
+    validate_formal_pdf_locks(base_dir)
     inventory = inventory_local_pdfs(base_dir)
     target_dir = base_dir / TARGET_RELATIVE
     target_dir.mkdir(parents=True, exist_ok=True)

@@ -1,0 +1,33 @@
+{
+  "schema_version": "paper-experiment-config-v1.0.0",
+  "reranking": {
+    "default_top_k": 12,
+    "stable_tie_break": [
+      "final_evidence_score_desc",
+      "document_id_asc",
+      "evidence_id_asc"
+    ],
+    "evidence_budget_config": "config/evidence_weight_config.json"
+  },
+  "gate": {
+    "claim_verification": true,
+    "claim_guard": true,
+    "formal_pdf_fail_closed": true,
+    "metadata_only_strong_claims": false,
+    "unsupported_numeric_claims": "FAIL",
+    "misaligned_evidence": "FAIL"
+  },
+  "model": {
+    "provider": "DeepSeek",
+    "model": "deepseek-chat",
+    "temperature": 0.1,
+    "repair_temperature": 0.0,
+    "top_p": null,
+    "seed": null,
+    "max_tokens": 1600,
+    "repair_max_tokens": 1400,
+    "timeout_seconds": 60,
+    "connect_timeout_seconds": 10,
+    "max_retries": 3
+  }
+}
