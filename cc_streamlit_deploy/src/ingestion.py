@@ -33,6 +33,7 @@ from skills.search_skill import add_search_result_to_library
 from src.validation import is_out_of_scope, classify_titanium_scope
 from src.stage1_store import discover_pdf_files
 from src.deep_read_pipeline import deep_read_pdf
+from src.formal_pdf_protection import validate_formal_pdf_locks
 
 DATA_DIR = BASE_DIR / "data"
 OUTPUTS_DIR = BASE_DIR / "outputs"
@@ -44,6 +45,7 @@ def run_ingest() -> Dict[str, Any]:
     Returns:
         统计信息字典，包含详细的去重和分类统计
     """
+    validate_formal_pdf_locks(BASE_DIR)
     stats = {
         "total_pdfs": 0,
         "processed": 0,

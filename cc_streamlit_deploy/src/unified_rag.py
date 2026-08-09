@@ -36,6 +36,7 @@ from src.research_topics import (
     query_mentions_pores,
 )
 from src.query_frame import parse_query_frame
+from src.formal_pdf_protection import validate_formal_pdf_locks
 from src.evidence_weighting import load_weight_config, score_evidence, select_evidence_budget
 from src.claim_evidence_verifier import (
     ALTERNATIVE_MECHANISM,
@@ -691,9 +692,10 @@ def build_unified_rag(
     required_paper_ids: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     """Rebuild the Stage-3 source only from completed Stage-2 artifacts."""
+    requested_ids = list(dict.fromkeys(paper_ids))
+    validate_formal_pdf_locks(base_dir, requested_document_ids=requested_ids)
     paths = rag_paths(base_dir)
     paths["root"].mkdir(parents=True, exist_ok=True)
-    requested_ids = list(dict.fromkeys(paper_ids))
     documents, build_info = _build_documents(base_dir, requested_ids)
     accepted_ids = set(build_info["accepted_paper_ids"])
     required_ids = set(
@@ -944,6 +946,21 @@ def _matches_filters(doc: Dict[str, Any], filters: Dict[str, Any]) -> bool:
     return True
 
 
+def _verified_dataset_ids(base_dir: Path) -> set[str] | None:
+    """Return reproducible-v1 IDs; historical-only rows are never used for new claims."""
+    path = Path(base_dir) / "data/system/verified_dataset_v1_candidate_manifest.json"
+    if not path.is_file():
+        return None
+    payload = _read_json(path, {})
+    ids = {
+        str(row.get("document_id") or "") for row in payload.get("papers") or []
+        if row.get("document_id")
+    }
+    if not ids or len(ids) != int(payload.get("verified_paper_count") or -1):
+        raise RuntimeError("FORMAL_PROVENANCE_VIOLATION:VERIFIED_DATASET_MANIFEST_INVALID")
+    return ids
+
+
 def _deduplicate(results: Sequence[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:
     seen: set[Tuple[str, str]] = set()
     output = []
@@ -993,6 +1010,7 @@ def retrieve_research_evidence(
     candidate_ids = [key for key, _ in sorted(bm25.items(), key=lambda item: item[1], reverse=True)[:1000]]
     candidate_ids.extend(key for key, _ in sorted(vector.items(), key=lambda item: item[1], reverse=True)[:1000])
     documents = _load_documents_by_ids(base_dir, candidate_ids)
+    verified_ids = _verified_dataset_ids(base_dir)
     max_bm25 = max(bm25.values(), default=1.0)
     variables = list(required_variables or identify_variables(question))
     candidates = []
@@ -1000,6 +1018,8 @@ def retrieve_research_evidence(
         if index and index % 100 == 0:
             time.sleep(0)
         if doc["doc_id"] not in bm25 and doc["doc_id"] not in vector:
+            continue
+        if verified_ids is not None and str(doc.get("paper_id") or "") not in verified_ids:
             continue
         if not _matches_filters(doc, condition_filters or {}):
             continue

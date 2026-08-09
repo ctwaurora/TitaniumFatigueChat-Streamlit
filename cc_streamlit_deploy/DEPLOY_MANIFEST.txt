@@ -1,5 +1,5 @@
 TitaniumFatigueChat Streamlit deployment manifest
-file_count=162
+file_count=156
 
 .gitattributes
 .gitignore
@@ -7,23 +7,9 @@ file_count=162
 .streamlit/secrets.example.toml
 app.py
 config/evidence_weight_config.json
+config/paper_experiment_config.json
 config/task_profile.yaml
 data/candidate_papers.csv
-data/cloud_bundle/bm25_document_frequency.npy
-data/cloud_bundle/bm25_document_lengths.npy
-data/cloud_bundle/bm25_index.npz
-data/cloud_bundle/condition_evidence_records.parquet
-data/cloud_bundle/evidence_records.parquet
-data/cloud_bundle/formal_literature.parquet
-data/cloud_bundle/formula_records.parquet
-data/cloud_bundle/index_document_ids.json
-data/cloud_bundle/index_metadata.json
-data/cloud_bundle/index_vocabulary.json
-data/cloud_bundle/manifest.json
-data/cloud_bundle/rag_chunks.parquet
-data/cloud_bundle/vector_components.npy
-data/cloud_bundle/vector_embeddings.npy
-data/cloud_bundle/vector_idf.npy
 data/condition_evidence_dataset.csv
 data/conflict_claims.csv
 data/domain_dictionary.csv
@@ -36,6 +22,8 @@ data/hypothesis_dataset.csv
 data/literature_database.csv
 data/macro_micro_links.csv
 data/minimum_validation_dataset_schema.csv
+data/PRIVATE_RAG_REQUIRED.json
+data/public_literature_metadata.json
 data/relevance_ranking.csv
 data/research_gap_dataset.csv
 data/variable_mechanism.csv
@@ -94,9 +82,11 @@ src/evidence_gate.py
 src/evidence_quality.py
 src/evidence_trace.py
 src/evidence_weighting.py
+src/experiment_config.py
 src/exporter.py
 src/feature_flags.py
 src/formal_library_page.py
+src/formal_pdf_protection.py
 src/formula_comparison.py
 src/formula_renderer.py
 src/formula_validation.py
@@ -121,6 +111,7 @@ src/local_pdf_import.py
 src/metadata_gate.py
 src/metadata_service.py
 src/oa_literature.py
+src/outbound_evidence.py
 src/page_answers.py
 src/paper_classifier.py
 src/paper_collector.py
@@ -130,6 +121,7 @@ src/pdf_rematcher.py
 src/pdf_upload_handler.py
 src/pdf_watcher.py
 src/perf_log.py
+src/private_rag_loader.py
 src/query_frame.py
 src/query_understanding.py
 src/reproducibility.py
@@ -148,10 +140,12 @@ src/research_skills/router.py
 src/research_skills/scientific_analysis_skill.py
 src/research_topics.py
 src/retrospective_validation.py
+src/run_snapshot.py
 src/sci_export.py
 src/science_output_postprocessor.py
 src/scientific_framework.py
 src/scorecard.py
+src/skill_scientific_evaluation.py
 src/smart_search.py
 src/stage1_store.py
 src/storage_adapter.py

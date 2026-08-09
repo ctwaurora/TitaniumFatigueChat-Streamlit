@@ -8,6 +8,7 @@ from src.research_skills.domain_profiles import profile_prompt_block, select_dom
 
 
 SKILL_NAME = "scientific_analysis_skill"
+PROMPT_VERSION = "scientific-analysis-v1.0.0"
 TASK_DEFINITION = "综合正式文献，回答具体结论、机制、条件边界、冲突、公式和未知项。"
 QUALITY_METRICS = ("citation_truthfulness", "condition_completeness", "counter_evidence_coverage", "formula_applicability", "unsupported_claim_rate")
 

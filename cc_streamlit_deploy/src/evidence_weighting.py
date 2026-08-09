@@ -78,6 +78,12 @@ def material_process_match(row: dict[str, Any], frame: dict[str, Any], config: d
     lpbf = bool(re.search(r"l[- ]?pbf|lpbf|pbf[- ]?lb/?m|slm|laser powder bed", text))
     ebm = "ebm" in text or "electron beam" in text
     wrought = bool(re.search(r"wrought|forged|rolled", text))
+    requested_ti = bool(re.search(r"ti[- ]?6al[- ]?4v|tc4", alloy))
+    requested_process = bool(process.strip())
+    # Do not punish an otherwise exact alloy match for an unspecified process.
+    # A missing query constraint is not an evidence mismatch.
+    if requested_ti and ti and not requested_process:
+        return 1.0
     if ti and lpbf:
         return config["material_process_match"]["lpbf_ti6al4v"]
     if ti and ("pbf" in text or "pbf" in process):
@@ -158,7 +164,16 @@ def score_evidence(row: dict[str, Any], question: str, *, config: dict[str, Any]
     dims = {"relevance": relevance, "condition_match": condition, "evidence_directness": directness,
             "study_quality": study_quality, "method_quality": method_quality,
             "material_process_match": material, "temporal_version_quality": temporal}
-    role = str(row.get("verified_evidence_role") or row.get("evidence_role") or "SUPPORTING_CONTEXT").upper()
+    original_role = str(row.get("verified_evidence_role") or row.get("evidence_role") or "SUPPORTING_CONTEXT").upper()
+    role = original_role
+    study_type = str(row.get("study_type") or row.get("document_type") or "").casefold()
+    title = str(row.get("title") or "").casefold()
+    if "review" in study_type or re.search(r"\b(?:systematic |literature |brief )?review\b|state[- ]of[- ]the[- ]art", title):
+        role = "REVIEW_BACKGROUND"
+    elif role in {"DIRECT_SUPPORT", "DIRECT_COUNTER"} and material < .70:
+        # Dynamic query mismatch changes only the role used for this ranking;
+        # it never mutates the stored Evidence fact or its source annotation.
+        role = "CONDITION_DEPENDENT"
     role_coeff = float(cfg["role_coefficients"].get(role, cfg["role_coefficients"].get("REVIEW_BACKGROUND", .4)))
     base = sum(float(cfg["dimension_weights"].get(key, 0.0)) * value for key, value in dims.items())
     scored = dict(row)
@@ -166,6 +181,14 @@ def score_evidence(row: dict[str, Any], question: str, *, config: dict[str, Any]
                    "condition_conflicts": conflicts, "evidence_directness_score": round(directness, 6),
                    "study_quality_score": round(study_quality, 6), "method_quality_score": round(method_quality, 6),
                    "material_process_match_score": round(material, 6), "temporal_version_quality_score": round(temporal, 6),
+                   "original_evidence_role": original_role, "verified_evidence_role": role,
+                   "ranking_role_reason": (
+                       "REVIEW_CANNOT_DISPLACE_PRIMARY_DIRECT_EVIDENCE"
+                       if role == "REVIEW_BACKGROUND" and original_role != role
+                       else "MATERIAL_PROCESS_MISMATCH_DYNAMIC_DOWNGRADE"
+                       if role == "CONDITION_DEPENDENT" and original_role != role
+                       else "ORIGINAL_ROLE_RETAINED"
+                   ),
                    "evidence_role_coefficient": role_coeff, "evidence_weighted_score": round(base, 6),
                    "final_evidence_score": round(max(0.0, min(1.0, base * role_coeff)), 6)})
     return scored
@@ -191,7 +214,11 @@ def select_evidence_budget(pool: Iterable[dict[str, Any]], *, question: str, lim
     total = int(limit or cfg["budget"]["total"])
     scored = [score_evidence(row, question, config=cfg) for row in pool]
     scored = [row for row in scored if str(row.get("verified_evidence_role") or "").upper() != "INSUFFICIENT"]
-    scored.sort(key=lambda row: (float(row.get("final_evidence_score") or 0), float(row.get("semantic_score") or 0)), reverse=True)
+    scored.sort(key=lambda row: (
+        -float(row.get("final_evidence_score") or 0),
+        str(row.get("paper_id") or row.get("document_id") or ""),
+        str(row.get("doc_id") or row.get("evidence_id") or ""),
+    ))
     selected: list[dict[str, Any]] = []
     counts: Counter[str] = Counter()
     max_per_paper = max(1, int(total * float(cfg["budget"].get("max_single_paper_fraction", .25))))
@@ -210,20 +237,28 @@ def select_evidence_budget(pool: Iterable[dict[str, Any]], *, question: str, lim
         return True
     # Fill explicit role quotas first, then use remaining capacity by quality.
     for role in ("DIRECT_SUPPORT", "CONDITION_DEPENDENT", "DIRECT_COUNTER", "LIMITATION_EVIDENCE", "ALTERNATIVE_MECHANISM"):
-        for row in sorted((r for r in scored if str(r.get("verified_evidence_role") or "").upper() == role), key=lambda r: r.get("final_evidence_score", 0), reverse=True):
+        for row in sorted(
+            (r for r in scored if str(r.get("verified_evidence_role") or "").upper() == role),
+            key=lambda r: (
+                -float(r.get("final_evidence_score") or 0),
+                str(r.get("paper_id") or r.get("document_id") or ""),
+                str(r.get("doc_id") or r.get("evidence_id") or ""),
+            ),
+        ):
             if len(selected) >= total or counts[role] >= int(caps.get(role, total)): break
             add(row)
     while len(selected) < total:
         remaining = [row for row in scored if row not in selected]
         if not remaining:
             break
-        remaining.sort(
-            key=lambda row: (
-                float(row.get("final_evidence_score") or 0) - _diversity_penalty(row, selected, cfg),
-                str(row.get("doc_id") or ""),
+        remaining.sort(key=lambda row: (
+            -(
+                float(row.get("final_evidence_score") or 0)
+                - _diversity_penalty(row, selected, cfg)
             ),
-            reverse=True,
-        )
+            str(row.get("paper_id") or row.get("document_id") or ""),
+            str(row.get("doc_id") or row.get("evidence_id") or ""),
+        ))
         if not any(add(row, enforce_role_cap=False) for row in remaining):
             break
     groups: dict[str, list[dict[str, Any]]] = {role: [] for role in set(caps) | {"SUPPORTING_CONTEXT", "REVIEW_BACKGROUND"}}

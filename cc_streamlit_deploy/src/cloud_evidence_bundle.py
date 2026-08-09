@@ -52,7 +52,9 @@ class CloudEvidenceBundle:
 
 
 def cloud_bundle_root(base_dir: Path) -> Path:
-    return Path(base_dir) / "data" / "cloud_bundle"
+    from src.private_rag_loader import resolve_private_rag_root
+
+    return resolve_private_rag_root(Path(base_dir))
 
 
 def cloud_bundle_required(
@@ -67,7 +69,12 @@ def cloud_bundle_required(
     if explicit == "CLOUD":
         return True
     root = Path(base_dir)
-    return (root / "DEPLOY_VERSION.json").is_file() or cloud_bundle_root(root).is_dir()
+    if (root / "DEPLOY_VERSION.json").is_file():
+        return True
+    try:
+        return cloud_bundle_root(root).is_dir()
+    except Exception:
+        return True
 
 
 def _sha256(path: Path) -> str:
@@ -228,7 +235,10 @@ def _load_cached(root_text: str, signature: str) -> CloudEvidenceBundle:
 
 
 def load_cloud_bundle(base_dir: Path) -> CloudEvidenceBundle:
-    root = cloud_bundle_root(Path(base_dir)).resolve()
+    try:
+        root = cloud_bundle_root(Path(base_dir)).resolve()
+    except Exception as exc:
+        raise CloudBundleError("Private RAG bundle source is unavailable or invalid") from exc
     if not root.is_dir():
         raise CloudBundleError("Cloud bundle directory is missing")
     return _load_cached(str(root), _manifest_signature(root))

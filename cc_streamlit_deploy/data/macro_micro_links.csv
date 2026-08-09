@@ -1,11 +1,1 @@
-﻿micro_variable,macro_indicator,intermediate_mechanism,equation_or_parameter,evidence_ids,condition,link_strength,link_strength_score,missing_data,hypothesis_candidate
-pore_size,Nf,局部应力集中→裂纹起裂→寿命降低,Basquin b / Paris C,E0056,表面粗糙度、热处理、R 比控制,medium,3,证据有限（1条），需补充定量数据,大尺寸孔隙可能通过局部应力集中→裂纹起裂→寿命降低影响Nf，该关系可通过表面粗糙度、热处理、R 比控制条件下进行实验验证
-pore_location,crack_initiation_site,近表面高应力区→优先起裂,—,—,应力水平、加载方式,strong,5,缺乏 pore_location→crack_initiation_site 的直接实验证据,近表面孔隙可能通过近表面高应力区→优先起裂影响crack_initiation_site，该关系可通过应力水平、加载方式条件下进行实验验证
-pore_aspect_ratio,Paris_C,高长宽比→更强应力集中→更快早期扩展,Paris C = f(aspect_ratio),—,R 比、成形方向,weak,1,缺乏 pore_aspect_ratio→Paris_C 的直接实验证据,高长宽比孔隙可能通过高长宽比→更强应力集中→更快早期扩展影响Paris_C，该关系可通过R 比、成形方向条件下进行实验验证
-surface_roughness,Nf,表面缺陷→应力集中→表面起裂,S-N fitting,E0001; E0006; E0009; E0048; E0050,as-built vs polished,strong,5,已有部分证据，但需更多定量关联数据,高表面粗糙度可能通过表面缺陷→应力集中→表面起裂影响Nf，该关系可通过as-built vs polished条件下进行实验验证
-alpha_lath_thickness,da_dN,片层厚度→裂纹偏转/屏障效应→扩展阻力,Paris C/m,—,热处理状态,medium,3,缺乏 alpha_lath_thickness→da_dN 的直接实验证据,α 片层厚度变化可能通过片层厚度→裂纹偏转/屏障效应→扩展阻力影响da_dN，该关系可通过热处理状态条件下进行实验验证
-residual_stress,DeltaKth,残余压应力→裂纹闭合→门槛值提高,ΔKth = f(σ_res),—,HIP/热处理后,weak,1,缺乏 residual_stress→DeltaKth 的直接实验证据,残余应力可能通过残余压应力→裂纹闭合→门槛值提高影响DeltaKth，该关系可通过HIP/热处理后条件下进行实验验证
-porosity,Nf,体积缺陷密度→有效承载面积减小→局部过载,Kitagawa-Takahashi,E0005; E0007; E0009,缺陷尺寸 vs 临界缺陷尺寸,medium,3,已有部分证据，但需更多定量关联数据,高孔隙率可能通过体积缺陷密度→有效承载面积减小→局部过载影响Nf，该关系可通过缺陷尺寸 vs 临界缺陷尺寸条件下进行实验验证
-grain_orientation,crack_initiation_site,不利取向晶粒→滑移集中→裂纹萌生,—,—,EBSD 表征,medium,3,缺乏 grain_orientation→crack_initiation_site 的直接实验证据,不利晶粒取向可能通过不利取向晶粒→滑移集中→裂纹萌生影响crack_initiation_site，该关系可通过EBSD 表征条件下进行实验验证
-alpha_prime_martensite,Paris_m,α′ 马氏体→高强低韧→扩展速率对 ΔK 敏感,Paris m,—,as-built 状态 vs 退火状态,weak,1,缺乏 alpha_prime_martensite→Paris_m 的直接实验证据,α′ 马氏体含量可能通过α′ 马氏体→高强低韧→扩展速率对 ΔK 敏感影响Paris_m，该关系可通过as-built 状态 vs 退火状态条件下进行实验验证
-beta_phase_fraction,da_dN,β 相含量→裂纹偏转频率→扩展路径曲折度,Paris C,—,热处理温度,weak,1,缺乏 beta_phase_fraction→da_dN 的直接实验证据,β 相含量可能通过β 相含量→裂纹偏转频率→扩展路径曲折度影响da_dN，该关系可通过热处理温度条件下进行实验验证
+micro_variable,macro_indicator,intermediate_mechanism,equation_or_parameter,evidence_ids,condition,link_strength,link_strength_score,missing_data,hypothesis_candidate

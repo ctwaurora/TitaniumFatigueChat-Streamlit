@@ -22,6 +22,11 @@ from src.deepseek_client import (
 from src.evidence_bundle import build_evidence_bundle
 from src.query_frame import parse_query_frame
 from src.query_understanding import understand_user_query
+from src.outbound_evidence import (
+    build_minimal_outbound_input,
+    new_outbound_run_id,
+    record_outbound_evidence,
+)
 from src.research_skills.common import is_noisy_evidence_excerpt
 from src.research_skills.contracts import SkillInput
 from src.research_skills.router import get_research_skill
@@ -604,6 +609,15 @@ def run_smart_search(
         }
     else:
         try:
+            verified_path = Path(base_dir) / "data/system/verified_dataset_v1_candidate_manifest.json"
+            verified_ids = None
+            if verified_path.is_file():
+                verified_payload = json.loads(verified_path.read_text(encoding="utf-8"))
+                verified_ids = {
+                    str(row.get("document_id") or "")
+                    for row in verified_payload.get("papers") or []
+                    if row.get("document_id")
+                }
             manifest = {
                 row["paper_id"]: row
                 for row in (
@@ -613,6 +627,7 @@ def run_smart_search(
                     .splitlines()
                     if line.strip()
                 )
+                if verified_ids is None or str(row.get("paper_id") or "") in verified_ids
             }
         except (OSError, json.JSONDecodeError, KeyError):
             manifest = {}
@@ -705,6 +720,15 @@ def run_smart_search(
     skill_input = _build_skill_input(
         question, parsed_entities, result, dataset_version, base_dir
     )
+    outbound_input, outbound_summary = build_minimal_outbound_input(skill_input)
+    outbound_prompt = skill.build_prompt(outbound_input)
+    outbound_run_id = new_outbound_run_id()
+    diagnostics["outbound_evidence"] = {
+        "run_id": outbound_run_id,
+        "policy": "MINIMAL_OUTBOUND_EVIDENCE",
+        "evidence_count": outbound_summary["evidence_count"],
+        "semantic_preservation": outbound_summary["semantic_preservation"],
+    }
     if telemetry:
         telemetry.count(
             retrieved_papers=len(result.get("retrieved_papers") or []),
@@ -728,6 +752,10 @@ def run_smart_search(
     llm_call_count = 0
     model_service_error: Exception | None = None
     settings = get_deepseek_settings()
+    from src.experiment_config import load_paper_experiment_config
+
+    experiment_config = load_paper_experiment_config(base_dir)
+    model_config = experiment_config["model"]
     if telemetry:
         telemetry.transition("REASONING")
     if use_llm and settings.configured:
@@ -739,12 +767,29 @@ def run_smart_search(
             diagnostics["stage_timestamps_epoch_ms"]["t9_deepseek_start"] = round(
                 time.time_ns() / 1_000_000, 3
             )
+            outbound_record = record_outbound_evidence(
+                base_dir=base_dir,
+                run_id=outbound_run_id,
+                model=getattr(settings, "model", "deepseek-chat"),
+                phase="INITIAL_SYNTHESIS",
+                prompt=outbound_prompt,
+                summary=outbound_summary,
+            )
+            diagnostics["outbound_evidence"].update({
+                "character_count": outbound_record["character_count"],
+                "estimated_token_count": outbound_record["estimated_token_count"],
+                "manifest_path": outbound_record["manifest_path"],
+            })
             synthesis = client.chat(
                 [
                     {"role": "system", "content": "你是钛合金疲劳科研助手，必须严格服从证据引用约束。"},
-                    {"role": "user", "content": skill.build_prompt(skill_input)},
+                    {"role": "user", "content": outbound_prompt},
                 ],
-                temperature=0.1, max_tokens=1600, timeout=60, connect_timeout=10, max_retries=3,
+                temperature=float(model_config["temperature"]),
+                max_tokens=int(model_config["max_tokens"]),
+                timeout=int(model_config["timeout_seconds"]),
+                connect_timeout=int(model_config["connect_timeout_seconds"]),
+                max_retries=int(model_config["max_retries"]),
             )
             llm_call_count += 1
             diagnostics["llm_executed"] = True
@@ -794,16 +839,28 @@ def run_smart_search(
         repair_attempted = True
         try:
             repair_prompt = skill.build_repair_prompt(
-                skill_input,
+                outbound_input,
                 draft=answer,
                 failures=quality.get("scientific_failures") or quality["failures"],
+            )
+            record_outbound_evidence(
+                base_dir=base_dir,
+                run_id=outbound_run_id,
+                model=getattr(settings, "model", "deepseek-chat"),
+                phase="QUALITY_REPAIR",
+                prompt=repair_prompt,
+                summary=outbound_summary,
             )
             repaired = client.chat(
                 [
                     {"role": "system", "content": "你是科研回答质量修复器。只能使用给定EvidenceBundle，不得新增事实或引用。"},
                     {"role": "user", "content": repair_prompt},
                 ],
-                temperature=0.0, max_tokens=1400, timeout=60, connect_timeout=10, max_retries=3,
+                temperature=float(model_config["repair_temperature"]),
+                max_tokens=int(model_config["repair_max_tokens"]),
+                timeout=int(model_config["timeout_seconds"]),
+                connect_timeout=int(model_config["connect_timeout_seconds"]),
+                max_retries=int(model_config["max_retries"]),
             )
             llm_call_count += 1
             repaired_output = skill.generate(skill_input, synthesis=repaired)
@@ -879,10 +936,53 @@ def run_smart_search(
     diagnostics["identified_topics"] = result.get("identified_topics") or []
     diagnostics["evidence_bundle_paper_count"] = len(skill_input.evidence_bundle.get("papers") or [])
     diagnostics["plausible_formula_count"] = len(skill_input.evidence_bundle.get("formulas") or [])
+    from src.skill_scientific_evaluation import evaluate_skill_output
+
+    claim_audit = (
+        (claim_guard.get("after") if isinstance(claim_guard, dict) else None)
+        or quality.get("claim_verification")
+        or {}
+    )
+    diagnostics["skill_scientific_evaluation"] = evaluate_skill_output(
+        module,
+        answer=answer,
+        claim_audit=claim_audit,
+        evidence_bundle=skill_input.evidence_bundle,
+        skill_output=skill_output.as_dict(),
+        generation_state=str(diagnostics.get("generation_status") or ""),
+    )
     if telemetry:
         telemetry.count(model_calls=llm_call_count)
         telemetry.transition("COMPLETED")
         diagnostics["skill_run_telemetry"] = telemetry.as_dict()
+    from src.run_snapshot import create_run_snapshot
+    import inspect
+
+    snapshot = create_run_snapshot(
+        base_dir=base_dir,
+        question=question,
+        skill=str(skill_output.skill_name),
+        prompt_version=str(getattr(skill, "PROMPT_VERSION", "UNVERSIONED")),
+        prompt_template=inspect.getsource(skill.build_prompt),
+        prompt=outbound_prompt,
+        dataset_version=dataset_version,
+        model=str(getattr(settings, "model", "deepseek-chat")),
+        temperature=float(model_config["temperature"]),
+        top_p=model_config.get("top_p"),
+        seed=model_config.get("seed"),
+        top_k=top_k,
+        research_result=result,
+        raw_model_output=synthesis,
+        cleaned_output=answer,
+        response_time=float(diagnostics["total_elapsed_seconds"]),
+        token_usage=dict(diagnostics.get("llm_usage") or {}),
+        generation_status=str(diagnostics.get("generation_status") or ""),
+        completion_class=str(diagnostics.get("completion_class") or ""),
+    )
+    diagnostics["run_snapshot"] = {
+        "run_id": snapshot["run_id"],
+        "snapshot_path": snapshot["snapshot_path"],
+    }
     if progress_callback:
         progress_callback(
             {

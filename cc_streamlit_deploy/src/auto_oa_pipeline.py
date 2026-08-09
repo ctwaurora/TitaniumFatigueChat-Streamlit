@@ -41,6 +41,7 @@ from src.stage1_store import (
     update_paper_library_status,
 )
 from src.pdf_naming import rename_new_formal_pdf
+from src.formal_pdf_protection import validate_formal_pdf_locks
 from src.unified_rag import build_unified_rag, rag_paths
 
 
@@ -518,6 +519,7 @@ def run_auto_oa_discovery(
     excluded_titles: Optional[set[str]] = None,
 ) -> Dict[str, Any]:
     """Run the complete bounded workflow in the active web request."""
+    validate_formal_pdf_locks(base_dir)
     query = " ".join(str(query or "").split())
     if not query:
         return {"status": "INVALID_INPUT", "results": [], "error": "SEARCH_TOPIC_REQUIRED"}

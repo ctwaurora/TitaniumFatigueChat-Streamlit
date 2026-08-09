@@ -43,8 +43,11 @@ EXCLUDED_CODE_FILES = {
     "skills/qwen_skill.py",
 }
 
-CONFIG_FILES = ("config/task_profile.yaml",
-    "config/evidence_weight_config.json",)
+CONFIG_FILES = (
+    "config/task_profile.yaml",
+    "config/evidence_weight_config.json",
+    "config/paper_experiment_config.json",
+)
 SCRIPT_FILES = (
     "scripts/export_streamlit_deploy.py",
     "scripts/export_cloud_evidence_bundle.py",
@@ -70,6 +73,13 @@ DATA_FILES = (
     "data/relevance_ranking.csv",
 )
 
+# These are static domain/configuration resources, not corpus-derived evidence.
+PUBLIC_SAFE_DATA_FILES = {
+    "data/domain_dictionary.csv",
+    "data/fatigue_equation_library.csv",
+    "data/minimum_validation_dataset_schema.csv",
+}
+
 FORBIDDEN_NAMES = {
     ".git",
     ".env",
@@ -88,7 +98,6 @@ FORBIDDEN_PART_SEQUENCES = {
 }
 FORBIDDEN_SUFFIXES = {".pdf", ".pyc", ".pyo", ".jsonl", ".parquet", ".npy", ".npz"}
 MAX_FILE_SIZE = 5 * 1024 * 1024
-CLOUD_BUNDLE_MAX_FILE_SIZE = 95 * 1024 * 1024
 
 SECRET_PATTERNS = (
     ("API token", re.compile(r"\bsk-[A-Za-z0-9_-]{16,}\b")),
@@ -203,7 +212,7 @@ def copy_allowlist(project_root: Path, output_dir: Path) -> None:
 
 
 def write_empty_cloud_library(project_root: Path, output_dir: Path) -> None:
-    """Keep CSV schemas but never export local literature rows as cloud truth."""
+    """Keep schemas but remove every row of corpus-derived scientific data."""
     fallback_headers = {
         "data/candidate_papers.csv": (
             "candidate_id,title,authors,year,doi,source_url,metadata_source,"
@@ -214,7 +223,10 @@ def write_empty_cloud_library(project_root: Path, output_dir: Path) -> None:
             "pdf_status,evidence_status,rag_status\n"
         ),
     }
-    for relative, fallback in fallback_headers.items():
+    for relative in DATA_FILES:
+        if relative in PUBLIC_SAFE_DATA_FILES:
+            continue
+        fallback = fallback_headers.get(relative, "")
         source = project_root / relative
         header = ""
         if source.exists():
@@ -223,6 +235,54 @@ def write_empty_cloud_library(project_root: Path, output_dir: Path) -> None:
         target = output_dir / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text((header or fallback.strip()) + "\n", encoding="utf-8")
+
+
+def write_public_metadata_catalog(project_root: Path, output_dir: Path) -> Path:
+    """Export only the metadata fields explicitly safe for a public repository."""
+    frozen = project_root / "data/system/verified_dataset_v1_manifest.json"
+    source = (
+        frozen
+        if frozen.is_file()
+        else project_root / "data/system/verified_dataset_v1_candidate_manifest.json"
+    )
+    payload = json.loads(source.read_text(encoding="utf-8"))
+    rows = [
+        {
+            "document_id": str(row.get("document_id") or ""),
+            "title": str(row.get("title") or ""),
+            "doi": str(row.get("doi") or ""),
+            "year": str(row.get("year") or ""),
+        }
+        for row in (payload.get("papers") or payload.get("documents") or [])
+    ]
+    public = {
+        "schema_version": "public-literature-metadata-1.0",
+        "dataset_version": payload.get("dataset_version"),
+        "document_count": len(rows),
+        "fields": ["document_id", "title", "doi", "year"],
+        "contains_full_text": False,
+        "contains_evidence_excerpts": False,
+        "contains_vectors_or_indexes": False,
+        "documents": rows,
+    }
+    target = output_dir / "data/public_literature_metadata.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(public, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    marker = output_dir / "data/PRIVATE_RAG_REQUIRED.json"
+    marker.write_text(
+        json.dumps(
+            {
+                "schema_version": "private-rag-boundary-1.0",
+                "public_repository_contains_private_rag": False,
+                "runtime_sources": ["TFC_PRIVATE_RAG_ROOT", "TFC_PRIVATE_RAG_BUNDLE_URL"],
+                "fail_closed_when_unavailable": True,
+            },
+            ensure_ascii=False,
+            indent=2,
+        ) + "\n",
+        encoding="utf-8",
+    )
+    return target
 
 
 def _content_manifest_hash(output_dir: Path) -> str:
@@ -276,9 +336,7 @@ def _contains_forbidden_parts(relative: Path) -> bool:
             return True
     suffix = relative.suffix.lower()
     if lowered[:2] == ("data", "cloud_bundle"):
-        if len(lowered) == 2:
-            return False
-        return suffix not in {".json", ".parquet", ".npy", ".npz"}
+        return True
     return suffix in FORBIDDEN_SUFFIXES
 
 
@@ -292,13 +350,7 @@ def scan_deployment(output_dir: Path) -> List[Tuple[str, str]]:
             continue
         if not path.is_file():
             continue
-        size_limit = (
-            CLOUD_BUNDLE_MAX_FILE_SIZE
-            if tuple(part.lower() for part in relative.parts[:2])
-            == ("data", "cloud_bundle")
-            else MAX_FILE_SIZE
-        )
-        if path.stat().st_size > size_limit:
+        if path.stat().st_size > MAX_FILE_SIZE:
             violations.append((relative_name, "file exceeds 5 MiB"))
             continue
         try:
@@ -342,16 +394,7 @@ def export_deployment(
     destination = clean_output_directory(project, output_dir)
     copy_allowlist(project, destination)
     write_empty_cloud_library(project, destination)
-    try:
-        from scripts.export_cloud_evidence_bundle import export_cloud_evidence_bundle
-    except ModuleNotFoundError:
-        from export_cloud_evidence_bundle import export_cloud_evidence_bundle
-
-    export_cloud_evidence_bundle(
-        project,
-        destination / "data" / "cloud_bundle",
-        source_commit=source_commit(project),
-    )
+    write_public_metadata_catalog(project, destination)
     write_deploy_version(project, destination)
 
     violations = scan_deployment(destination)

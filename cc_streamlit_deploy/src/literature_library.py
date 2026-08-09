@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
 from src.domain_scope import OUT_OF_SCOPE, classify_literature_scope
+from src.formal_pdf_protection import deny_formal_state_transition
 from src.metadata_service import fetch_metadata, is_valid_title
 from src.stage1_store import (
     BASE_DIR,
@@ -720,7 +721,17 @@ def quarantine_record(
     reason: str,
     *,
     base_dir: Path = BASE_DIR,
+    allow_formal_delete: bool = False,
+    operator: str = "",
 ) -> Dict[str, Any]:
+    deny_formal_state_transition(
+        record_id,
+        base_dir=base_dir,
+        action="QUARANTINE",
+        allow_formal_delete=allow_formal_delete,
+        reason=reason,
+        operator=operator,
+    )
     manifest = load_paper_manifest(base_dir)
     for row in manifest:
         if str(row.get("paper_id") or "") == record_id:
@@ -742,9 +753,19 @@ def quarantine_record(
 
 
 def archive_canonical_records(
-    paper_ids: Sequence[str], *, base_dir: Path = BASE_DIR
+    paper_ids: Sequence[str], *, base_dir: Path = BASE_DIR,
+    allow_formal_delete: bool = False, reason: str = "", operator: str = ""
 ) -> Dict[str, Any]:
     requested = set(str(value) for value in paper_ids if value)
+    for paper_id in requested:
+        deny_formal_state_transition(
+            paper_id,
+            base_dir=base_dir,
+            action="ARCHIVE",
+            allow_formal_delete=allow_formal_delete,
+            reason=reason,
+            operator=operator,
+        )
     rows = load_paper_manifest(base_dir)
     archived: List[str] = []
     for row in rows:
@@ -760,7 +781,8 @@ def archive_canonical_records(
 
 
 def permanently_delete_canonical_records(
-    paper_ids: Sequence[str], *, base_dir: Path = BASE_DIR
+    paper_ids: Sequence[str], *, base_dir: Path = BASE_DIR,
+    allow_formal_delete: bool = False, reason: str = "", operator: str = ""
 ) -> Dict[str, Any]:
     """Delete only explicitly selected canonical records and rebuild Stage-3."""
     requested = set(str(value) for value in paper_ids if value)
@@ -773,6 +795,16 @@ def permanently_delete_canonical_records(
     ]
     if not targets:
         return {"status": "NOT_FOUND", "deleted": []}
+
+    for row in targets:
+        deny_formal_state_transition(
+            str(row.get("paper_id") or ""),
+            base_dir=base_dir,
+            action="PERMANENT_DELETE",
+            allow_formal_delete=allow_formal_delete,
+            reason=reason,
+            operator=operator,
+        )
 
     kept_paths = {
         str(Path(value).resolve())
