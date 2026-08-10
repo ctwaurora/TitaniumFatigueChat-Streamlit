@@ -80,7 +80,11 @@ def verify_answer_claims(answer: str, evidence_bundle: dict[str, Any]) -> dict[s
         invalid_pages = sorted(pages - valid_pages) if cited_ids else []
         inference = any(marker in claim for marker in _INFERENCE_MARKERS)
         method_or_boundary = any(marker in claim for marker in _METHOD_OR_BOUNDARY_MARKERS)
-        unsupported_numeric = bool(_NUMBER_WITH_UNIT.search(claim)) and not cited_ids and not inference and not method_or_boundary
+        # Exact experimental values require traceable evidence regardless of
+        # whether the surrounding sentence is labelled inference/proposal.
+        # Boundary language cannot turn an invented temperature, load, rate,
+        # size, or cycle count into a scientifically acceptable parameter.
+        unsupported_numeric = bool(_NUMBER_WITH_UNIT.search(claim)) and not cited_ids
         cited_rows = []
         for evidence_id in cited_ids:
             row = dict(citations.get(evidence_id) or formulas.get(evidence_id) or {})

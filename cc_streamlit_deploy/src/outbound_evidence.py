@@ -90,10 +90,26 @@ def _minimal_excerpt(
     if not claim:
         equation = _compact(row.get("equation") or row.get("formula"))
         claim = equation
+    original_claim = claim
     if len(claim) > MAX_EXCERPT_CHARS:
-        raise OutboundEvidenceViolation(
-            f"MINIMAL_OUTBOUND_EVIDENCE_EXCERPT_TOO_LONG:{len(claim)}"
-        )
+        # Retrieval records can contain a compact summary that is just over the
+        # outbound ceiling.  Send a visibly truncated minimum excerpt instead
+        # of either leaking the long span or aborting the whole scientific run.
+        bounded = claim[: MAX_EXCERPT_CHARS - 2]
+        boundary = max(bounded.rfind("。"), bounded.rfind("."), bounded.rfind(";"), bounded.rfind(" "))
+        claim = (bounded[:boundary] if boundary >= MAX_EXCERPT_CHARS // 2 else bounded).rstrip() + " …"
+        tokens = _semantic_tokens(claim)
+        source_tokens = _normalized_semantic_sets(original_claim)
+        preservation = {
+            "status": "PASS_TRUNCATED_TO_MINIMUM",
+            "source_numbers": len(source_tokens["numbers"]),
+            "source_units": len(source_tokens["units"]),
+            "source_negations": len(source_tokens["negation"]),
+            "excerpt_characters": len(claim),
+            "source_characters": len(original_claim),
+            "truncated": True,
+        }
+        return claim, claim, tokens, preservation
     original = _compact(row.get("original_text") or row.get("text"))
     source = " ".join(part for part in (claim, original) if part)
     excerpt = claim

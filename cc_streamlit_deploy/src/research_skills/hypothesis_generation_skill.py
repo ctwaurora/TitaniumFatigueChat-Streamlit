@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.research_skills.common import base_quality_gate, bundle_prompt, entity_labels, evidence_level_instruction, joint_short_crack_candidate_models, missing_evidence, primary_citation, query_variables, traceable_cards, usable_formulas
+from src.research_skills.common import base_quality_gate, bundle_prompt, entity_labels, evidence_level_instruction, extract_falsification_criteria, joint_short_crack_candidate_models, missing_evidence, primary_citation, query_variables, traceable_cards, usable_formulas
 from src.research_skills.contracts import SkillInput, SkillOutput
 from src.research_skills.domain_profiles import profile_prompt_block, select_domain_profile
 
@@ -187,9 +187,10 @@ def _fallback(value: SkillInput) -> tuple[str, str, list[str]]:
 def generate(value: SkillInput, synthesis: str = "") -> SkillOutput:
     direct, reasoning, falsifiers = _fallback(value)
     complete = synthesis.strip()
+    rendered_falsifiers = extract_falsification_criteria(complete) if complete else falsifiers
     combined = complete or f"{direct}\n{reasoning}"
     gate = base_quality_gate(value, combined, skill_name=SKILL_NAME)
-    gate["falsification_criteria_count"] = 2 if complete else len(falsifiers)
+    gate["falsification_criteria_count"] = len(rendered_falsifiers)
     profile = select_domain_profile(value)
     evidence_basis = bool(value.support_evidence) or (
         profile.key == "residual_microstructure_short_crack" and bool(value.retrieved_evidence)
@@ -205,7 +206,7 @@ def generate(value: SkillInput, synthesis: str = "") -> SkillOutput:
     else:
         candidate_model = profile.model
     return SkillOutput(SKILL_NAME, complete or direct, "" if complete else reasoning, "候选假设不是已证实结论；条件不匹配时不得外推。", traceable_cards(value), gate, missing_evidence(value), {
-        "complete_answer": complete, "falsification_criteria": falsifiers, "quality_metrics": QUALITY_METRICS,
+        "complete_answer": complete, "falsification_criteria": rendered_falsifiers, "quality_metrics": QUALITY_METRICS,
         "hypothesis_statement": complete or direct,
         "independent_variables": independent, "dependent_variables": dependent,
         "control_variables": ["material_batch", "manufacturing_window", "surface_condition", "stress_ratio", "frequency", "temperature", "environment"],

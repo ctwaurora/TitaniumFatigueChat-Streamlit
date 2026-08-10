@@ -78,7 +78,10 @@ DEPENDENT_PATTERNS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("fatigue_limit", ("fatigue limit", "疲劳极限")),
     ("crack_initiation_life", ("crack initiation life", "起裂寿命")),
     ("crack_initiation", ("crack initiation", "裂纹起裂", "裂纹萌生")),
-    ("crack_origin_location", ("crack origin", "裂纹起源", "起裂位置", "表面转向内部")),
+    ("crack_origin_location", (
+        "crack origin", "裂纹起源", "起裂位置", "表面转向内部",
+        "表面起裂转向内部起裂", "从表面起裂转向内部起裂",
+    )),
     ("fatigue_performance", ("fatigue performance", "fatigue behavior", "疲劳性能", "疲劳行为")),
     ("crack_closure", ("crack closure", "裂纹闭合")),
 )

@@ -47,6 +47,7 @@ CONFIG_FILES = (
     "config/task_profile.yaml",
     "config/evidence_weight_config.json",
     "config/paper_experiment_config.json",
+    "config/v1_freeze_manifest.json",
 )
 SCRIPT_FILES = (
     "scripts/export_streamlit_deploy.py",

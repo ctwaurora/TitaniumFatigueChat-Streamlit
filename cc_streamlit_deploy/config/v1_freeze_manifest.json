@@ -1,0 +1,95 @@
+{
+  "schema_version": "titanium-fatigue-chat-core-freeze-1.0",
+  "product_version": "TitaniumFatigueChat-v1.0",
+  "status": "FROZEN",
+  "frozen_at": "2026-08-10T14:58:33Z",
+  "core_source_commit": "027fca6c7f7ff397fef5b80fa1d5ad2088c582ea",
+  "dataset": {
+    "version": "TitaniumFatigueChat-Verified-Dataset-v1.0",
+    "status": "FROZEN",
+    "verified_documents": 208,
+    "verified_pdfs": 208,
+    "dataset_contract_sha256": "cbc925bcea27c4ced613adce5b670e8590b4a3bdd9d6b6a286dd29a79d96e62d"
+  },
+  "prompt_templates": {
+    "scientific_analysis": {
+      "version": "scientific-analysis-v1.0.0",
+      "sha256": "97503f79eb37e5b6776107dc84f361a0eb326c653fe827fe2a5f6b6e705aba85"
+    },
+    "research_gap": {
+      "version": "research-gap-v1.0.0",
+      "sha256": "ef01745beead56404b274fafae5267893e0c1c294658774b43bc882ff886562e"
+    },
+    "hypothesis_generation": {
+      "version": "hypothesis-generation-v1.0.0",
+      "sha256": "c1a49369172d634ba016905ea6c8d303d5e5fe406b8870517e427495a1196159"
+    },
+    "experiment_design": {
+      "version": "experiment-design-v1.0.0",
+      "sha256": "e70efd112434bbc40b66652c72b11789a1219bddd52a0b5f3042d0d3cbaf5ffa"
+    }
+  },
+  "evidence_config": {
+    "version": "evidence-weight-v1",
+    "sha256": "c1acf8b1c2df766234667cd09661aadde0a80e087302d4d93737f84bd5380371"
+  },
+  "gate_config": {
+    "version": "skill-scientific-evaluation-1.1",
+    "sha256": "7f62824b4746603fa1e459905e72ff94e1f2066c77d91c256a9aa8a7f7bc1cae"
+  },
+  "experiment_config": {
+    "version": "paper-experiment-config-v1.0.0",
+    "sha256": "839be86bd81a54f556e7a4f22ada5cee0a91da3e8efcddb28a1a80594659482a"
+  },
+  "model_config": {
+    "provider": "DeepSeek",
+    "model": "deepseek-chat",
+    "temperature": 0.1,
+    "repair_temperature": 0.0,
+    "top_p": null,
+    "seed": null,
+    "max_tokens": 1600,
+    "repair_max_tokens": 1400,
+    "timeout_seconds": 60,
+    "connect_timeout_seconds": 10,
+    "max_retries": 3
+  },
+  "real_dual_flagship_acceptance": {
+    "status": "PASS",
+    "validation_scope": "REAL_DEEPSEEK",
+    "skill_tasks": 8,
+    "api_completions_including_repairs": 13,
+    "all_outbound_manifests_safe": true,
+    "q04_chain": [
+      "DIRECT_EVIDENCE_SYNTHESIS",
+      "CANDIDATE_EVIDENCE_GAP",
+      "EVIDENCE_ANCHORED_HYPOTHESIS",
+      "PROVISIONAL_FALSIFICATION_DESIGN"
+    ],
+    "q08_chain": [
+      "DIRECT_EVIDENCE_SYNTHESIS",
+      "CANDIDATE_EVIDENCE_GAP",
+      "EVIDENCE_ANCHORED_HYPOTHESIS",
+      "EVIDENCE_SUPPORTED_DESIGN"
+    ],
+    "direct_model_outputs_accepted": 3,
+    "unsafe_model_outputs_rejected_then_safe_fallback": 5,
+    "run_ids": [
+      "RUN_20260810T145320742426Z_scientific_analysis_skill_f68ea482",
+      "RUN_20260810T145339517601Z_research_gap_skill_baea6f1d",
+      "RUN_20260810T145405134435Z_hypothesis_generation_skill_352ad935",
+      "RUN_20260810T145429663572Z_experiment_design_skill_2225cd49",
+      "RUN_20260810T145447223621Z_scientific_analysis_skill_cb42815a",
+      "RUN_20260810T145513848882Z_research_gap_skill_733fb828",
+      "RUN_20260810T145542626284Z_hypothesis_generation_skill_8b069c5c",
+      "RUN_20260810T145606349150Z_experiment_design_skill_9153769d"
+    ]
+  },
+  "verification": {
+    "pytest_passed": 391,
+    "pytest_failed": 0,
+    "local_dual_flagship_preflight": "PASS",
+    "real_dual_flagship_acceptance": "PASS"
+  },
+  "post_freeze_policy": "Any change to core retrieval, weights, prompts, gates, or Skills must be versioned as v1.1 and must not overwrite the v1.0 benchmark artifacts."
+}

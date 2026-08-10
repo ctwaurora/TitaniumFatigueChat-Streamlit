@@ -1,5 +1,5 @@
 TitaniumFatigueChat Streamlit deployment manifest
-file_count=156
+file_count=157
 
 .gitattributes
 .gitignore
@@ -9,6 +9,7 @@ app.py
 config/evidence_weight_config.json
 config/paper_experiment_config.json
 config/task_profile.yaml
+config/v1_freeze_manifest.json
 data/candidate_papers.csv
 data/condition_evidence_dataset.csv
 data/conflict_claims.csv

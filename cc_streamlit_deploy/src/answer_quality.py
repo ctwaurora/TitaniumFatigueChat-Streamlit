@@ -108,6 +108,12 @@ def _has_severe_claim_mismatch(
     for record in report.get("claims") or []:
         if record.get("status") != "MISALIGNED_EVIDENCE":
             continue
+        if record.get("claim_category") != "EVIDENCE_GROUNDED_FACTUAL_CLAIM":
+            # Inferences and testable proposals are checked for grounded
+            # premises, boundary language, variables, and falsifiability.  They
+            # must not be rejected merely because no source states the final
+            # proposed relation verbatim.
+            continue
         claim_text = str(record.get("claim_text") or "")
         if re.search(r"反向|反证|相反|条件|边界|限制|替代|不能外推", claim_text):
             continue

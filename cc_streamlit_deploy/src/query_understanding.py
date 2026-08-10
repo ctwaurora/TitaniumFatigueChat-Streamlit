@@ -25,6 +25,12 @@ import pandas as pd
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
 
+# Scientific regime acronyms carry distinctions that must survive display-term
+# normalisation.  The domain dictionary intentionally maps many synonyms to a
+# broad Chinese label, but collapsing HCF and VHCF destroys the queried regime
+# transition before QueryFrame parsing.
+PROTECTED_DOMAIN_ACRONYMS = ("VHCF", "HCF", "LCF", "FCGR")
+
 
 def _s(val) -> str:
     """Safely convert pandas/CSV value to string, handling NaN."""
@@ -216,6 +222,13 @@ def correct_typos_and_map(text: str, tables: Dict[str, Any]) -> Tuple[str, List[
 
     corrections = []
     corrected = text
+    protected: dict[str, str] = {}
+    for index, acronym in enumerate(PROTECTED_DOMAIN_ACRONYMS):
+        pattern = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(acronym)}(?![A-Za-z0-9_])", re.I)
+        if pattern.search(corrected):
+            token = f"__TFC_PROTECTED_ACRONYM_{index}__"
+            corrected = pattern.sub(token, corrected)
+            protected[token] = acronym
 
     # Step 1: Direct typo replacement (sorted by length desc for greedy match)
     all_typos = sorted(typo_map.keys(), key=lambda x: -len(x))
@@ -291,6 +304,8 @@ def correct_typos_and_map(text: str, tables: Dict[str, Any]) -> Tuple[str, List[
                 "confidence": max(0.6, 1.0 - best_dist / len(token)),
             })
 
+    for token, acronym in protected.items():
+        corrected = corrected.replace(token, acronym)
     return corrected, corrections
 
 

@@ -67,7 +67,9 @@ def _dataset_contract(base_dir: Path, fallback_fingerprint: str) -> tuple[str, s
     frozen dataset version, so preserve both values instead of overloading one
     field with two unrelated meanings.
     """
-    path = base_dir / "data/system/verified_dataset_v1_candidate_manifest.json"
+    frozen = base_dir / "data/system/verified_dataset_v1_manifest.json"
+    candidate = base_dir / "data/system/verified_dataset_v1_candidate_manifest.json"
+    path = frozen if frozen.is_file() else candidate
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -161,6 +163,9 @@ def create_run_snapshot(
         "experiment_config_version": experiment_config["schema_version"],
         "experiment_config_hash": paper_experiment_config_hash(experiment_config),
         "gate_config": experiment_config["gate"],
+        "gate_config_hash": _sha256_text(json.dumps(
+            experiment_config["gate"], ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )),
         "model_config": experiment_config["model"],
         "top_k": top_k,
         "retrieved_document_ids": retrieved_documents,

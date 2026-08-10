@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from src.research_skills.common import base_quality_gate, bundle_prompt, entity_labels, evidence_level_instruction, has_direct_interaction_evidence, missing_evidence, primary_citation, query_variables, traceable_cards, usable_formulas
+from src.research_skills.common import base_quality_gate, bundle_prompt, entity_labels, evidence_level_instruction, extract_falsification_criteria, has_direct_interaction_evidence, missing_evidence, primary_citation, query_variables, traceable_cards, usable_formulas
 from src.claim_evidence_verifier import scientific_concepts
 from src.research_skills.contracts import SkillInput, SkillOutput
 from src.research_skills.domain_profiles import profile_prompt_block, select_domain_profile
@@ -26,6 +26,27 @@ def _has_direct_defect_size_location_interaction(value: SkillInput) -> bool:
         if {"defect_size", "defect_location"} <= concepts and concepts & {
             "fatigue_life", "crack_initiation"
         }:
+            return True
+    return False
+
+
+def _has_direct_profile_relation(value: SkillInput, profile_key: str) -> bool:
+    if profile_key == "residual_microstructure_short_crack":
+        return has_direct_interaction_evidence(value)
+    if profile_key in {"defect_size_life", "defect_location"}:
+        return _has_direct_defect_size_location_interaction(value)
+    required = {
+        "regime_transition": {"fatigue_life", "crack_initiation"},
+    }.get(profile_key)
+    if not required:
+        return False
+    for row in value.support_evidence:
+        if str(row.get("verified_evidence_role") or "") != "DIRECT_SUPPORT":
+            continue
+        concepts = scientific_concepts(
+            f"{row.get('claim') or ''} {row.get('original_text') or row.get('text') or ''}"
+        )
+        if required <= concepts:
             return True
     return False
 
@@ -75,14 +96,7 @@ def _fallback(value: SkillInput) -> tuple[str, str, list[str]]:
         item = formulas[0]
         formula_note = f"拟合文献原公式 {item['equation']}（Formula ID：{item['formula_id']}，页码：{item['page_number']}），仅在其单位和适用条件一致时比较。"
     frame = value.query_frame or bundle.get("query_frame") or {}
-    direct_interaction = has_direct_interaction_evidence(value)
-    direct_profile_interaction = (
-        direct_interaction
-        if profile.key == "residual_microstructure_short_crack"
-        else _has_direct_defect_size_location_interaction(value)
-        if profile.key in {"defect_size_life", "defect_location"}
-        else True
-    )
+    direct_profile_interaction = _has_direct_profile_relation(value, profile.key)
     design_tier = (
         "EVIDENCE-SUPPORTED DESIGN"
         if direct_profile_interaction
@@ -235,10 +249,11 @@ def _fallback(value: SkillInput) -> tuple[str, str, list[str]]:
 def generate(value: SkillInput, synthesis: str = "") -> SkillOutput:
     direct, reasoning, falsifiers = _fallback(value)
     complete = synthesis.strip()
+    rendered_falsifiers = extract_falsification_criteria(complete) if complete else falsifiers
     combined = complete or f"{direct}\n{reasoning}"
     gate = base_quality_gate(value, combined, skill_name=SKILL_NAME)
     gate["original_evidence_rechecked"] = bool(value.retrieved_evidence)
-    gate["falsification_criteria_count"] = 2 if complete else len(falsifiers)
+    gate["falsification_criteria_count"] = len(rendered_falsifiers)
     profile = select_domain_profile(value)
     evidence_basis = bool(value.support_evidence) or (
         profile.key == "residual_microstructure_short_crack" and bool(value.retrieved_evidence)
@@ -248,17 +263,11 @@ def generate(value: SkillInput, synthesis: str = "") -> SkillOutput:
     independent, dependent = query_variables(value)
     design_tier = (
         "EVIDENCE-SUPPORTED DESIGN"
-        if (
-            has_direct_interaction_evidence(value)
-            if profile.key == "residual_microstructure_short_crack"
-            else _has_direct_defect_size_location_interaction(value)
-            if profile.key in {"defect_size_life", "defect_location"}
-            else True
-        )
+        if _has_direct_profile_relation(value, profile.key)
         else "PROVISIONAL FALSIFICATION DESIGN"
     )
     return SkillOutput(SKILL_NAME, complete or direct, "" if complete else reasoning, f"{profile.title}的精确水平和样本量必须由预实验方差、设备能力与安全审查冻结。", traceable_cards(value), gate, missing_evidence(value), {
-        "complete_answer": complete, "falsification_criteria": falsifiers, "quality_metrics": QUALITY_METRICS,
+        "complete_answer": complete, "falsification_criteria": rendered_falsifiers, "quality_metrics": QUALITY_METRICS,
         "design_tier": design_tier,
         "research_object": (value.query_frame or {}).get("alloy_grade") or (value.query_frame or {}).get("material"),
         "hypothesis": direct, "independent_variables": independent,

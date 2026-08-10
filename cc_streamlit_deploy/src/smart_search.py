@@ -749,6 +749,8 @@ def run_smart_search(
         return fallback_output, fallback_answer, fallback_quality
 
     synthesis = ""
+    selected_model_output = ""
+    model_outputs: list[dict[str, str]] = []
     llm_call_count = 0
     model_service_error: Exception | None = None
     settings = get_deepseek_settings()
@@ -791,6 +793,8 @@ def run_smart_search(
                 connect_timeout=int(model_config["connect_timeout_seconds"]),
                 max_retries=int(model_config["max_retries"]),
             )
+            selected_model_output = synthesis
+            model_outputs.append({"phase": "INITIAL_SYNTHESIS", "output": synthesis})
             llm_call_count += 1
             diagnostics["llm_executed"] = True
             diagnostics["llm_usage"] = client.usage_snapshot()
@@ -808,6 +812,7 @@ def run_smart_search(
         diagnostics["model_error_category"] = "CONFIGURATION_ERROR"
         diagnostics["generation_status"] = "MODEL_SERVICE_ERROR"
     skill_output = skill.generate(skill_input, synthesis=synthesis)
+    final_output_source = "INITIAL_MODEL_OUTPUT" if synthesis else "DETERMINISTIC_FALLBACK"
     answer = postprocess_science_output(skill.render_output(skill_output))
     quality = validate_answer_quality(
         answer,
@@ -818,6 +823,7 @@ def run_smart_search(
     )
     repair_attempted = False
     if model_service_error is not None:
+        final_output_source = "MODEL_SERVICE_ERROR"
         answer = (
             "## 模型服务暂时不可用\n\n"
             "DeepSeek模型服务本次未能完成请求，系统没有将网络故障解释为证据不足，"
@@ -862,6 +868,7 @@ def run_smart_search(
                 connect_timeout=int(model_config["connect_timeout_seconds"]),
                 max_retries=int(model_config["max_retries"]),
             )
+            model_outputs.append({"phase": "QUALITY_REPAIR", "output": repaired})
             llm_call_count += 1
             repaired_output = skill.generate(skill_input, synthesis=repaired)
             repaired_answer = postprocess_science_output(skill.render_output(repaired_output))
@@ -874,12 +881,16 @@ def run_smart_search(
             )
             if repaired_quality["passed"]:
                 skill_output, answer, quality = repaired_output, repaired_answer, repaired_quality
+                selected_model_output = repaired
+                final_output_source = "REPAIRED_MODEL_OUTPUT"
             else:
                 fallback_output, fallback_answer, fallback_quality = validated_deterministic_fallback()
                 if fallback_quality["passed"]:
                     skill_output, answer, quality = fallback_output, fallback_answer, fallback_quality
+                    final_output_source = "DETERMINISTIC_FALLBACK_AFTER_MODEL_REJECTION"
                 else:
                     quality = fallback_quality
+                    final_output_source = "PRECISE_REFUSAL_AFTER_MODEL_REJECTION"
                     answer = precise_refusal(
                         skill_output.skill_name,
                         quality.get("scientific_failures") or quality["failures"],
@@ -892,11 +903,13 @@ def run_smart_search(
             fallback_output, fallback_answer, fallback_quality = validated_deterministic_fallback()
             if fallback_quality["passed"]:
                 skill_output, answer, quality = fallback_output, fallback_answer, fallback_quality
+                final_output_source = "DETERMINISTIC_FALLBACK_AFTER_REPAIR_ERROR"
             else:
                 quality = fallback_quality
                 # Keep the generated draft visible; a failed repair is a model
                 # service problem, never an evidence-gate refusal.
     elif not quality["passed"]:
+        final_output_source = "PRECISE_REFUSAL"
         answer = precise_refusal(
             skill_output.skill_name,
             quality.get("scientific_failures") or quality["failures"],
@@ -907,6 +920,13 @@ def run_smart_search(
             "A. 得到支持的具体研究空白",
             "B. 候选证据缺口，尚需外部文献验证",
         ).replace("confirmed_gap", "candidate_evidence_gap")
+        scope = "范围限定：以下‘未发现/缺少’均指当前已验证语料，不代表整个外部文献中不存在。"
+        if scope not in answer:
+            answer = f"{scope}\n\n{answer}"
+        answer = answer.replace(
+            "该模型尚未被任何已知研究拟合",
+            "当前已验证语料未找到该模型已被拟合的直接证据",
+        )
     skill_output.quality_gate = dict(quality)
     skill_output.specific_fields["result_state"] = quality.get("state")
     claim_guard = {"enabled": False, "changed_claim_count": 0}
@@ -932,6 +952,8 @@ def run_smart_search(
     else:
         diagnostics["completion_class"] = "MODEL_SERVICE_ERROR"
     diagnostics["llm_call_count"] = llm_call_count
+    diagnostics["model_outputs"] = model_outputs
+    diagnostics["final_output_source"] = final_output_source
     diagnostics["quality_repair_attempted"] = repair_attempted
     diagnostics["identified_topics"] = result.get("identified_topics") or []
     diagnostics["evidence_bundle_paper_count"] = len(skill_input.evidence_bundle.get("papers") or [])
@@ -972,7 +994,7 @@ def run_smart_search(
         seed=model_config.get("seed"),
         top_k=top_k,
         research_result=result,
-        raw_model_output=synthesis,
+        raw_model_output=selected_model_output or synthesis,
         cleaned_output=answer,
         response_time=float(diagnostics["total_elapsed_seconds"]),
         token_usage=dict(diagnostics.get("llm_usage") or {}),

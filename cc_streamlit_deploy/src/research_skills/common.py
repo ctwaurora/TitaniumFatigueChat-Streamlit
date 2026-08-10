@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from src.research_skills.contracts import SkillInput
@@ -19,6 +20,30 @@ ENTITY_LABEL_ALIASES = {
     "残余应力": ("残余应力", "σres"),
     "微观组织": ("微观组织", "显微组织", "α片层", "织构"),
 }
+
+_FALSIFICATION_SIGNAL = re.compile(
+    r"推翻|证伪|不支持|拒绝.*假设|假设.*不成立|无法复现|方向相反|"
+    r"不改善.*(?:解释|预测|表现|误差)|falsif|reject.*hypothes|not support",
+    re.I,
+)
+
+
+def extract_falsification_criteria(text: str) -> list[str]:
+    """Extract explicit logical falsifiers from model output.
+
+    This deliberately does not reward mere mentions of p-values, effect-size
+    thresholds, temperatures, loads, or sample counts.  A criterion must state
+    an observable result that would weaken or reject the proposed relation.
+    """
+    candidates = re.split(r"\n+|(?<=[。！？!?])", str(text or ""))
+    criteria: list[str] = []
+    for candidate in candidates:
+        cleaned = re.sub(r"^\s*(?:[-*]|\d+[.)、])\s*", "", candidate).strip()
+        if len(cleaned) < 12 or not _FALSIFICATION_SIGNAL.search(cleaned):
+            continue
+        if cleaned not in criteria:
+            criteria.append(cleaned)
+    return criteria
 
 
 def entity_labels(value: SkillInput) -> tuple[str, str]:
