@@ -77,7 +77,13 @@ def _download_private_artifact(
 
     cache_root.mkdir(parents=True, exist_ok=True)
     archive_path = cache_root / f"{cache_key}.zip.part"
-    request = urllib.request.Request(url, headers={"User-Agent": "TitaniumFatigueChat/1.0"})
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "TitaniumFatigueChat/1.0",
+            "Accept": "application/octet-stream",
+        },
+    )
     if token:
         request.add_header("Authorization", f"Bearer {token}")
     try:
