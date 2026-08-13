@@ -1,5 +1,5 @@
 {
-  "schema_version": "evidence-weight-v1",
+  "schema_version": "evidence-weight-v1.1",
   "dimension_weights": {
     "relevance": 0.25,
     "condition_match": 0.20,
@@ -17,6 +17,12 @@
     "ALTERNATIVE_MECHANISM": 0.72,
     "SUPPORTING_CONTEXT": 0.55,
     "REVIEW_BACKGROUND": 0.40
+  },
+  "tier_coefficients": {
+    "TIER1_CORE_DIRECT": 1.0,
+    "TIER2_NEAR_DOMAIN": 0.82,
+    "TIER3_FOUNDATIONAL_MECHANICS": 0.68,
+    "OUT_OF_SCOPE": 0.30
   },
   "material_process_match": {
     "lpbf_ti6al4v": 1.0,

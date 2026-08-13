@@ -38,7 +38,7 @@ DEFAULT_OUTPUT = (
     / "data"
     / "cloud_bundle"
 )
-BUNDLE_VERSION = "1.0.0"
+BUNDLE_VERSION = "1.1.0"
 SCHEMA_VERSION = "cloud-evidence-bundle-1.0"
 MAX_EVIDENCE_EXCERPT = 700
 MAX_RAG_EXCERPT = 700
@@ -246,9 +246,9 @@ def export_cloud_evidence_bundle(
         else:
             raise CloudBundleExportError(f"Unexpected directory in cloud bundle: {old}")
 
-    verified_payload = _read_json(
-        project / "data/system/verified_dataset_v1_candidate_manifest.json"
-    )
+    from src.dataset_versioning import active_dataset_manifest_path
+    verified_path = active_dataset_manifest_path(project)
+    verified_payload = _read_json(verified_path)
     if verified_payload.get("papers"):
         whitelist = {
             str(row.get("document_id") or "")
@@ -256,7 +256,7 @@ def export_cloud_evidence_bundle(
             if row.get("document_id")
         }
         if len(whitelist) != int(verified_payload.get("verified_paper_count") or -1):
-            raise CloudBundleExportError("Verified Dataset v1 manifest count mismatch")
+            raise CloudBundleExportError("Active verified dataset manifest count mismatch")
     else:
         whitelist_payload = _read_json(project / "data/system/formal_rag_whitelist.json")
         whitelist = {str(value) for value in whitelist_payload.get("paper_ids") or []}
@@ -306,6 +306,7 @@ def export_cloud_evidence_bundle(
                     "variables": _safe_scalar(row.get("variables")),
                     "conditions": _safe_scalar(row.get("conditions")),
                     "data_version": str(row.get("data_version") or ""),
+                    "evidence_tier": str(row.get("evidence_tier") or "TIER1_CORE_DIRECT"),
                 }
             )
 
@@ -446,6 +447,8 @@ def export_cloud_evidence_bundle(
                 "oa_url": _safe_url(row.get("source_url")),
                 "document_type": str(row.get("document_type") or ""),
                 "domain_scope": str(row.get("domain_scope") or ""),
+                "evidence_tier": str(row.get("evidence_tier") or "TIER1_CORE_DIRECT"),
+                "tier_reason": str(row.get("tier_reason") or "V1_FROZEN_FORMAL_CORPUS"),
                 "formal_status": "FORMAL_INDEXED",
                 "rag_status": "INDEXED_STAGE3_UNIFIED",
                 "evidence_record_count": evidence_counts[paper_id],

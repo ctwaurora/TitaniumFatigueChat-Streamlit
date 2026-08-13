@@ -1,5 +1,5 @@
 TitaniumFatigueChat Streamlit deployment manifest
-file_count=157
+file_count=169
 
 .gitattributes
 .gitignore
@@ -68,6 +68,7 @@ src/corpus_expansion.py
 src/corpus_statistics.py
 src/data_cache.py
 src/data_contracts.py
+src/dataset_versioning.py
 src/debug_outputs.py
 src/deep_read_pipeline.py
 src/deepseek_client.py
@@ -103,9 +104,20 @@ src/interactive_modules.py
 src/library_management.py
 src/library_page.py
 src/literature_agent.py
+src/literature_discovery.py
 src/literature_formula_library.py
 src/literature_library.py
 src/literature_search_agent.py
+src/literature_sources/__init__.py
+src/literature_sources/base.py
+src/literature_sources/core.py
+src/literature_sources/crossref.py
+src/literature_sources/nasa_ntrs.py
+src/literature_sources/ncbi.py
+src/literature_sources/openalex.py
+src/literature_sources/osti.py
+src/literature_sources/unpaywall.py
+src/literature_sources/web_of_science.py
 src/literature_support_fields.py
 src/literature_tasks.py
 src/local_pdf_import.py

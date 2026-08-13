@@ -6,5 +6,5 @@ TitaniumFatigueChat: 面向钛合金疲劳研究的证据约束型 AI Scientist
 生成可追溯、可验证、可推翻的科学假设生成系统。
 """
 
-__version__ = "2.0.0"
+__version__ = "1.1.0"
 __app_name__ = "TitaniumFatigueChat"

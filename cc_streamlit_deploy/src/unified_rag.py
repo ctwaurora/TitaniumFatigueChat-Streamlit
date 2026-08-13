@@ -49,6 +49,7 @@ from src.claim_evidence_verifier import (
     classify_evidence_for_claim,
 )
 from src.stage1_store import BASE_DIR, load_paper_manifest, update_paper_rag_status
+from src.dataset_versioning import active_dataset_ids
 
 
 RAG_SCHEMA_VERSION = "stage3.0"
@@ -392,6 +393,8 @@ def _doc(
         "source_method": source_method,
         "source_pdf_path": str(paper.get("source_pdf_path") or ""),
         "file_hash_sha256": str(paper.get("file_hash_sha256") or ""),
+        "evidence_tier": str(paper.get("evidence_tier") or "TIER1_CORE_DIRECT"),
+        "tier_reason": str(paper.get("tier_reason") or "V1_FROZEN_FORMAL_CORPUS"),
         "data_version": RAG_SCHEMA_VERSION,
     }
 
@@ -947,18 +950,12 @@ def _matches_filters(doc: Dict[str, Any], filters: Dict[str, Any]) -> bool:
 
 
 def _verified_dataset_ids(base_dir: Path) -> set[str] | None:
-    """Return reproducible-v1 IDs; historical-only rows are never used for new claims."""
-    path = Path(base_dir) / "data/system/verified_dataset_v1_candidate_manifest.json"
-    if not path.is_file():
+    """Return active version IDs while preserving v1 as the fail-safe fallback."""
+    fallback = Path(base_dir) / "data/system/verified_dataset_v1_candidate_manifest.json"
+    pointer = Path(base_dir) / "data/system/active_dataset_manifest.json"
+    if not fallback.is_file() and not pointer.is_file():
         return None
-    payload = _read_json(path, {})
-    ids = {
-        str(row.get("document_id") or "") for row in payload.get("papers") or []
-        if row.get("document_id")
-    }
-    if not ids or len(ids) != int(payload.get("verified_paper_count") or -1):
-        raise RuntimeError("FORMAL_PROVENANCE_VIOLATION:VERIFIED_DATASET_MANIFEST_INVALID")
-    return ids
+    return active_dataset_ids(Path(base_dir))
 
 
 def _deduplicate(results: Sequence[Dict[str, Any]]) -> Tuple[List[Dict[str, Any]], int]:

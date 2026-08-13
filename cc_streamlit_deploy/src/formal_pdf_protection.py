@@ -18,6 +18,7 @@ from typing import Any, Iterable
 
 
 LOCK_RELATIVE = Path("data/system/formal_pdf_lock_manifest.json")
+LOCK_POINTER_RELATIVE = Path("data/system/active_formal_pdf_lock.json")
 AUDIT_RELATIVE = Path("data/audit/formal_pdf_deletion_audit.jsonl")
 
 
@@ -60,7 +61,19 @@ def _manifest_rows(base_dir: Path) -> list[dict[str, Any]]:
 
 
 def load_formal_pdf_lock(base_dir: Path) -> dict[str, Any]:
-    return _load_json(Path(base_dir) / LOCK_RELATIVE, {})
+    root = Path(base_dir).resolve()
+    pointer = _load_json(root / LOCK_POINTER_RELATIVE, {})
+    relative = str(pointer.get("manifest_path") or "").strip()
+    if relative:
+        candidate = (root / relative).resolve()
+        try:
+            candidate.relative_to(root)
+        except ValueError as exc:
+            raise FormalProvenanceViolation("FORMAL_PROVENANCE_VIOLATION:LOCK_POINTER_ESCAPES_PROJECT") from exc
+        if not candidate.is_file():
+            raise FormalProvenanceViolation("FORMAL_PROVENANCE_VIOLATION:ACTIVE_LOCK_MISSING")
+        return _load_json(candidate, {})
+    return _load_json(root / LOCK_RELATIVE, {})
 
 
 def validate_dataset_manifest_relation(base_dir: Path) -> dict[str, Any]:
@@ -73,6 +86,8 @@ def validate_dataset_manifest_relation(base_dir: Path) -> dict[str, Any]:
         return {"status": "DATASET_MANIFESTS_NOT_CONFIGURED"}
     historical = _load_json(historical_path, {})
     verified = _load_json(verified_path, {})
+    # The immutable v1 relation is always verified against the immutable v1
+    # lock.  A v1.1 active lock is validated separately below.
     lock = _load_json(lock_path, {})
     historical_ids = {str(value) for value in historical.get("paper_ids") or [] if value}
     verified_ids = {
@@ -102,12 +117,22 @@ def validate_dataset_manifest_relation(base_dir: Path) -> dict[str, Any]:
         raise FormalProvenanceViolation(
             "FORMAL_PROVENANCE_VIOLATION:DATASET_MANIFEST_RELATION:" + ",".join(violations)
         )
-    return {
+    result = {
         "status": "PASS",
         "historical_rag": len(historical_ids),
         "verified": len(verified_ids),
         "metadata_only_historical": len(metadata_ids),
     }
+    from src.dataset_versioning import active_dataset_ids
+    active_ids = active_dataset_ids(base_dir)
+    active_lock = load_formal_pdf_lock(base_dir)
+    active_lock_ids = {
+        str(row.get("document_id") or "") for row in active_lock.get("documents") or []
+        if row.get("formal") is True and row.get("document_id")
+    }
+    if active_ids != active_lock_ids:
+        raise FormalProvenanceViolation("FORMAL_PROVENANCE_VIOLATION:ACTIVE_DATASET_LOCK_MISMATCH")
+    return result
 
 
 def _locked_documents(base_dir: Path) -> list[dict[str, Any]]:

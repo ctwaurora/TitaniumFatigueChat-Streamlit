@@ -1,7 +1,7 @@
 {
   "schema_version": "public-literature-metadata-1.0",
-  "dataset_version": "TitaniumFatigueChat-Verified-Dataset-v1.0",
-  "document_count": 208,
+  "dataset_version": "TitaniumFatigueChat-v1.1",
+  "document_count": 211,
   "fields": [
     "document_id",
     "title",
@@ -1259,6 +1259,24 @@
       "title": "Theoretical estimation of fatigue life under regular cyclic loading",
       "doi": "10.20535/2521-1943.2017.79.96183",
       "year": "UNKNOWN"
+    },
+    {
+      "document_id": "PAPER_0ABF1B9CB910AF5C",
+      "title": "Impact of Segmentation Methods on Predicting Fatigue-Initiating Pores from X-ray Computed Tomography Data",
+      "doi": "10.1007/s40192-026-00467-0",
+      "year": "2026"
+    },
+    {
+      "document_id": "PAPER_37E0201B6B64E973",
+      "title": "Fatigue properties of a titanium alloy (Ti-6Al-4V) fabricated via electron beam melting (EBM): Effects of internal defects and residual stress",
+      "doi": "10.1016/j.ijfatigue.2016.04.022",
+      "year": "2016"
+    },
+    {
+      "document_id": "PAPER_CDD342CEDB9BDF96",
+      "title": "The influence of finish machining depth and hot isostatic pressing on defect distribution and fatigue behaviour of selective electron beam melted Ti-6Al-4V",
+      "doi": "10.1016/j.ijfatigue.2021.106169",
+      "year": "2021"
     }
   ]
 }

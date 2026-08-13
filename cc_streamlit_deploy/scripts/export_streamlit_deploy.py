@@ -240,12 +240,14 @@ def write_empty_cloud_library(project_root: Path, output_dir: Path) -> None:
 
 def write_public_metadata_catalog(project_root: Path, output_dir: Path) -> Path:
     """Export only the metadata fields explicitly safe for a public repository."""
-    frozen = project_root / "data/system/verified_dataset_v1_manifest.json"
-    source = (
-        frozen
-        if frozen.is_file()
-        else project_root / "data/system/verified_dataset_v1_candidate_manifest.json"
-    )
+    pointer = project_root / "data/system/active_dataset_manifest.json"
+    if pointer.is_file():
+        pointer_payload = json.loads(pointer.read_text(encoding="utf-8"))
+        relative = str(pointer_payload.get("manifest_path") or "")
+        source = (project_root / relative).resolve()
+        source.relative_to(project_root.resolve())
+    else:
+        source = project_root / "data/system/verified_dataset_v1_candidate_manifest.json"
     payload = json.loads(source.read_text(encoding="utf-8"))
     rows = [
         {

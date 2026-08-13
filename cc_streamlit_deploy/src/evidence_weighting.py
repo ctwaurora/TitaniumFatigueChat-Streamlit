@@ -17,6 +17,8 @@ DEFAULT_CONFIG = {
     "role_coefficients": {"DIRECT_SUPPORT": 1.0, "DIRECT_COUNTER": 1.0, "CONDITION_DEPENDENT": .82,
                            "LIMITATION_EVIDENCE": .80, "ALTERNATIVE_MECHANISM": .72,
                            "SUPPORTING_CONTEXT": .55, "REVIEW_BACKGROUND": .40},
+    "tier_coefficients": {"TIER1_CORE_DIRECT": 1.0, "TIER2_NEAR_DOMAIN": .82,
+                          "TIER3_FOUNDATIONAL_MECHANICS": .68, "OUT_OF_SCOPE": .30},
     "material_process_match": {"lpbf_ti6al4v": 1.0, "pbf_lb_m_ti6al4v": .95, "ebm_ti6al4v": .78,
                                "other_am_ti6al4v": .72, "wrought_ti6al4v": .62,
                                "other_alpha_beta_titanium": .45, "other_metal": .20},
@@ -166,6 +168,7 @@ def score_evidence(row: dict[str, Any], question: str, *, config: dict[str, Any]
             "material_process_match": material, "temporal_version_quality": temporal}
     original_role = str(row.get("verified_evidence_role") or row.get("evidence_role") or "SUPPORTING_CONTEXT").upper()
     role = original_role
+    tier = str(row.get("evidence_tier") or "TIER1_CORE_DIRECT").upper()
     study_type = str(row.get("study_type") or row.get("document_type") or "").casefold()
     title = str(row.get("title") or "").casefold()
     if "review" in study_type or re.search(r"\b(?:systematic |literature |brief )?review\b|state[- ]of[- ]the[- ]art", title):
@@ -174,7 +177,12 @@ def score_evidence(row: dict[str, Any], question: str, *, config: dict[str, Any]
         # Dynamic query mismatch changes only the role used for this ranking;
         # it never mutates the stored Evidence fact or its source annotation.
         role = "CONDITION_DEPENDENT"
+    if tier == "TIER2_NEAR_DOMAIN" and role in {"DIRECT_SUPPORT", "DIRECT_COUNTER"}:
+        role = "CONDITION_DEPENDENT"
+    elif tier == "TIER3_FOUNDATIONAL_MECHANICS" and role in {"DIRECT_SUPPORT", "DIRECT_COUNTER", "CONDITION_DEPENDENT"}:
+        role = "ALTERNATIVE_MECHANISM"
     role_coeff = float(cfg["role_coefficients"].get(role, cfg["role_coefficients"].get("REVIEW_BACKGROUND", .4)))
+    tier_coeff = float(cfg["tier_coefficients"].get(tier, cfg["tier_coefficients"].get("OUT_OF_SCOPE", .3)))
     base = sum(float(cfg["dimension_weights"].get(key, 0.0)) * value for key, value in dims.items())
     scored = dict(row)
     scored.update({"relevance_score": round(relevance, 6), "condition_match_score": round(condition, 6),
@@ -190,7 +198,8 @@ def score_evidence(row: dict[str, Any], question: str, *, config: dict[str, Any]
                        else "ORIGINAL_ROLE_RETAINED"
                    ),
                    "evidence_role_coefficient": role_coeff, "evidence_weighted_score": round(base, 6),
-                   "final_evidence_score": round(max(0.0, min(1.0, base * role_coeff)), 6)})
+                   "evidence_tier": tier, "evidence_tier_coefficient": tier_coeff,
+                   "final_evidence_score": round(max(0.0, min(1.0, base * role_coeff * tier_coeff)), 6)})
     return scored
 
 

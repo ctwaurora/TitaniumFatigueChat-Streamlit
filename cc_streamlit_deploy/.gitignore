@@ -44,6 +44,10 @@ data/deep_read/
 data/system/pdf_watch_*.json
 data/system/dataset_version.json
 outputs/
+!outputs/
+outputs/*
+!outputs/titanium_fatigue_bench_v1/
+!outputs/titanium_fatigue_bench_v1/**
 deliverables/
 backups/
 tmp/
@@ -54,6 +58,7 @@ logs/
 *.zip
 *.rar
 *.jsonl
+!research_evaluation/TitaniumFatigueBench_v1/*.jsonl
 *.parquet
 !data/cloud_bundle/
 !data/cloud_bundle/*.parquet
