@@ -195,6 +195,8 @@ def validate_formal_pdf_locks(
     for row in documents:
         document_id = str(row.get("document_id") or "")
         path = Path(str(row.get("canonical_path") or ""))
+        if not path.is_absolute():
+            path = (base_dir / path).resolve()
         expected_hash = str(row.get("canonical_sha256") or "").lower()
         expected_name = str(row.get("expected_filename") or "")
         if not path.is_file():
