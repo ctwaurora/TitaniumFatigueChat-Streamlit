@@ -1,5 +1,5 @@
 TitaniumFatigueChat Streamlit deployment manifest
-file_count=169
+file_count=170
 
 .gitattributes
 .gitignore
@@ -35,6 +35,7 @@ README.md
 requirements.txt
 scripts/export_cloud_evidence_bundle.py
 scripts/export_streamlit_deploy.py
+scripts/update_literature.py
 skills/__init__.py
 skills/card_skill.py
 skills/case_skill.py

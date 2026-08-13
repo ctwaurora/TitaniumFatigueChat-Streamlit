@@ -52,6 +52,7 @@ CONFIG_FILES = (
 SCRIPT_FILES = (
     "scripts/export_streamlit_deploy.py",
     "scripts/export_cloud_evidence_bundle.py",
+    "scripts/update_literature.py",
 )
 
 DATA_FILES = (
