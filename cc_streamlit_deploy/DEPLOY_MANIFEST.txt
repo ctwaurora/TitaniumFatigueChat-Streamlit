@@ -1,15 +1,18 @@
 TitaniumFatigueChat Streamlit deployment manifest
-file_count=170
+file_count=174
 
 .gitattributes
 .gitignore
 .streamlit/config.toml
 .streamlit/secrets.example.toml
 app.py
+config/deployment_contract.json
 config/evidence_weight_config.json
 config/paper_experiment_config.json
+config/runtime_compatibility.json
 config/task_profile.yaml
 config/v1_freeze_manifest.json
+data/active_dataset.json
 data/candidate_papers.csv
 data/condition_evidence_dataset.csv
 data/conflict_claims.csv
@@ -108,6 +111,7 @@ src/literature_agent.py
 src/literature_discovery.py
 src/literature_formula_library.py
 src/literature_library.py
+src/literature_recovery.py
 src/literature_search_agent.py
 src/literature_sources/__init__.py
 src/literature_sources/base.py

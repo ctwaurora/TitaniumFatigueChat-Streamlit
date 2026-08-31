@@ -507,6 +507,10 @@ def export_cloud_evidence_bundle(
         "bundle_version": BUNDLE_VERSION,
         "schema_version": SCHEMA_VERSION,
         "dataset_version": dataset_version,
+        "declared_dataset_version": str(
+            verified_payload.get("dataset_version") or ""
+        ),
+        "dataset_hash": hashlib.sha256(verified_path.read_bytes()).hexdigest(),
         "export_time": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
         "source_commit": source_commit or _source_commit(project),
         "formal_literature_count": len(formal_rows),

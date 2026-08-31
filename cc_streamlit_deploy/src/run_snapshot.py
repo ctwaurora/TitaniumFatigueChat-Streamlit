@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 
-SCHEMA_VERSION = "tfc-run-snapshot-1.0"
+SCHEMA_VERSION = "tfc-run-snapshot-1.1"
 
 
 class RunSnapshotError(RuntimeError):
@@ -59,26 +59,74 @@ def _config_contract(base_dir: Path) -> tuple[str, str, dict[str, Any]]:
     )
 
 
-def _dataset_contract(base_dir: Path, fallback_fingerprint: str) -> tuple[str, str, str]:
-    """Return the declared dataset version, contract hash, and content fingerprint.
+def _dataset_contract(base_dir: Path, fallback_fingerprint: str) -> dict[str, Any]:
+    """Return the active dataset identity and runtime counts.
 
     ``smart_search_dataset_version`` intentionally returns a content-sensitive
     fingerprint for cache invalidation.  A paper run also needs the human-readable
     frozen dataset version, so preserve both values instead of overloading one
     field with two unrelated meanings.
     """
+    from src.dataset_versioning import (
+        active_dataset_contract_path,
+        get_active_dataset_manifest,
+    )
+
+    active_contract = active_dataset_contract_path(base_dir)
+    if active_contract.is_file():
+        mounted_manifest = None
+        try:
+            from src.cloud_evidence_bundle import (
+                cloud_bundle_required,
+                load_cloud_bundle,
+            )
+
+            if cloud_bundle_required(base_dir):
+                mounted_manifest = load_cloud_bundle(base_dir).manifest
+            active = get_active_dataset_manifest(
+                base_dir, mounted_manifest=mounted_manifest
+            )
+        except Exception as exc:
+            if "DATASET_VERSION_MISMATCH" in str(exc):
+                raise RunSnapshotError(str(exc)) from exc
+            raise
+        return {
+            "dataset_version": str(active["dataset_version"]),
+            "dataset_hash": str(active["dataset_hash"]),
+            "dataset_fingerprint": fallback_fingerprint,
+            "paper_count": int(active["paper_count"]),
+            "rag_count": int(active["rag_count"]),
+            "chunk_count": int(active["chunk_count"]),
+        }
+
+    # Legacy test/reproduction workspaces intentionally keep their original
+    # manifest selection.  This path never rewrites historical snapshots.
     frozen = base_dir / "data/system/verified_dataset_v1_manifest.json"
     candidate = base_dir / "data/system/verified_dataset_v1_candidate_manifest.json"
     path = frozen if frozen.is_file() else candidate
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        return fallback_fingerprint, "UNAVAILABLE", fallback_fingerprint
-    return (
-        str(payload.get("dataset_version") or fallback_fingerprint),
-        str(payload.get("dataset_contract_sha256") or "UNAVAILABLE"),
-        fallback_fingerprint,
-    )
+        return {
+            "dataset_version": fallback_fingerprint,
+            "dataset_hash": "UNAVAILABLE",
+            "dataset_fingerprint": fallback_fingerprint,
+            "paper_count": 0,
+            "rag_count": 0,
+            "chunk_count": 0,
+        }
+    return {
+        "dataset_version": str(payload.get("dataset_version") or fallback_fingerprint),
+        "dataset_hash": str(payload.get("dataset_contract_sha256") or "UNAVAILABLE"),
+        "dataset_fingerprint": fallback_fingerprint,
+        "paper_count": int(
+            payload.get("verified_paper_count")
+            or payload.get("document_count")
+            or 0
+        ),
+        "rag_count": int(payload.get("formal_rag_count") or 0),
+        "chunk_count": int(payload.get("rag_chunk_count") or 0),
+    }
 
 
 def _new_run_id(skill: str) -> str:
@@ -117,9 +165,7 @@ def create_run_snapshot(
     )
 
     experiment_config = load_paper_experiment_config(base_dir)
-    declared_dataset_version, dataset_contract_hash, dataset_fingerprint = _dataset_contract(
-        base_dir, dataset_version
-    )
+    dataset_contract = _dataset_contract(base_dir, dataset_version)
     selected = list(
         research_result.get("selected_evidence_bundle")
         or research_result.get("retrieved_evidence_pool")
@@ -147,9 +193,14 @@ def create_run_snapshot(
         "skill": skill,
         "timestamp": _now(),
         "git_commit": _git_commit(base_dir),
-        "dataset_version": declared_dataset_version,
-        "dataset_contract_sha256": dataset_contract_hash,
-        "dataset_fingerprint": dataset_fingerprint,
+        "dataset_version": dataset_contract["dataset_version"],
+        "dataset_hash": dataset_contract["dataset_hash"],
+        # Backward-compatible field name retained for existing report readers.
+        "dataset_contract_sha256": dataset_contract["dataset_hash"],
+        "dataset_fingerprint": dataset_contract["dataset_fingerprint"],
+        "paper_count": dataset_contract["paper_count"],
+        "rag_count": dataset_contract["rag_count"],
+        "chunk_count": dataset_contract["chunk_count"],
         "prompt_version": prompt_version,
         "prompt_template_hash": _sha256_text(prompt_template),
         "prompt_hash": _sha256_text(prompt),

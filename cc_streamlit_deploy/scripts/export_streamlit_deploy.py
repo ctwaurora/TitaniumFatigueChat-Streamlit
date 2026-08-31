@@ -48,6 +48,8 @@ CONFIG_FILES = (
     "config/evidence_weight_config.json",
     "config/paper_experiment_config.json",
     "config/v1_freeze_manifest.json",
+    "config/deployment_contract.json",
+    "config/runtime_compatibility.json",
 )
 SCRIPT_FILES = (
     "scripts/export_streamlit_deploy.py",
@@ -286,6 +288,28 @@ def write_public_metadata_catalog(project_root: Path, output_dir: Path) -> Path:
         ) + "\n",
         encoding="utf-8",
     )
+    active_contract = {
+        key: pointer_payload[key]
+        for key in (
+            "schema_version",
+            "status",
+            "product_version",
+            "dataset_version",
+            "dataset_hash",
+            "paper_count",
+            "rag_count",
+            "chunk_count",
+            "evidence_record_count",
+            "condition_evidence_record_count",
+            "formula_candidate_count",
+            "formula_confirmed_count",
+            "private_rag_version",
+        )
+    }
+    (output_dir / "data/active_dataset.json").write_text(
+        json.dumps(active_contract, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     return target
 
 
@@ -314,13 +338,25 @@ def source_commit(project_root: Path) -> str:
 
 
 def write_deploy_version(project_root: Path, output_dir: Path) -> Path:
+    active = json.loads(
+        (project_root / "data/system/active_dataset_manifest.json").read_text(
+            encoding="utf-8"
+        )
+    )
     payload = {
         "source_commit": source_commit(project_root),
         "export_time": datetime.now(timezone.utc)
         .replace(microsecond=0)
         .isoformat(),
         "deploy_manifest_hash": _content_manifest_hash(output_dir),
-        "application_version": "3.2.0-cloud-oa",
+        "application_version": "3.2.1-v1.1-consistency",
+        "product_version": active["product_version"],
+        "dataset_version": active["dataset_version"],
+        "dataset_hash": active["dataset_hash"],
+        "private_rag_version": active["private_rag_version"],
+        "paper_count": active["paper_count"],
+        "rag_count": active["rag_count"],
+        "chunk_count": active["chunk_count"],
     }
     target = output_dir / "DEPLOY_VERSION.json"
     target.write_text(

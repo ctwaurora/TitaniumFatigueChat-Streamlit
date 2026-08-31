@@ -609,15 +609,18 @@ def run_smart_search(
         }
     else:
         try:
-            verified_path = Path(base_dir) / "data/system/verified_dataset_v1_candidate_manifest.json"
-            verified_ids = None
-            if verified_path.is_file():
-                verified_payload = json.loads(verified_path.read_text(encoding="utf-8"))
-                verified_ids = {
-                    str(row.get("document_id") or "")
-                    for row in verified_payload.get("papers") or []
-                    if row.get("document_id")
-                }
+            from src.dataset_versioning import load_active_dataset_manifest
+
+            verified_payload = load_active_dataset_manifest(Path(base_dir))
+            verified_ids = {
+                str(row.get("document_id") or row.get("paper_id") or "")
+                for row in (
+                    verified_payload.get("papers")
+                    or verified_payload.get("documents")
+                    or []
+                )
+                if row.get("document_id") or row.get("paper_id")
+            }
             manifest = {
                 row["paper_id"]: row
                 for row in (
@@ -629,7 +632,7 @@ def run_smart_search(
                 )
                 if verified_ids is None or str(row.get("paper_id") or "") in verified_ids
             }
-        except (OSError, json.JSONDecodeError, KeyError):
+        except (OSError, json.JSONDecodeError, KeyError, RuntimeError):
             manifest = {}
     for key in (
         "supporting_evidence", "counter_evidence", "condition_dependent_evidence",

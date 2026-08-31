@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import csv
-import json
 import math
 from pathlib import Path
 from typing import Any
@@ -23,58 +21,59 @@ from src.cloud_evidence_bundle import (
 def _formal_rows(base_dir: Path) -> list[dict[str, Any]]:
     if cloud_bundle_required(base_dir):
         return cloud_records(load_cloud_bundle(base_dir).formal_literature)
-    whitelist_path = base_dir / "data/system/formal_rag_whitelist.json"
-    if not whitelist_path.is_file():
+    # The legacy whitelist is retained for historical v1.0 reproduction only.
+    # Current product views must follow the active dataset pointer.
+    from src.dataset_versioning import (
+        active_dataset_ids,
+        active_dataset_manifest_path,
+    )
+
+    if not active_dataset_manifest_path(base_dir).is_file():
         return []
-    try:
-        whitelist_payload = json.loads(whitelist_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return []
-    whitelist = set(whitelist_payload.get("paper_ids") or [])
+    active_ids = active_dataset_ids(base_dir)
     return [
         row for row in read_jsonl(base_dir / "data/paper_manifest.jsonl")
-        if str(row.get("paper_id") or "") in whitelist
+        if str(row.get("paper_id") or "") in active_ids
         and row.get("rag_status") == "INDEXED_STAGE3_UNIFIED"
     ]
 
 
 def _counts(rows: list[dict[str, Any]], base_dir: Path) -> dict[str, int]:
+    from src.dataset_versioning import (
+        active_dataset_contract_path,
+        get_active_dataset_manifest,
+    )
+
+    if not active_dataset_contract_path(base_dir).is_file():
+        return {
+            "formal": 0,
+            "rag": 0,
+            "evidence": 0,
+            "conditions": 0,
+            "formulas": 0,
+            "pdfs": 0,
+        }
+
     if cloud_bundle_required(base_dir):
         manifest = load_cloud_bundle(base_dir).manifest
+        active = get_active_dataset_manifest(base_dir, mounted_manifest=manifest)
         return {
-            "formal": int(manifest["formal_literature_count"]),
-            "rag": int(manifest["formal_rag_count"]),
-            "evidence": int(manifest["evidence_record_count"]),
-            "conditions": int(manifest["condition_evidence_record_count"]),
-            "formulas": int(manifest["formula_record_count"]),
+            "formal": int(active["paper_count"]),
+            "rag": int(active["rag_count"]),
+            "evidence": int(active["evidence_record_count"]),
+            "conditions": int(active["condition_evidence_record_count"]),
+            "formula_candidates": int(active["formula_candidate_count"]),
+            "formula_confirmed": int(active["formula_confirmed_count"]),
             "pdfs": int(manifest["traceable_literature_count"]),
         }
-    ids = {str(row.get("paper_id") or "") for row in rows}
-    evidence_path = base_dir / "data/evidence/trusted_evidence.csv"
-    evidence: list[dict[str, Any]] = []
-    if evidence_path.is_file():
-        with evidence_path.open("r", encoding="utf-8-sig", newline="") as stream:
-            evidence = [
-                row for row in csv.DictReader(stream)
-                if str(row.get("canonical_paper_id") or row.get("paper_id") or "") in ids
-            ]
-    evidence_ids = {str(row.get("evidence_id") or "") for row in evidence}
-    conditions = [
-        row for row in read_jsonl(
-            base_dir / "data/evidence/condition_evidence_records.jsonl"
-        )
-        if str(row.get("evidence_id") or "") in evidence_ids
-    ]
-    formulas = 0
-    for paper_id in ids:
-        for filename in ("equations.jsonl", "formula_records.jsonl"):
-            path = base_dir / "data/deep_read" / paper_id / filename
-            if path.exists():
-                formulas += len(read_jsonl(path))
-                break
+    active = get_active_dataset_manifest(base_dir)
     return {
-        "formal": len(rows), "rag": len(rows), "evidence": len(evidence),
-        "conditions": len(conditions), "formulas": formulas,
+        "formal": int(active["paper_count"]),
+        "rag": int(active["rag_count"]),
+        "evidence": int(active["evidence_record_count"]),
+        "conditions": int(active["condition_evidence_record_count"]),
+        "formula_candidates": int(active["formula_candidate_count"]),
+        "formula_confirmed": int(active["formula_confirmed_count"]),
         "pdfs": sum(Path(str(row.get("canonical_pdf_path") or "")).is_file() for row in rows),
     }
 
@@ -89,14 +88,15 @@ def render_formal_library_page(st: Any, *, base_dir: Path) -> None:
         return
     rows = _formal_rows(base_dir)
     counts = _counts(rows, base_dir)
-    metric_columns = st.columns(6)
+    metric_columns = st.columns(7)
     for column, (label, value) in zip(
         metric_columns,
         (
             ("正式文献数", counts["formal"]), ("已进入RAG数", counts["rag"]),
             ("EvidenceRecord数", counts["evidence"]),
             ("ConditionEvidenceRecord数", counts["conditions"]),
-            ("公式数", counts["formulas"]),
+            ("公式候选", counts["formula_candidates"]),
+            ("严格确认", counts["formula_confirmed"]),
             (
                 "可追溯文献" if cloud_mode else "本地有效PDF数",
                 counts["pdfs"],

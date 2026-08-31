@@ -152,7 +152,9 @@ def _validate_counts(manifest: dict[str, Any], frames: Mapping[str, pd.DataFrame
 
 
 @functools.lru_cache(maxsize=4)
-def _load_cached(root_text: str, signature: str) -> CloudEvidenceBundle:
+def _load_cached(
+    root_text: str, signature: str, base_dir_text: str
+) -> CloudEvidenceBundle:
     del signature
     root = Path(root_text)
     manifest_path = root / "manifest.json"
@@ -180,6 +182,18 @@ def _load_cached(root_text: str, signature: str) -> CloudEvidenceBundle:
         "rag_chunks": _frame(root / "rag_chunks.parquet"),
     }
     _validate_counts(manifest, frames)
+    # Product code and the mounted private bundle must describe the same
+    # active dataset.  A mismatch is a scientific provenance failure, not a
+    # recoverable display warning.
+    try:
+        from src.dataset_versioning import get_active_dataset_manifest
+
+        get_active_dataset_manifest(
+            Path(base_dir_text), mounted_manifest=manifest
+        )
+    except RuntimeError as exc:
+        if "ACTIVE_DATASET_CONTRACT_MISSING" not in str(exc):
+            raise CloudBundleError(str(exc)) from exc
     document_ids = tuple(
         json.loads((root / "index_document_ids.json").read_text(encoding="utf-8"))
     )
@@ -241,7 +255,9 @@ def load_cloud_bundle(base_dir: Path) -> CloudEvidenceBundle:
         raise CloudBundleError("Private RAG bundle source is unavailable or invalid") from exc
     if not root.is_dir():
         raise CloudBundleError("Cloud bundle directory is missing")
-    return _load_cached(str(root), _manifest_signature(root))
+    return _load_cached(
+        str(root), _manifest_signature(root), str(Path(base_dir).resolve())
+    )
 
 
 def cloud_bundle_status(base_dir: Path) -> dict[str, Any]:

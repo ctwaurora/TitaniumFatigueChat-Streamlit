@@ -1,0 +1,15 @@
+{
+  "schema_version": "active-dataset-contract-1.0",
+  "status": "ACTIVE",
+  "product_version": "TitaniumFatigueChat-v1.1",
+  "dataset_version": "TitaniumFatigueChat-v1.1",
+  "dataset_hash": "553f1e196630fa1fcd81ea0358caa2d73b50e385bf899f3af30d125dbe04a108",
+  "paper_count": 232,
+  "rag_count": 232,
+  "chunk_count": 55994,
+  "evidence_record_count": 30308,
+  "condition_evidence_record_count": 26174,
+  "formula_candidate_count": 3254,
+  "formula_confirmed_count": 2,
+  "private_rag_version": "TitaniumFatigueChat-Private-RAG-v1.1"
+}

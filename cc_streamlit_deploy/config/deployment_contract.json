@@ -1,0 +1,11 @@
+{
+  "schema_version": "tfc-deployment-contract-1.0",
+  "product_version": "TitaniumFatigueChat-v1.1",
+  "source_commit_policy": "RESOLVED_AT_EXPORT",
+  "expected_dataset_version": "TitaniumFatigueChat-v1.1",
+  "expected_private_rag_version": "TitaniumFatigueChat-Private-RAG-v1.1",
+  "expected_paper_count": 232,
+  "expected_rag_count": 232,
+  "expected_chunk_count": 55994,
+  "mismatch_policy": "FAIL_CLOSED_WITH_VERSION_MISMATCH"
+}

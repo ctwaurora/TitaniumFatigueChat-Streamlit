@@ -2252,6 +2252,8 @@ with st.sidebar:
             "evidence_record_count": 0,
             "condition_evidence_record_count": 0,
             "formula_record_count": 0,
+            "formula_candidate_count": 0,
+            "formula_confirmed_count": 0,
             "local_pdf_file_count": 0,
             "traceable_literature_count": 0,
         }
@@ -2262,7 +2264,8 @@ with st.sidebar:
     st.metric("正式 RAG", stats.get("indexed_count", stats["formal_indexed_count"]))
     st.metric("EvidenceRecord", stats["evidence_record_count"])
     st.metric("ConditionEvidenceRecord", stats.get("condition_evidence_record_count", 0))
-    st.metric("公式", stats.get("formula_record_count", 0))
+    st.metric("公式候选", stats.get("formula_candidate_count", stats.get("formula_record_count", 0)))
+    st.metric("严格确认", stats.get("formula_confirmed_count", 0))
     if _CLOUD_BUNDLE_STATUS["required"]:
         st.metric("可追溯文献", stats.get("traceable_literature_count", 0))
     else:
@@ -2812,6 +2815,13 @@ elif current_page == "formula_explain":
     from src.formula_validation import compare_confirmed_formulas
     literature_formulas = load_literature_formulas_cached(
         str(BASE_DIR), literature_formula_version(BASE_DIR)
+    )
+    from src.data_cache import get_system_stats_cached
+    formula_contract = get_system_stats_cached()
+    st.caption(
+        f"活动 v1.1 公式候选 {formula_contract.get('formula_candidate_count', 0)} 条；"
+        f"严格确认 {formula_contract.get('formula_confirmed_count', 0)} 条。"
+        f"当前正式 RAG 可检索公式记录 {len(literature_formulas)} 条。"
     )
     paper_options = {
         f"{row['paper_title']} [{row['paper_id']}]": row["paper_id"]

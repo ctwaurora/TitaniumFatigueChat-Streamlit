@@ -1,6 +1,13 @@
 {
-  "source_commit": "2b698740933e353226cbb9090d4985fb8fcc72bf",
-  "export_time": "2026-08-13T17:58:49+00:00",
-  "deploy_manifest_hash": "6102e219ec31ee4232170fc8dfa0dd4aab1d024a822d8f73a743478ea5f2f206",
-  "application_version": "3.2.0-cloud-oa"
+  "source_commit": "316ae54d8989be690b6bba2ae0c313a19c5c1508",
+  "export_time": "2026-08-31T12:06:17+00:00",
+  "deploy_manifest_hash": "01291b587f217be98ab524d66875a1a207cb4b72c605c6c22b823ecbb77e4a6e",
+  "application_version": "3.2.1-v1.1-consistency",
+  "product_version": "TitaniumFatigueChat-v1.1",
+  "dataset_version": "TitaniumFatigueChat-v1.1",
+  "dataset_hash": "553f1e196630fa1fcd81ea0358caa2d73b50e385bf899f3af30d125dbe04a108",
+  "private_rag_version": "TitaniumFatigueChat-Private-RAG-v1.1",
+  "paper_count": 232,
+  "rag_count": 232,
+  "chunk_count": 55994
 }

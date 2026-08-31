@@ -403,9 +403,15 @@ def _stats_signature(base_dir: Path = BASE_DIR) -> str:
     from src.cloud_evidence_bundle import cloud_bundle_required, cloud_bundle_root
 
     paths = (
-        [cloud_bundle_root(base_dir) / "manifest.json"]
+        [
+            cloud_bundle_root(base_dir) / "manifest.json",
+            base_dir / "data/active_dataset.json",
+        ]
         if cloud_bundle_required(base_dir)
-        else [base_dir / "data" / "system" / "corpus_statistics.json"]
+        else [
+            base_dir / "data" / "system" / "corpus_statistics.json",
+            base_dir / "data" / "system" / "active_dataset_manifest.json",
+        ]
     )
     payload = []
     for path in paths:
@@ -421,36 +427,57 @@ def _stats_signature(base_dir: Path = BASE_DIR) -> str:
 def _get_system_stats_cached(signature: str) -> Dict[str, Any]:
     """Read canonical literature counts; signature invalidates cross-process writes."""
     from src.cloud_evidence_bundle import cloud_bundle_required, load_cloud_bundle
+    from src.dataset_versioning import get_active_dataset_manifest
 
     if cloud_bundle_required(BASE_DIR):
         bundle = load_cloud_bundle(BASE_DIR)
         manifest = bundle.manifest
+        active = get_active_dataset_manifest(BASE_DIR, mounted_manifest=manifest)
         return {
-            "n_papers": int(manifest["formal_literature_count"]),
-            "unique_literature_count": int(manifest["formal_literature_count"]),
+            "n_papers": int(active["paper_count"]),
+            "unique_literature_count": int(active["paper_count"]),
             "active_canonical_primary_record_count": int(
-                manifest["formal_literature_count"]
+                active["paper_count"]
             ),
-            "formal_indexed_count": int(manifest["formal_literature_count"]),
-            "indexed_count": int(manifest["formal_rag_count"]),
-            "evidence_record_count": int(manifest["evidence_record_count"]),
+            "formal_indexed_count": int(active["paper_count"]),
+            "indexed_count": int(active["rag_count"]),
+            "evidence_record_count": int(active["evidence_record_count"]),
             "condition_evidence_record_count": int(
-                manifest["condition_evidence_record_count"]
+                active["condition_evidence_record_count"]
             ),
-            "formula_record_count": int(manifest["formula_record_count"]),
-            "rag_chunk_count": int(manifest["rag_chunk_count"]),
+            "formula_record_count": int(active["formula_candidate_count"]),
+            "formula_candidate_count": int(active["formula_candidate_count"]),
+            "formula_confirmed_count": int(active["formula_confirmed_count"]),
+            "formula_rag_record_count": int(manifest["formula_record_count"]),
+            "rag_chunk_count": int(active["chunk_count"]),
             "traceable_literature_count": int(
                 manifest["traceable_literature_count"]
             ),
             "local_pdf_file_count": 0,
             "storage_mode": "CLOUD_READ_ONLY",
-            "dataset_version": str(manifest["dataset_version"]),
+            "dataset_version": str(active["dataset_version"]),
+            "dataset_hash": str(active["dataset_hash"]),
         }
     canonical = get_canonical_literature_counts(BASE_DIR)
+    active = get_active_dataset_manifest(BASE_DIR)
     return {
         # Backward-compatible name now points to canonical unique literature.
         "n_papers": canonical["unique_literature_count"],
         **canonical,
+        "n_papers": int(active["paper_count"]),
+        "formal_indexed_count": int(active["paper_count"]),
+        "indexed_count": int(active["rag_count"]),
+        "evidence_record_count": int(active["evidence_record_count"]),
+        "condition_evidence_record_count": int(
+            active["condition_evidence_record_count"]
+        ),
+        "formula_record_count": int(active["formula_candidate_count"]),
+        "formula_candidate_count": int(active["formula_candidate_count"]),
+        "formula_confirmed_count": int(active["formula_confirmed_count"]),
+        "formula_rag_record_count": int(canonical["formula_record_count"]),
+        "rag_chunk_count": int(active["chunk_count"]),
+        "dataset_version": str(active["dataset_version"]),
+        "dataset_hash": str(active["dataset_hash"]),
         "legacy_csv_row_count": 0,
         "n_candidates": 0,
         "ev_count": 0,

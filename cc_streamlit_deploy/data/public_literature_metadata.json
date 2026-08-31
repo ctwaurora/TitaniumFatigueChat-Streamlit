@@ -1,7 +1,7 @@
 {
   "schema_version": "public-literature-metadata-1.0",
   "dataset_version": "TitaniumFatigueChat-v1.1",
-  "document_count": 211,
+  "document_count": 232,
   "fields": [
     "document_id",
     "title",
@@ -1277,6 +1277,132 @@
       "title": "The influence of finish machining depth and hot isostatic pressing on defect distribution and fatigue behaviour of selective electron beam melted Ti-6Al-4V",
       "doi": "10.1016/j.ijfatigue.2021.106169",
       "year": "2021"
+    },
+    {
+      "document_id": "PAPER_3A1A08F66AD62AA9",
+      "title": "Effect of Annealing and Crack Orientation on Fatigue Crack Propagation of Ti64 Alloy Fabricated by Direct Energy Deposition Process",
+      "doi": "10.1007/s12540-021-01087-3",
+      "year": "2021"
+    },
+    {
+      "document_id": "PAPER_FBD2F87AC35058EB",
+      "title": "Environment-Assisted Fatigue Crack Propagation (EAFCP) Behavior of Ti64 Alloy Fabricated by Direct Energy Deposition (DED) Process",
+      "doi": "10.1007/s11661-022-06765-4",
+      "year": "2022"
+    },
+    {
+      "document_id": "PAPER_E5EFFE5E8BD3BCF6",
+      "title": "Effects of Defect, Mean Stress and Lower Loading on High Cycle and Very High Cycle Fatigue Behavior of Ti-6Al-4V Alloy",
+      "doi": "10.1007/s40195-024-01807-9",
+      "year": "2025"
+    },
+    {
+      "document_id": "PAPER_2D8588C592DB7B40",
+      "title": "Grain-Scale Stress States in Microtextured Ti64: Implications for Dwell Fatigue",
+      "doi": "10.1007/s11837-022-05423-9",
+      "year": "2022"
+    },
+    {
+      "document_id": "PAPER_E7E9D1AEB074F8A2",
+      "title": "On the size-dependent fatigue behaviour of laser powder bed fusion Ti-6Al-4V",
+      "doi": "10.1016/j.addma.2023.103922",
+      "year": "2024"
+    },
+    {
+      "document_id": "PAPER_3ED3E7FC8E157AD2",
+      "title": "Fatigue performance of laser powder bed fusion hydride-dehydride Ti-6Al-4V powder",
+      "doi": "10.1016/j.addma.2022.103117",
+      "year": "2022"
+    },
+    {
+      "document_id": "PAPER_9D7A7038A00203CD",
+      "title": "1216 Effects of Stress Ratio on Fatigue Behaviour of Notched Specimen in Ti-6Al-4V Titanium Alloy",
+      "doi": "10.1299/jsmehs.2016.53._1216-1_",
+      "year": "2016"
+    },
+    {
+      "document_id": "PAPER_0E7270CA52F8AE5A",
+      "title": "Effect of Hot-Isostatic-Pressing Parameters on the Microstructure and Properties of Powder Ti-6Al-4V Hot-Isostatically-Pressed Samples",
+      "doi": "10.1007/s11661-009-0149-y",
+      "year": "2010"
+    },
+    {
+      "document_id": "PAPER_568F9F5DF73A4065",
+      "title": "Interrupted fatigue testing with periodic tomography to monitor porosity defects in wire + arc additive manufactured Ti-6Al-4V",
+      "doi": "10.1016/j.addma.2019.04.026",
+      "year": "2019"
+    },
+    {
+      "document_id": "PAPER_6EB4DCF5BA5AEA28",
+      "title": "Internal fatigue crack propagation in a Ti-6Al-4V alloy: An in situ study",
+      "doi": "10.1016/j.ijfatigue.2022.107450",
+      "year": "2022"
+    },
+    {
+      "document_id": "PAPER_A5C3D9806B311C04",
+      "title": "Hydrogen-enhanced fatigue crack growth in Ti-6Al-4V ELI weldments",
+      "doi": "10.1007/bf02680602",
+      "year": "1972"
+    },
+    {
+      "document_id": "PAPER_E6E3A774C25DDF48",
+      "title": "XCT characterization and mechanical properties of Ti6Al4V produced by L-PBF using the same volumetric energy density",
+      "doi": "10.1007/s40964-024-00862-z",
+      "year": "2024"
+    },
+    {
+      "document_id": "PAPER_3CC490F2EEB683A6",
+      "title": "Analysis of microstructural facet fatigue failure in ultra-fine grained powder metallurgy Ti-6Al-4V produced through hydrogen sintering",
+      "doi": "10.1016/j.ijfatigue.2019.105355",
+      "year": "2019"
+    },
+    {
+      "document_id": "PAPER_7B7BDA1A15A90F17",
+      "title": "Damage Tolerance Assessment of Laser Clad Repairs of Coarse Grain Ti-6Al-4V",
+      "doi": "10.1007/s11340-022-00846-6",
+      "year": "2022"
+    },
+    {
+      "document_id": "PAPER_E67B7DB97AA54E97",
+      "title": "Fatigue behavior of low-cost, non-spherical Ti-6Al-4V powder processed via laser powder bed fusion",
+      "doi": "10.1007/s00170-025-15380-7",
+      "year": "2025"
+    },
+    {
+      "document_id": "PAPER_CB3E819D4A76D02C",
+      "title": "Fatigue crack growth mechanisms at the microstructure scale in as-fabricated and heat treated Ti-6Al-4V ELI manufactured by electron beam melting (EBM)",
+      "doi": "10.1016/j.engfracmech.2017.03.024",
+      "year": "2017"
+    },
+    {
+      "document_id": "PAPER_928B638B5AA27147",
+      "title": "Effects of Post-processing on the Surface Finish, Porosity, Residual Stresses, and Fatigue Performance of Additive Manufactured Metals: A Review",
+      "doi": "10.1007/s11665-021-06021-7",
+      "year": "2021"
+    },
+    {
+      "document_id": "PAPER_1BE74182C0B7A33D",
+      "title": "Tailoring Microstructure and Mechanical Properties of Additively-Manufactured Ti6Al4V Using Post Processing",
+      "doi": "10.3390/ma14030658",
+      "year": "2021"
+    },
+    {
+      "document_id": "PAPER_36AC40918E8F2A74",
+      "title": "Characterising and representing small crack growth in an additive manufactured titanium alloy",
+      "doi": "10.1016/j.engfracmech.2021.107876",
+      "year": "2021"
+    },
+    {
+      "document_id": "PAPER_486EB978593844E0",
+      "title": "The Effect of Laser Shock Peening (LSP) on the Surface Roughness and Fatigue Behavior of Additively Manufactured Ti-6Al-4V Alloy",
+      "doi": "10.3390/coatings14010110",
+      "year": "2024"
+    },
+    {
+      "document_id": "PAPER_AB37BD42164FB368",
+      "title": "Influence of post-processing treatments on fatigue limit of notched additive manufactured Ti-6AL-4V determined by rapid thermographic methodology",
+      "doi": "10.1016/j.ijfatigue.2023.108034",
+      "year": "2023"
     }
   ]
 }

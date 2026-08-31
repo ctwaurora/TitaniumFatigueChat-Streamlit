@@ -9,11 +9,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from collections import Counter
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
 from urllib.parse import urlparse
 
 import requests
@@ -50,6 +51,7 @@ LEGAL_FULLTEXT_HOSTS = (
     "sciencedirect.com", "wiley.com", "mdpi.com", "plos.org", "frontiersin.org",
     "zenodo.org", "figshare.com", "hal.science", ".edu", ".ac.uk", "repository",
 )
+TRUSTED_OA_LOCATION_SOURCES = {"UNPAYWALL", "CORE", "OPENALEX", "OSTI", "NASA_NTRS", "NCBI"}
 
 
 def _utc_now() -> str:
@@ -89,16 +91,33 @@ def legal_pdf_candidate(url: str) -> bool:
     return parsed.scheme == "https" and bool(host) and any(x in host for x in LEGAL_FULLTEXT_HOSTS)
 
 
+def trusted_oa_pdf_location(location: dict[str, Any]) -> bool:
+    url = str(location.get("pdf_url") or "")
+    parsed = urlparse(url)
+    source = str(location.get("source") or "").upper()
+    is_oa = str(location.get("is_oa") or "true").casefold() != "false"
+    return parsed.scheme == "https" and bool(parsed.netloc) and is_oa and source in TRUSTED_OA_LOCATION_SOURCES
+
+
 class LiteratureDiscoveryManager:
-    def __init__(self, *, sources: Iterable[Any] | None = None, session: requests.Session | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        sources: Iterable[Any] | None = None,
+        session: requests.Session | None = None,
+        cache_dir: Path | None = None,
+    ) -> None:
         self.session = session or requests.Session()
         self.session.trust_env = False
+        self.cache_dir = cache_dir or Path("outputs/literature_expansion_v1_1/source_cache")
         self.sources = list(sources) if sources is not None else [
-            OpenAlexSource(self.session), CrossrefSource(self.session), UnpaywallSource(self.session),
-            CORESource(self.session), OSTISource(self.session), NASANTRSSource(self.session),
-            NCBISource(self.session), WebOfScienceSource(self.session),
+            OpenAlexSource(self.session, cache_dir=self.cache_dir), CrossrefSource(self.session, cache_dir=self.cache_dir),
+            UnpaywallSource(self.session, cache_dir=self.cache_dir), CORESource(self.session, cache_dir=self.cache_dir),
+            OSTISource(self.session, cache_dir=self.cache_dir), NASANTRSSource(self.session, cache_dir=self.cache_dir),
+            NCBISource(self.session, cache_dir=self.cache_dir), WebOfScienceSource(self.session, cache_dir=self.cache_dir),
         ]
         self.source_status: dict[str, dict[str, Any]] = {}
+        self.discovery_stats: dict[str, int] = {"raw_records": 0, "unique_records": 0}
 
     @staticmethod
     def _key(row: SourceCandidate) -> str:
@@ -109,7 +128,10 @@ class LiteratureDiscoveryManager:
         for source in right.source_database:
             if source not in left.source_database:
                 left.source_database.append(source)
-        for field in ("authors", "OA_locations", "references", "cited_by", "source_record_ids", "topic"):
+        for field in (
+            "authors", "OA_locations", "references", "cited_by", "source_record_ids", "topic",
+            "version_provenance", "retrieval_provenance",
+        ):
             current = getattr(left, field)
             for value in getattr(right, field):
                 if value not in current:
@@ -133,19 +155,18 @@ class LiteratureDiscoveryManager:
             if not getattr(source, "configured", True):
                 self.source_status[name] = {"status": "SKIPPED_NOT_CONFIGURED", "results": 0}
                 continue
-            total, errors, consecutive_failures = 0, [], 0
+            total, errors = 0, []
             for topic_name, queries in topics.items():
                 for query in queries:
-                    if consecutive_failures >= 2:
-                        break
                     try:
                         rows = source.search(query, since=since, limit=per_query)
                     except Exception as exc:
                         errors.append(f"{type(exc).__name__}:{str(exc)[:180]}")
-                        consecutive_failures += 1
+                        if str(getattr(source, "circuit_state", "CLOSED")) == "OPEN":
+                            break
                         continue
-                    consecutive_failures = 0
                     total += len(rows)
+                    self.discovery_stats["raw_records"] += len(rows)
                     for row in rows:
                         row.topic = sorted(set(row.topic + [topic_name]))
                         row.tier_candidate = assign_tier(row.title)
@@ -153,40 +174,116 @@ class LiteratureDiscoveryManager:
                         key = self._key(row)
                         if key:
                             merged[key] = self._merge(merged[key], row) if key in merged else row
-                if consecutive_failures >= 2:
+                if str(getattr(source, "circuit_state", "CLOSED")) == "OPEN":
                     break
-            self.source_status[name] = {"status": "OK" if not errors else "CIRCUIT_OPEN" if consecutive_failures >= 2 else "PARTIAL_ERROR", "results": total, "errors": sorted(set(errors))}
+            state = str(getattr(source, "circuit_state", "CLOSED"))
+            self.source_status[name] = {
+                "status": "OK" if not errors else "CIRCUIT_COOLDOWN" if state == "OPEN" else "PARTIAL_ERROR",
+                "results": total,
+                "errors": sorted(set(errors)),
+                "circuit_state": state,
+            }
         ranked = sorted(merged.values(), key=lambda row: (-row.retrieval_score, -row.citation_count, normalize_title(row.title)))[:max_candidates]
+        self.discovery_stats["unique_records"] = len(merged)
         for index, row in enumerate(ranked, 1):
             row.candidate_id = f"V11-DISC-{index:04d}"
             if len(row.source_database) >= 2:
                 row.lifecycle_state = "METADATA_CROSSCHECKED"
         return ranked
 
-    def stage_legal_pdfs(self, rows: Iterable[SourceCandidate], incoming: Path, *, max_downloads: int = 25) -> list[dict[str, Any]]:
+    def stage_legal_pdfs(
+        self,
+        rows: Iterable[SourceCandidate],
+        incoming: Path,
+        *,
+        max_downloads: int = 25,
+        timeout_seconds: float = 20.0,
+        max_pdf_bytes: int = 100 * 1024 * 1024,
+        max_url_elapsed_seconds: float = 45.0,
+        max_locations_per_candidate: int = 3,
+        skip_candidate_ids: set[str] | None = None,
+        on_attempt: Callable[[dict[str, Any]], None] | None = None,
+    ) -> list[dict[str, Any]]:
         incoming.mkdir(parents=True, exist_ok=True)
         attempts: list[dict[str, Any]] = []
         for row in rows:
             if len([x for x in attempts if x.get("status") == "PDF_VALIDATED"]) >= max_downloads:
                 break
-            url = row.pdf_candidate_url
-            if row.tier_candidate == "OUT_OF_SCOPE" or not legal_pdf_candidate(url):
+            if row.candidate_id in (skip_candidate_ids or set()):
+                continue
+            locations = [location for location in row.OA_locations if trusted_oa_pdf_location(location)]
+            source_priority = {"OSTI": 0, "NASA_NTRS": 0, "NCBI": 0, "CORE": 1, "UNPAYWALL": 2, "OPENALEX": 3}
+            version_priority = {"VERSION_OF_RECORD": 0, "PUBLISHEDVERSION": 0, "ACCEPTED_MANUSCRIPT": 1, "ACCEPTEDVERSION": 1}
+            locations.sort(key=lambda location: (
+                source_priority.get(str(location.get("source") or "").upper(), 9),
+                version_priority.get(str(location.get("version") or "").upper(), 5),
+                not legal_pdf_candidate(str(location.get("pdf_url") or "")),
+            ))
+            best_is_trusted = legal_pdf_candidate(row.pdf_candidate_url) or any(
+                str(location.get("pdf_url") or "") == row.pdf_candidate_url for location in locations
+            )
+            urls = list(dict.fromkeys(
+                ([row.pdf_candidate_url] if best_is_trusted else [])
+                + [str(location.get("pdf_url") or "") for location in locations]
+            ))[:max(1, max_locations_per_candidate)]
+            if row.tier_candidate == "OUT_OF_SCOPE" or not urls:
                 continue
             item = {"candidate_id": row.candidate_id, "source_database": row.source_database, "status": "DOWNLOAD_FAILED", "reason": ""}
-            try:
-                response = self.session.get(url, timeout=45, allow_redirects=True)
-                response.raise_for_status()
-                payload = response.content
-                if not payload.startswith(b"%PDF-") or len(payload) < 4096:
-                    raise ValueError("NOT_A_VALID_PDF_PAYLOAD")
-                digest = hashlib.sha256(payload).hexdigest()
-                target = incoming / f"{row.candidate_id}_{digest[:12]}.pdf"
-                target.write_bytes(payload)
-                row.lifecycle_state = "PDF_VALIDATED"
-                item.update({"status": "PDF_VALIDATED", "sha256": digest, "bytes": len(payload), "local_candidate_file": target.name})
-            except Exception as exc:
-                item["reason"] = f"{type(exc).__name__}:{str(exc)[:180]}"
+            existing = next(iter(incoming.glob(f"{row.candidate_id}_*.pdf")), None)
+            if existing and existing.is_file():
+                payload = existing.read_bytes()
+                if payload.startswith(b"%PDF-") and len(payload) >= 4096:
+                    item.update({
+                        "status": "PDF_VALIDATED", "sha256": hashlib.sha256(payload).hexdigest(),
+                        "bytes": len(payload), "local_candidate_file": existing.name,
+                        "oa_source": "RECOVERED_EXISTING_CANDIDATE",
+                    })
+                    attempts.append(item)
+                    if on_attempt:
+                        on_attempt(item)
+                    continue
+            errors = []
+            for url in urls:
+                response = None
+                try:
+                    started = time.monotonic()
+                    response = self.session.get(url, timeout=timeout_seconds, allow_redirects=True, stream=True)
+                    response.raise_for_status()
+                    declared = int(response.headers.get("Content-Length") or 0)
+                    if declared > max_pdf_bytes:
+                        raise ValueError("PDF_CANDIDATE_EXCEEDS_SIZE_LIMIT")
+                    buffer = bytearray()
+                    for block in response.iter_content(chunk_size=1024 * 1024):
+                        if not block:
+                            continue
+                        buffer.extend(block)
+                        if len(buffer) > max_pdf_bytes:
+                            raise ValueError("PDF_CANDIDATE_EXCEEDS_SIZE_LIMIT")
+                        if time.monotonic() - started > max_url_elapsed_seconds:
+                            raise TimeoutError("PDF_CANDIDATE_TOTAL_TIME_LIMIT")
+                    payload = bytes(buffer)
+                    if not payload.startswith(b"%PDF-") or len(payload) < 4096:
+                        raise ValueError("NOT_A_VALID_PDF_PAYLOAD")
+                    digest = hashlib.sha256(payload).hexdigest()
+                    target = incoming / f"{row.candidate_id}_{digest[:12]}.pdf"
+                    target.write_bytes(payload)
+                    row.lifecycle_state = "PDF_VALIDATED"
+                    item.update({
+                        "status": "PDF_VALIDATED", "sha256": digest, "bytes": len(payload),
+                        "local_candidate_file": target.name,
+                        "oa_source": next((str(x.get("source") or "") for x in locations if x.get("pdf_url") == url), "HOST_ALLOWLIST"),
+                    })
+                    break
+                except Exception as exc:
+                    errors.append(f"{type(exc).__name__}:{str(exc)[:180]}")
+                finally:
+                    if response is not None:
+                        response.close()
+            if item["status"] != "PDF_VALIDATED":
+                item["reason"] = " | ".join(errors[:3])
             attempts.append(item)
+            if on_attempt:
+                on_attempt(item)
         return attempts
 
 
@@ -205,7 +302,15 @@ def literature_expansion_suggestion(question: str, retrieval: dict[str, Any]) ->
     }
 
 
-def write_discovery_audit(output: Path, rows: list[SourceCandidate], source_status: dict[str, Any], attempts: list[dict[str, Any]], *, dry_run: bool) -> dict[str, Any]:
+def write_discovery_audit(
+    output: Path,
+    rows: list[SourceCandidate],
+    source_status: dict[str, Any],
+    attempts: list[dict[str, Any]],
+    *,
+    dry_run: bool,
+    discovery_stats: dict[str, int] | None = None,
+) -> dict[str, Any]:
     output.mkdir(parents=True, exist_ok=True)
     candidate_path = output / "candidate_registry.jsonl"
     candidate_path.write_text("".join(json.dumps(asdict(row), ensure_ascii=False, sort_keys=True) + "\n" for row in rows), encoding="utf-8")
@@ -215,6 +320,8 @@ def write_discovery_audit(output: Path, rows: list[SourceCandidate], source_stat
         "generated_at": _utc_now(), "dry_run": dry_run,
         "formal_acceptance_performed": False,
         "candidate_count": len(rows),
+        "raw_candidate_records": int((discovery_stats or {}).get("raw_records") or len(rows)),
+        "unique_candidate_records_before_limit": int((discovery_stats or {}).get("unique_records") or len(rows)),
         "tier_counts": dict(Counter(row.tier_candidate for row in rows)),
         "state_counts": dict(Counter(row.lifecycle_state for row in rows)),
         "legal_pdf_candidates": sum(legal_pdf_candidate(row.pdf_candidate_url) for row in rows),

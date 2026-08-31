@@ -45,17 +45,28 @@ def main() -> int:
         raise SystemExit("--max-candidates must be in [1, 2000]")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     output = args.output or ROOT / "outputs" / "literature_expansion_v1_1" / stamp
+    cache_dir = ROOT / "outputs" / "literature_expansion_v1_1" / "source_cache"
     if args.sources == "all":
-        manager = LiteratureDiscoveryManager()
+        manager = LiteratureDiscoveryManager(cache_dir=cache_dir)
     else:
         names = [x.strip().casefold() for x in args.sources.split(",") if x.strip()]
         unknown = sorted(set(names) - set(SOURCE_CLASSES))
         if unknown:
             raise SystemExit("Unknown sources: " + ",".join(unknown))
-        manager = LiteratureDiscoveryManager(sources=[SOURCE_CLASSES[name]() for name in names])
+        manager = LiteratureDiscoveryManager(
+            sources=[SOURCE_CLASSES[name](cache_dir=cache_dir) for name in names],
+            cache_dir=cache_dir,
+        )
     rows = manager.discover(topic=args.topic, since=args.since, max_candidates=args.max_candidates)
     attempts = [] if args.dry_run else manager.stage_legal_pdfs(rows, ROOT / "paper" / "incoming_v1_1", max_downloads=args.max_downloads)
-    summary = write_discovery_audit(output, rows, manager.source_status, attempts, dry_run=args.dry_run)
+    summary = write_discovery_audit(
+        output,
+        rows,
+        manager.source_status,
+        attempts,
+        dry_run=args.dry_run,
+        discovery_stats=manager.discovery_stats,
+    )
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0
 
