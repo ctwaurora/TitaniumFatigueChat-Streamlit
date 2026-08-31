@@ -1,7 +1,7 @@
 {
-  "source_commit": "316ae54d8989be690b6bba2ae0c313a19c5c1508",
-  "export_time": "2026-08-31T12:06:17+00:00",
-  "deploy_manifest_hash": "01291b587f217be98ab524d66875a1a207cb4b72c605c6c22b823ecbb77e4a6e",
+  "source_commit": "4ae6cdb9d216feffec36504ea03ea00da97714bd",
+  "export_time": "2026-08-31T12:09:48+00:00",
+  "deploy_manifest_hash": "0955f67c2fc24219a72ce6803b287397403f200a0e5633e8ba46ccb17e289815",
   "application_version": "3.2.1-v1.1-consistency",
   "product_version": "TitaniumFatigueChat-v1.1",
   "dataset_version": "TitaniumFatigueChat-v1.1",

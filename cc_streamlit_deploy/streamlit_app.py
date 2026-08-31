@@ -2006,6 +2006,17 @@ def _render_smart_search_analysis_fragment() -> None:
 
     if has_answer:
         final_stages = smart_diagnostics.get("stage_timestamps_epoch_ms") or {}
+        snapshot_meta = smart_diagnostics.get("run_snapshot") or {}
+        from src.data_cache import get_system_stats_cached
+
+        active_run_contract = get_system_stats_cached()
+        st.caption(
+            f"Run Snapshot：{snapshot_meta.get('run_id') or 'NOT_AVAILABLE'} · "
+            f"Dataset：{active_run_contract.get('dataset_version') or 'UNKNOWN'} · "
+            f"papers={active_run_contract.get('formal_indexed_count', 0)} · "
+            f"RAG={active_run_contract.get('indexed_count', 0)} · "
+            f"chunks={active_run_contract.get('rag_chunk_count', 0)}"
+        )
         st.markdown(
             "<span data-smart-search-final-complete='true' "
             f"data-smart-search-t9-ms='{final_stages.get('t9_deepseek_start', '')}' "
