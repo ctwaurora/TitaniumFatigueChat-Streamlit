@@ -12,6 +12,7 @@ streamlit_app.py — TitaniumFatigueChat AI Scientist (Search-Engine Style)
 """
 
 import hashlib
+import html
 import os
 import re
 import sys
@@ -19,6 +20,7 @@ import threading
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 import streamlit as st
 
@@ -46,6 +48,79 @@ if not require_authentication(st):
 from src.cloud_evidence_bundle import cloud_bundle_status
 
 _CLOUD_BUNDLE_STATUS = cloud_bundle_status(BASE_DIR)
+
+st.markdown(
+    """
+    <style>
+    [data-testid="stMainBlockContainer"] {
+        max-width: 1180px;
+        padding-left: 2rem;
+        padding-right: 2rem;
+    }
+    [data-testid="stSidebar"] {
+        width: 282px !important;
+        min-width: 282px !important;
+    }
+    .tfc-status-pill, .tfc-boundary-pill, .tfc-condition-pill,
+    .tfc-citation-badge, .tfc-tier-pill {
+        display: inline-block;
+        border-radius: 999px;
+        font-size: 0.78rem;
+        font-weight: 650;
+        line-height: 1.25;
+        padding: 0.25rem 0.62rem;
+    }
+    .tfc-status-waiting { background:#eef1f5; color:#485469; }
+    .tfc-status-running { background:#fff3cd; color:#7a5800; }
+    .tfc-status-completed { background:#e7f6ec; color:#1e6a3a; }
+    .tfc-status-error { background:#fde8e8; color:#a32020; }
+    .tfc-boundary-pill { background:#eef3fb; color:#244c7c; }
+    .tfc-condition-high { background:#e7f6ec; color:#1e6a3a; }
+    .tfc-condition-medium { background:#fff3cd; color:#7a5800; }
+    .tfc-condition-limited { background:#fdecec; color:#9e2d2d; }
+    .tfc-citation-badge {
+        background:#edf2f8; color:#243b5a; border:1px solid #cad5e3;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    .tfc-tier-pill { background:#f2f4f7; color:#344054; }
+    .tfc-sidebar-stat {
+        display:flex; align-items:baseline; justify-content:space-between;
+        gap:0.75rem; padding:0.28rem 0; border-bottom:1px solid #e4e7ec;
+    }
+    .tfc-sidebar-stat span { color:#667085; font-size:0.82rem; }
+    .tfc-sidebar-stat strong { color:#1d2939; font-size:1rem; }
+    .tfc-evidence-card { margin-bottom:0.35rem; }
+    .st-key-run_analysis_fragment_btn button[kind="primary"] {
+        background:#ff1f1f !important; border-color:#ff1f1f !important;
+        box-shadow:0 4px 12px rgba(255,31,31,.16);
+    }
+    .st-key-analysis_mode_buttons button[kind="primary"] {
+        background:#e86969 !important; border-color:#e86969 !important;
+        box-shadow:none !important;
+    }
+    .st-key-nav_analysis button[kind="primary"],
+    .st-key-nav_library button[kind="primary"],
+    .st-key-nav_formula button[kind="primary"] {
+        background:#fff1f1 !important; color:#a92e2e !important;
+        border-color:#efb4b4 !important; box-shadow:none !important;
+    }
+    @media (max-width: 1440px) {
+        [data-testid="stMainBlockContainer"] {
+            max-width: 1080px; padding-left:1.25rem; padding-right:1.25rem;
+        }
+        [data-testid="stSidebar"] {
+            width: 258px !important; min-width:258px !important;
+        }
+    }
+    @media (max-width: 900px) {
+        [data-testid="stMainBlockContainer"] {
+            padding-left:1rem; padding-right:1rem;
+        }
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 
 @st.cache_resource(show_spinner=False)
@@ -293,6 +368,9 @@ for key, default in [
     ("user_question", ""),
     ("answer_mode", "research_analysis"),
     ("analysis_done", False),
+    ("analysis_status", "WAITING_FOR_INPUT"),
+    ("analysis_request_pending", False),
+    ("analysis_error_message", ""),
     ("trigger_search", False),
     ("variable_pair", (None, None, "no_variable")),
     ("literature_result", None),
@@ -313,6 +391,40 @@ for key, default in [
             st.session_state[key] = None
         else:
             st.session_state[key] = default
+
+
+ANALYSIS_STATUS_LABELS = {
+    "WAITING_FOR_INPUT": "等待输入",
+    "RUNNING": "分析中",
+    "COMPLETED": "分析完成",
+    "ERROR": "运行异常",
+}
+
+
+def _set_analysis_status(status: str) -> None:
+    """Update the UI-only analysis state without changing scientific output."""
+    if status not in ANALYSIS_STATUS_LABELS:
+        status = "ERROR"
+    st.session_state.analysis_status = status
+    st.session_state.analysis_done = status == "COMPLETED"
+
+
+def _analysis_status_html(status: str) -> str:
+    normalized = status if status in ANALYSIS_STATUS_LABELS else "ERROR"
+    css = {
+        "WAITING_FOR_INPUT": "waiting",
+        "RUNNING": "running",
+        "COMPLETED": "completed",
+        "ERROR": "error",
+    }[normalized]
+    return (
+        f'<span class="tfc-status-pill tfc-status-{css}">'
+        f'{ANALYSIS_STATUS_LABELS[normalized]}</span>'
+    )
+
+
+if st.session_state.analysis_done and st.session_state.analysis_status == "WAITING_FOR_INPUT":
+    st.session_state.analysis_status = "COMPLETED"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1838,14 +1950,16 @@ def _select_research_skill(mode: str) -> None:
     st.session_state.last_mode = mode
     if mode != previous:
         st.session_state.pop("answer", None)
-        st.session_state.analysis_done = False
+        _set_analysis_status("WAITING_FOR_INPUT")
+        st.session_state.analysis_request_pending = False
 
 
 def _fill_example_question(question: str) -> None:
     """Fill the input only; examples never execute retrieval or a model call."""
     st.session_state.user_question = question
     st.session_state.pop("answer", None)
-    st.session_state.analysis_done = False
+    _set_analysis_status("WAITING_FOR_INPUT")
+    st.session_state.analysis_request_pending = False
 
 
 def _navigate_to(page: str) -> None:
@@ -1853,7 +1967,360 @@ def _navigate_to(page: str) -> None:
     st.session_state.page = page
     if page == "search":
         st.session_state.pop("answer", None)
-        st.session_state.analysis_done = False
+        _set_analysis_status("WAITING_FOR_INPUT")
+        st.session_state.analysis_request_pending = False
+
+
+UI_STATUS_LABELS = {
+    "INSUFFICIENT": "证据不足",
+    "DIRECT_SUPPORT": "直接支持",
+    "DIRECT_COUNTER": "直接反证",
+    "CONDITION_DEPENDENT": "条件依赖",
+    "LIMITATION_EVIDENCE": "限制性证据",
+    "ALTERNATIVE_MECHANISM": "替代机制",
+    "SUPPORTING_CONTEXT": "支持性背景",
+    "PROVISIONAL_FALSIFICATION_DESIGN": "暂定可证伪实验方案",
+    "CANDIDATE_EVIDENCE_GAP": "候选研究空白",
+    "EVIDENCE_ANCHORED_HYPOTHESIS": "证据锚定假设",
+}
+
+
+def _ui_status_label(value: Any, fallback: str = "未分类") -> str:
+    raw = str(value or "").strip()
+    return UI_STATUS_LABELS.get(raw, raw.replace("_", " ").title() if raw else fallback)
+
+
+def _condition_match_label(value: Any) -> str:
+    """Map an existing retrieval condition score to a display band only."""
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return "LIMITED"
+    if score >= 0.75:
+        return "HIGH"
+    if score >= 0.5:
+        return "MEDIUM"
+    return "LIMITED"
+
+
+def _condition_badge(label: str) -> str:
+    normalized = label if label in {"HIGH", "MEDIUM", "LIMITED"} else "LIMITED"
+    return (
+        f'<span class="tfc-condition-pill tfc-condition-{normalized.casefold()}">'
+        f'{normalized}</span>'
+    )
+
+
+def _compact_ui_text(value: Any, limit: int = 180) -> str:
+    text = " ".join(str(value or "").split())
+    if not text:
+        return "未报告"
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _evidence_id(row: Dict[str, Any]) -> str:
+    return str(row.get("doc_id") or row.get("evidence_id") or "未记录")
+
+
+def _evidence_role(row: Dict[str, Any], fallback: str) -> str:
+    return _ui_status_label(
+        row.get("evidence_role") or row.get("role") or fallback,
+        fallback=fallback,
+    )
+
+
+def _top_evidence_rows(result: Dict[str, Any], limit: int = 3) -> List[Dict[str, Any]]:
+    selected: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    groups = (
+        ("DIRECT_SUPPORT", result.get("supporting_evidence") or []),
+        ("CONDITION_DEPENDENT", result.get("condition_dependent_evidence") or []),
+        ("ALTERNATIVE_MECHANISM", result.get("alternative_mechanism_evidence") or []),
+        ("SUPPORTING_CONTEXT", result.get("supporting_context_evidence") or []),
+    )
+    for fallback_role, rows in groups:
+        for source in rows:
+            row = dict(source)
+            evidence_id = _evidence_id(row)
+            if evidence_id in seen:
+                continue
+            seen.add(evidence_id)
+            row["_ui_role"] = fallback_role
+            selected.append(row)
+            if len(selected) >= limit:
+                return selected
+    return selected
+
+
+def _counter_evidence_rows(result: Dict[str, Any], limit: int = 2) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    for fallback_role, source_rows in (
+        ("DIRECT_COUNTER", result.get("counter_evidence") or []),
+        ("LIMITATION_EVIDENCE", result.get("condition_dependent_evidence") or []),
+    ):
+        for source in source_rows:
+            row = dict(source)
+            row["_ui_role"] = fallback_role
+            rows.append(row)
+            if len(rows) >= limit:
+                return rows
+    return rows
+
+
+def _extract_markdown_section(markdown: str, headings: tuple[str, ...]) -> str:
+    for heading in headings:
+        match = re.search(
+            rf"(?ms)^#{{1,4}}\s+{re.escape(heading)}\s*$\n(.*?)(?=^#{{1,4}}\s+|\Z)",
+            markdown,
+        )
+        if match and match.group(1).strip():
+            return match.group(1).strip()
+    return ""
+
+
+def _split_answer_markdown(answer: str) -> tuple[str, str, str]:
+    technical = ""
+    main = str(answer or "")
+    technical_marker = "\n## OA 文献补充门禁"
+    if technical_marker in main:
+        main, technical = main.split(technical_marker, 1)
+        technical = "## OA 文献补充门禁" + technical
+    evidence = ""
+    evidence_marker = "\n## 文献证据"
+    if evidence_marker in main:
+        main, evidence = main.split(evidence_marker, 1)
+        evidence = "## 文献证据" + evidence
+    return main.strip(), evidence.strip(), technical.strip()
+
+
+def _display_markdown(markdown: str) -> str:
+    localized = str(markdown or "")
+    for raw, translated in UI_STATUS_LABELS.items():
+        localized = localized.replace(raw, translated)
+    citation_patterns = (
+        r"\[Evidence ID[：:]\s*([A-Za-z0-9_:\-]+)[，,；;]\s*页码[：:]\s*([^\]\s，,；;]+)\]",
+        r"Evidence ID[：:]\s*([A-Za-z0-9_:\-]+)[；;，,]\s*页码[：:]\s*([^\s，,；;）)]+)",
+    )
+    for pattern in citation_patterns:
+        localized = re.sub(
+            pattern,
+            lambda match: f"**[{match.group(1)} | p.{match.group(2)}]**",
+            localized,
+        )
+    return localized
+
+
+def _evidence_boundary(result: Dict[str, Any], smart_result: Dict[str, Any]) -> str:
+    quality_state = str(
+        ((smart_result.get("skill_output") or {}).get("specific_fields") or {}).get("result_state")
+        or ((smart_result.get("diagnostics") or {}).get("generation_status"))
+        or ""
+    )
+    sufficiency = result.get("evidence_sufficiency") or {}
+    sufficiency_status = str(sufficiency.get("status") or "")
+    if "CANDIDATE_EVIDENCE_GAP" in quality_state:
+        return "候选研究空白"
+    if result.get("insufficient") or sufficiency_status == "INSUFFICIENT":
+        return "证据不足"
+    if result.get("condition_dependent_evidence"):
+        return "条件依赖"
+    if result.get("supporting_evidence"):
+        return "直接证据充分"
+    return "证据边界未确定"
+
+
+def _overall_condition_match(rows: List[Dict[str, Any]]) -> str:
+    scores = []
+    for row in rows:
+        try:
+            scores.append(float(row.get("condition_match_score")))
+        except (TypeError, ValueError):
+            continue
+    if not scores:
+        return "LIMITED"
+    scores.sort()
+    return _condition_match_label(scores[len(scores) // 2])
+
+
+def _render_evidence_card(row: Dict[str, Any], fallback_role: str) -> None:
+    evidence_id = _evidence_id(row)
+    page = row.get("page_number") or "未记录"
+    match_label = _condition_match_label(row.get("condition_match_score"))
+    role = _evidence_role(row, fallback_role)
+    title = _compact_ui_text(row.get("title") or "题名未报告", 96)
+    summary = _compact_ui_text(
+        row.get("claim") or row.get("short_excerpt") or row.get("original_text"),
+        170,
+    )
+    with st.container(border=True):
+        st.markdown(f"**{html.escape(title)}**")
+        st.caption(f"{row.get('year') or '年份未报告'} · {role}")
+        st.markdown(
+            _condition_badge(match_label)
+            + "&nbsp;&nbsp;"
+            + f'<span class="tfc-citation-badge">{html.escape(evidence_id)} | p.{html.escape(str(page))}</span>',
+            unsafe_allow_html=True,
+        )
+        st.write(summary)
+
+
+def _render_answer_presentation(answer: str, smart_result: Dict[str, Any]) -> None:
+    result = smart_result.get("research_result") or {}
+    main_answer, evidence_markdown, technical_markdown = _split_answer_markdown(answer)
+    core = _extract_markdown_section(
+        main_answer,
+        ("直接结论", "核心结论", "候选研究空白", "假设", "实验目标"),
+    )
+    if not core:
+        core = main_answer.split("\n\n", 1)[0]
+    top_rows = _top_evidence_rows(result)
+    boundary = _evidence_boundary(result, smart_result)
+    overall_match = _overall_condition_match(top_rows)
+    frame = result.get("query_frame") or {}
+
+    st.markdown("## 核心结论")
+    st.markdown(_display_markdown(core))
+    boundary_col, match_col = st.columns(2)
+    with boundary_col:
+        st.markdown("**证据边界 / 可信范围**")
+        st.markdown(
+            f'<span class="tfc-boundary-pill">{html.escape(boundary)}</span>',
+            unsafe_allow_html=True,
+        )
+    with match_col:
+        st.markdown("**Condition Match**")
+        st.markdown(_condition_badge(overall_match), unsafe_allow_html=True)
+
+    st.markdown("### 条件匹配")
+    condition_columns = st.columns(4)
+    condition_values = (
+        ("Material", frame.get("alloy_grade") or frame.get("material") or "未指定"),
+        ("Process", frame.get("manufacturing_process") or "未指定"),
+        ("Surface", ", ".join(frame.get("surface_condition") or []) or "未指定"),
+        (
+            "Fatigue regime",
+            frame.get("fatigue_stage") or frame.get("crack_stage") or "未指定",
+        ),
+    )
+    for column, (label, value) in zip(condition_columns, condition_values):
+        column.markdown(f"**{label}**")
+        column.caption(str(value))
+    st.caption("Condition Match 仅由现有检索结果中的 condition_match_score 映射为 HIGH / MEDIUM / LIMITED，不生成可信度百分比。")
+
+    st.markdown("### 最关键3条 Evidence")
+    if top_rows:
+        for row in top_rows:
+            _render_evidence_card(row, str(row.get("_ui_role") or "DIRECT_SUPPORT"))
+    else:
+        st.info("当前 Formal RAG 未返回可展示的核心 Evidence。")
+
+    st.markdown("### 反向 / 限制性 Evidence")
+    counter_rows = _counter_evidence_rows(result)
+    if counter_rows:
+        for row in counter_rows:
+            _render_evidence_card(row, str(row.get("_ui_role") or "DIRECT_COUNTER"))
+    else:
+        st.info("当前 Formal RAG 中未检索到可比条件下的直接反证。")
+
+    with st.expander("查看完整科研分析", expanded=False):
+        st.markdown(_display_markdown(main_answer))
+
+    evidence_count = sum(
+        len(result.get(key) or [])
+        for key in (
+            "supporting_evidence",
+            "counter_evidence",
+            "condition_dependent_evidence",
+            "alternative_mechanism_evidence",
+            "supporting_context_evidence",
+        )
+    )
+    if evidence_markdown:
+        with st.expander(f"查看全部 {evidence_count} 条 Evidence", expanded=False):
+            st.markdown(_display_markdown(evidence_markdown))
+    if technical_markdown:
+        with st.expander("技术详情", expanded=False):
+            st.markdown(_display_markdown(technical_markdown))
+
+
+def _formula_doi_markdown(value: Any) -> str:
+    doi = str(value or "").strip()
+    for prefix in ("https://doi.org/", "http://doi.org/", "doi:"):
+        if doi.casefold().startswith(prefix):
+            doi = doi[len(prefix):].strip()
+            break
+    if not doi.casefold().startswith("10."):
+        return "DOI未记录"
+    return f"[doi:{doi}](https://doi.org/{quote(doi, safe='/.:;()[]')})"
+
+
+def _formula_list_text(value: Any) -> str:
+    if isinstance(value, (list, tuple)):
+        items = [str(item).strip() for item in value if str(item).strip()]
+        return "；".join(items) if items else "未记录"
+    text = str(value or "").strip()
+    return text or "未记录"
+
+
+def _render_confirmed_formula_card(formula: Dict[str, Any], index: int) -> bool:
+    formula_id = str(formula.get("formula_id") or f"confirmed-{index}")
+    with st.container(border=True):
+        selected = st.checkbox(
+            "选择用于比较",
+            key=safe_key("confirmed_formula_select", formula_id, index),
+        )
+        st.markdown(
+            f"### {formula.get('formula_type') or '文献公式'}"
+            + (
+                f" · Eq. {formula.get('equation_number')}"
+                if formula.get("equation_number")
+                and formula.get("equation_number") not in {"未确认", "未记录"}
+                else ""
+            )
+        )
+        latex = str(formula.get("normalized_latex") or "").strip()
+        if latex and "待人工复核" not in latex:
+            try:
+                st.latex(latex)
+            except Exception:
+                st.code(str(formula.get("original_formula") or latex), language="text")
+        else:
+            st.code(str(formula.get("original_formula") or "公式文本未记录"), language="text")
+        st.markdown(f"**来源论文**：{formula.get('paper_title') or '题名未记录'}")
+        source_col, page_col, number_col = st.columns(3)
+        source_col.markdown(_formula_doi_markdown(formula.get("doi")))
+        source_col.caption(formula.get("authors_year") or "作者与年份未记录")
+        page_col.markdown(f"**页码**：{formula.get('page_number') or '未记录'}")
+        page_col.caption(f"章节：{formula.get('section') or '未记录'}")
+        number_col.markdown(
+            f"**公式编号**：{formula.get('equation_number') or '未记录'}"
+        )
+        number_col.caption(f"公式ID：{formula_id}")
+        detail_columns = st.columns(2)
+        with detail_columns[0]:
+            st.markdown("**变量定义**")
+            st.write(_formula_list_text(formula.get("symbol_definitions")))
+            st.markdown("**单位**")
+            st.write(_formula_list_text(formula.get("symbol_units")))
+            st.markdown("**适用条件**")
+            st.write(_formula_list_text(formula.get("applicable_conditions")))
+        with detail_columns[1]:
+            st.markdown("**假设 / 局限**")
+            st.write(formula.get("author_limitations") or "原文未结构化记录完整假设。")
+            st.markdown("**材料 / 疲劳范围**")
+            st.write(
+                formula.get("author_scope")
+                or _formula_list_text(formula.get("applicable_conditions"))
+            )
+            st.markdown("**公式用途**")
+            st.write(formula.get("formula_purpose") or "未记录")
+        with st.expander("公式原文与技术状态", expanded=False):
+            st.text(formula.get("context_before_after") or "原文上下文未记录")
+            st.caption(
+                f"内部状态：{formula.get('raw_review_status') or '未记录'} · "
+                f"数据来源：{formula.get('data_source') or '未记录'}"
+            )
+    return bool(selected)
 
 
 @st.fragment
@@ -1929,21 +2396,25 @@ def _render_smart_search_analysis_fragment() -> None:
         current_question = st.session_state.get("user_question", "").strip()
         current_mode = st.session_state.get("answer_mode", "research_analysis")
         if not current_question:
+            _set_analysis_status("WAITING_FOR_INPUT")
             st.warning("请输入科研问题。")
         else:
             sq = understand_user_query(current_question)
             st.session_state.structured_query = sq
-            effective_question = sq.get("corrected_query") or current_question
-            from src.smart_search import PORE_PATTERN
+            st.session_state.analysis_request_pending = True
+            st.session_state.analysis_error_message = ""
+            _set_analysis_status("RUNNING")
+            # Force one full-app rerun so the sidebar can show RUNNING before
+            # the blocking retrieval/model call starts inside this fragment.
+            st.rerun(scope="app")
 
-            if (
-                not PORE_PATTERN.search(current_question)
-                and PORE_PATTERN.search(effective_question)
-            ):
-                effective_question = current_question
-            progress = st.status("正在检索正式文献库", expanded=True)
-            progress.write("正在核对支持和反向证据")
-            progress.write("正在生成完整回答")
+    if st.session_state.get("analysis_request_pending"):
+        current_question = st.session_state.get("user_question", "").strip()
+        current_mode = st.session_state.get("answer_mode", "research_analysis")
+        progress = st.status("正在检索正式文献库", expanded=True)
+        progress.write("正在核对支持和反向证据")
+        progress.write("正在生成完整回答")
+        try:
             # Preserve the user's scientific claim for Skill routing and quality
             # gates. run_smart_search performs its own guarded retrieval rewrite.
             answer_text = generate_comprehensive_answer(
@@ -1953,9 +2424,26 @@ def _render_smart_search_analysis_fragment() -> None:
             st.session_state.answer = answer_text
             st.session_state.last_question = current_question
             st.session_state.last_mode = current_mode
-            st.session_state.analysis_done = True
             st.session_state.answer_timestamp = time.time()
             st.session_state.pop("smart_search_pending_full_answer", None)
+            st.session_state.analysis_request_pending = False
+            st.session_state.analysis_error_message = ""
+            _set_analysis_status("COMPLETED")
+        except Exception as exc:
+            st.session_state.analysis_request_pending = False
+            st.session_state.analysis_error_message = type(exc).__name__
+            _set_analysis_status("ERROR")
+        st.rerun(scope="app")
+
+    if st.session_state.get("analysis_status") == "ERROR":
+        st.error(
+            "运行异常，请重试。"
+            + (
+                f"（{st.session_state.analysis_error_message}）"
+                if st.session_state.get("analysis_error_message")
+                else ""
+            )
+        )
 
     st.divider()
     st.caption("示例问题")
@@ -1977,11 +2465,13 @@ def _render_smart_search_analysis_fragment() -> None:
     mode_label = MODES.get(last_mode, {}).get("label", "")
     st.markdown(f"<h3 style='text-align:center;'>📋 {mode_label}</h3>", unsafe_allow_html=True)
     st.caption(f"**问题**: {st.session_state.get('last_question') or '等待输入'}")
-    answer_placeholder = st.empty()
-    answer_placeholder.markdown(
-        st.session_state.get("answer")
-        or "输入科研问题，点击一次开始分析即可获得完整中文回答。"
-    )
+    if has_answer:
+        _render_answer_presentation(
+            str(st.session_state.get("answer") or ""),
+            smart_result,
+        )
+    else:
+        st.info("输入科研问题，点击一次开始分析即可获得完整中文回答。")
     t7_epoch_ms = time.time_ns() / 1_000_000
     stage_times = smart_diagnostics.get("stage_timestamps_epoch_ms") or {}
     answer_bytes = len(str(st.session_state.get("answer") or "").encode("utf-8"))
@@ -2010,13 +2500,14 @@ def _render_smart_search_analysis_fragment() -> None:
         from src.data_cache import get_system_stats_cached
 
         active_run_contract = get_system_stats_cached()
-        st.caption(
-            f"Run Snapshot：{snapshot_meta.get('run_id') or 'NOT_AVAILABLE'} · "
-            f"Dataset：{active_run_contract.get('dataset_version') or 'UNKNOWN'} · "
-            f"papers={active_run_contract.get('formal_indexed_count', 0)} · "
-            f"RAG={active_run_contract.get('indexed_count', 0)} · "
-            f"chunks={active_run_contract.get('rag_chunk_count', 0)}"
-        )
+        with st.expander("运行记录与技术诊断", expanded=False):
+            st.caption(
+                f"运行记录：{snapshot_meta.get('run_id') or '未记录'} · "
+                f"数据集：{active_run_contract.get('dataset_version') or '未记录'} · "
+                f"正式文献={active_run_contract.get('formal_indexed_count', 0)} · "
+                f"正式RAG={active_run_contract.get('indexed_count', 0)} · "
+                f"分块={active_run_contract.get('rag_chunk_count', 0)}"
+            )
         st.markdown(
             "<span data-smart-search-final-complete='true' "
             f"data-smart-search-t9-ms='{final_stages.get('t9_deepseek_start', '')}' "
@@ -2270,22 +2761,37 @@ with st.sidebar:
         }
     else:
         stats = get_system_stats_cached()
-    st.caption("正式文献库")
-    st.metric("正式文献", stats["formal_indexed_count"])
-    st.metric("正式 RAG", stats.get("indexed_count", stats["formal_indexed_count"]))
-    st.metric("EvidenceRecord", stats["evidence_record_count"])
-    st.metric("ConditionEvidenceRecord", stats.get("condition_evidence_record_count", 0))
-    st.metric("公式候选", stats.get("formula_candidate_count", stats.get("formula_record_count", 0)))
-    st.metric("严格确认", stats.get("formula_confirmed_count", 0))
-    if _CLOUD_BUNDLE_STATUS["required"]:
-        st.metric("可追溯文献", stats.get("traceable_literature_count", 0))
-    else:
-        st.metric("本地有效 PDF", stats["local_pdf_file_count"])
-
     st.divider()
-    st.caption("⚠️ 系统生成的是 candidate hypothesis，不得声称已被证明。")
-    st.caption("📊 系统状态")
-    st.caption("已完成一次分析" if st.session_state.analysis_done else "等待输入")
+    st.caption("系统状态")
+    st.markdown(
+        _analysis_status_html(st.session_state.get("analysis_status", "WAITING_FOR_INPUT")),
+        unsafe_allow_html=True,
+    )
+    st.caption("正式文献库")
+    sidebar_stats = (
+        ("正式文献", stats["formal_indexed_count"]),
+        ("Formal RAG", stats.get("indexed_count", stats["formal_indexed_count"])),
+        ("Evidence", stats["evidence_record_count"]),
+        ("ConditionEvidence", stats.get("condition_evidence_record_count", 0)),
+    )
+    st.markdown(
+        "".join(
+            f'<div class="tfc-sidebar-stat"><span>{label}</span><strong>{int(value or 0)}</strong></div>'
+            for label, value in sidebar_stats
+        ),
+        unsafe_allow_html=True,
+    )
+    with st.expander("系统详情", expanded=False):
+        st.markdown(
+            f"- 分块：{stats.get('rag_chunk_count', 0)}\n"
+            f"- 公式候选：{stats.get('formula_candidate_count', stats.get('formula_record_count', 0))}\n"
+            f"- 严格确认公式：{stats.get('formula_confirmed_count', 0)}\n"
+            f"- {'可追溯文献' if _CLOUD_BUNDLE_STATUS['required'] else '本地有效 PDF'}："
+            f"{stats.get('traceable_literature_count', 0) if _CLOUD_BUNDLE_STATUS['required'] else stats.get('local_pdf_file_count', 0)}\n"
+            f"- 产品：{stats.get('product_version') or 'TitaniumFatigueChat-v1.1'}\n"
+            f"- 数据集：{stats.get('dataset_version') or 'TitaniumFatigueChat-v1.1'}"
+        )
+    st.caption("⚠️ 系统生成的是候选科学假设，不得声称已被证明。")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -2305,10 +2811,7 @@ if current_page == "search":
         st.caption("基于正式可信文献、条件化证据与反证检索的钛合金疲劳科研推理")
         st.divider()
 
-        search_col1, search_col2, search_col3 = st.columns([1, 2, 1])
-
-        with search_col2:
-            _render_smart_search_analysis_fragment()
+        _render_smart_search_analysis_fragment()
 
 # ═══════════════════════════════════════════════════════════════════════════
 # PAGE: Research Gap Discovery
@@ -2829,119 +3332,121 @@ elif current_page == "formula_explain":
     )
     from src.data_cache import get_system_stats_cached
     formula_contract = get_system_stats_cached()
-    st.caption(
-        f"活动 v1.1 公式候选 {formula_contract.get('formula_candidate_count', 0)} 条；"
-        f"严格确认 {formula_contract.get('formula_confirmed_count', 0)} 条。"
-        f"当前正式 RAG 可检索公式记录 {len(literature_formulas)} 条。"
-    )
-    paper_options = {
-        f"{row['paper_title']} [{row['paper_id']}]": row["paper_id"]
-        for row in literature_formulas
-    }
-
-    filter_col1, filter_col2, filter_col3 = st.columns(3)
-    with filter_col1:
-        paper_scope = st.selectbox(
-            "文献范围筛选",
-            ["全部文献", "指定文献"],
-            key="formula_paper_scope",
-        )
-
-        selected_paper_id = None
-        if paper_scope == "指定文献" and paper_options:
-            selected_paper_label = st.selectbox(
-                "选择文献",
-                sorted(paper_options),
-                key="formula_selected_paper",
-            )
-            selected_paper_id = paper_options[selected_paper_label]
-    with filter_col2:
-        selected_formula_type = st.selectbox(
-            "公式类型筛选",
-            FORMULA_TYPES,
-            key="literature_formula_type",
-        )
-    with filter_col3:
-        selected_evidence_status = st.selectbox(
-            "证据状态筛选",
-            EVIDENCE_STATUSES,
-            index=0 if formula_summary(literature_formulas)["confirmed"] else 1,
-            key="literature_formula_evidence_status",
-        )
-
-    filtered_formulas = filter_literature_formulas(
+    summary = formula_summary(literature_formulas)
+    contract_candidates = int(formula_contract.get("formula_candidate_count", 0) or 0)
+    contract_confirmed = int(formula_contract.get("formula_confirmed_count", 0) or 0)
+    pending_contract_count = max(0, contract_candidates - contract_confirmed)
+    confirmed_formulas = filter_literature_formulas(
         literature_formulas,
-        paper_id=selected_paper_id,
-        formula_type=selected_formula_type,
-        evidence_status=selected_evidence_status,
+        evidence_status="已确认",
+    )
+    pending_formulas = filter_literature_formulas(
+        literature_formulas,
+        evidence_status="待人工复核",
     )
 
+    st.markdown(f"## 严格确认公式（{contract_confirmed}）")
+    st.caption(
+        f"活动 v1.1 共记录 {contract_candidates} 条公式候选，其中严格确认 "
+        f"{contract_confirmed} 条；当前正式 RAG 可展示 {len(literature_formulas)} 条公式证据。"
+    )
+    selected_confirmed: List[Dict[str, Any]] = []
     if not literature_formulas:
         st.info(FORMULA_EMPTY_MESSAGE)
-    elif not filtered_formulas:
-        st.info("当前筛选条件下没有文献公式记录。")
+    elif not confirmed_formulas:
+        st.warning("严格确认计数已记录，但当前运行环境未加载对应公式详情。")
     else:
-        summary = formula_summary(literature_formulas)
+        for index, formula in enumerate(confirmed_formulas):
+            if _render_confirmed_formula_card(formula, index):
+                selected_confirmed.append(formula)
+
+    st.markdown("### 已确认公式比较")
+    comparison_question = st.text_input(
+        "公式比较问题",
+        value="比较所选严格确认公式的变量、适用条件、假设与材料/疲劳范围。",
+        key="confirmed_formula_comparison_question",
+    )
+    if len(selected_confirmed) < 2:
+        st.info("请选择至少2条严格确认公式后进行比较。")
+    compare_disabled = len(selected_confirmed) < 2 or not comparison_question.strip()
+    if st.button(
+        "比较已确认公式",
+        type="primary",
+        disabled=compare_disabled,
+        key="compare_confirmed_formulas",
+    ):
+        st.markdown(
+            compare_confirmed_formulas(comparison_question, selected_confirmed)
+        )
+
+    with st.expander(f"待审核公式候选（{pending_contract_count}）", expanded=False):
         st.caption(
-            f"真实页公式证据记录 {summary['total']} 条；已确认 {summary['confirmed']} 条；"
-            f"待人工复核 {summary['pending_review']} 条；"
-            f"图像或不可可靠解析 {summary['image_review_required']} 条。"
+            f"当前正式 RAG 中可展示的待人工复核记录为 {summary['pending_review']} 条；"
+            "候选不等于正式确认公式。"
         )
-        comparison_question = st.text_input(
-            "公式比较问题",
-            placeholder="例如：比较短裂纹与长裂纹扩展公式的适用条件",
-            key="confirmed_formula_comparison_question",
-        )
-        if st.button(
-            "比较已确认公式",
-            type="primary",
-            disabled=not comparison_question.strip(),
-            key="compare_confirmed_formulas",
-        ):
-            st.markdown(compare_confirmed_formulas(comparison_question, literature_formulas))
-        formula_df = pd.DataFrame(
-            [formula_to_table_row(row) for row in filtered_formulas],
-            columns=FORMULA_TABLE_FIELDS,
-        )
-        selection = st.dataframe(
-            formula_df,
-            use_container_width=True,
-            hide_index=True,
-            on_select="rerun",
-            selection_mode="single-row",
-            key="literature_formula_table",
-        )
-        selected_rows = getattr(getattr(selection, "selection", None), "rows", [])
-        if selected_rows:
-            selected_formula = filtered_formulas[selected_rows[0]]
-            with st.expander("公式证据详情", expanded=True):
-                st.markdown(f"**文献题目**：{selected_formula['paper_title']}")
-                st.markdown(f"**DOI**：{selected_formula['doi']}")
-                st.markdown(f"**页码**：{selected_formula['page_number']}")
-                st.markdown(f"**章节**：{selected_formula['section']}")
-                st.markdown(f"**公式编号**：{selected_formula['equation_number']}")
-                st.markdown("**原始公式**")
-                st.code(selected_formula["original_formula"], language="text")
-                st.markdown("**标准化 LaTeX**")
-                if selected_formula["normalized_latex"]:
-                    st.latex(selected_formula["normalized_latex"])
-                else:
-                    st.info("待人工复核，不自动补写。")
-                st.markdown("**公式前后原文**")
-                st.text(selected_formula["context_before_after"])
-                st.markdown(
-                    "**各符号定义**：" + "；".join(selected_formula["symbol_definitions"])
+        paper_options = {
+            f"{row['paper_title']} [{row['paper_id']}]": row["paper_id"]
+            for row in pending_formulas
+        }
+        filter_col1, filter_col2 = st.columns(2)
+        with filter_col1:
+            paper_scope = st.selectbox(
+                "文献范围筛选",
+                ["全部文献", "指定文献"],
+                key="formula_paper_scope",
+            )
+            selected_paper_id = None
+            if paper_scope == "指定文献" and paper_options:
+                selected_paper_label = st.selectbox(
+                    "选择文献",
+                    sorted(paper_options),
+                    key="formula_selected_paper",
                 )
-                st.markdown(
-                    "**各符号单位**：" + "；".join(selected_formula["symbol_units"])
-                )
-                st.markdown(
-                    "**文献采用的参数**："
-                    + "；".join(selected_formula["parameter_values_units"])
-                )
-                st.markdown(f"**数据来源**：{selected_formula['data_source']}")
-                st.markdown(f"**适用范围**：{selected_formula['author_scope']}")
-                st.markdown(f"**局限**：{selected_formula['author_limitations']}")
+                selected_paper_id = paper_options[selected_paper_label]
+        with filter_col2:
+            selected_formula_type = st.selectbox(
+                "公式类型筛选",
+                FORMULA_TYPES,
+                key="literature_formula_type",
+            )
+        filtered_formulas = filter_literature_formulas(
+            pending_formulas,
+            paper_id=selected_paper_id,
+            formula_type=selected_formula_type,
+            evidence_status="待人工复核",
+        )
+        if not filtered_formulas:
+            st.info("当前筛选条件下没有待审核公式记录。")
+        else:
+            formula_df = pd.DataFrame(
+                [formula_to_table_row(row) for row in filtered_formulas],
+                columns=FORMULA_TABLE_FIELDS,
+            )
+            selection = st.dataframe(
+                formula_df,
+                use_container_width=True,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row",
+                key="literature_formula_table",
+            )
+            selected_rows = getattr(getattr(selection, "selection", None), "rows", [])
+            if selected_rows:
+                selected_formula = filtered_formulas[selected_rows[0]]
+                with st.expander("候选公式详情", expanded=True):
+                    st.markdown(f"**文献题目**：{selected_formula['paper_title']}")
+                    st.markdown(f"**DOI**：{_formula_doi_markdown(selected_formula['doi'])}")
+                    st.markdown(f"**页码**：{selected_formula['page_number']}")
+                    st.markdown(f"**公式编号**：{selected_formula['equation_number'] or '未记录'}")
+                    st.code(selected_formula["original_formula"], language="text")
+                    st.markdown(
+                        "**变量定义**："
+                        + _formula_list_text(selected_formula["symbol_definitions"])
+                    )
+                    st.markdown(
+                        "**适用条件**："
+                        + _formula_list_text(selected_formula["applicable_conditions"])
+                    )
 
     st.divider()
     with st.expander("基础理论模型参考", expanded=False):
