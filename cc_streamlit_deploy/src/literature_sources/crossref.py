@@ -7,12 +7,23 @@ from .base import LiteratureSource, SourceCandidate, normalize_doi
 
 class CrossrefSource(LiteratureSource):
     name = "CROSSREF"
+    max_retries = 4
+    backoff_base_seconds = 1.0
+    min_request_interval_seconds = 0.1
+    circuit_failure_threshold = 2
+    circuit_cooldown_seconds = 120.0
 
     def search(self, query: str, *, since: str = "", limit: int = 25) -> list[SourceCandidate]:
         params: dict[str, Any] = {"query.bibliographic": query, "rows": min(100, limit), "select": "DOI,title,author,published,container-title,is-referenced-by-count,link,URL,reference"}
         if since:
             params["filter"] = f"from-pub-date:{since}"
-        items = self._get("https://api.crossref.org/works", params=params).json().get("message", {}).get("items", [])
+        cache_key = f"search:{query.casefold()}:{since}:{min(100, limit)}"
+        payload = self._get_json_cached(
+            "https://api.crossref.org/works",
+            cache_key=cache_key,
+            params=params,
+        )
+        items = payload.get("message", {}).get("items", [])
         output = []
         for work in items:
             date_parts = ((work.get("published") or {}).get("date-parts") or [["UNKNOWN"]])[0]

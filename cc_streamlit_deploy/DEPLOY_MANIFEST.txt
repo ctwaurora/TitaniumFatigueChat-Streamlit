@@ -1,5 +1,5 @@
 TitaniumFatigueChat Streamlit deployment manifest
-file_count=174
+file_count=176
 
 .gitattributes
 .gitignore
@@ -114,6 +114,7 @@ src/literature_library.py
 src/literature_recovery.py
 src/literature_search_agent.py
 src/literature_sources/__init__.py
+src/literature_sources/arxiv.py
 src/literature_sources/base.py
 src/literature_sources/core.py
 src/literature_sources/crossref.py
@@ -121,6 +122,7 @@ src/literature_sources/nasa_ntrs.py
 src/literature_sources/ncbi.py
 src/literature_sources/openalex.py
 src/literature_sources/osti.py
+src/literature_sources/semantic_scholar.py
 src/literature_sources/unpaywall.py
 src/literature_sources/web_of_science.py
 src/literature_support_fields.py

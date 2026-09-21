@@ -24,6 +24,14 @@ class OpenAlexSource(LiteratureSource):
 
     @staticmethod
     def _candidate(work: dict[str, Any], *, method: str, identifier: str) -> SourceCandidate:
+        inverted = work.get("abstract_inverted_index") or {}
+        abstract_tokens = [
+            (int(position), str(token))
+            for token, positions in inverted.items()
+            for position in positions or []
+            if str(position).isdigit() or isinstance(position, int)
+        ]
+        abstract = " ".join(token for _, token in sorted(abstract_tokens))
         locations: list[dict[str, str]] = []
         for location in work.get("locations") or []:
             pdf = str(location.get("pdf_url") or "")
@@ -63,7 +71,12 @@ class OpenAlexSource(LiteratureSource):
             OA_locations=locations,
             pdf_candidate_url=best_pdf,
             references=[str(value) for value in work.get("referenced_works") or []],
+            related_works=[str(value) for value in work.get("related_works") or []],
             source_record_ids=[str(work.get("id") or "")],
+            openalex_id=str(work.get("id") or "").rsplit("/", 1)[-1],
+            abstract=abstract,
+            publication_types=[str(work.get("type") or "")],
+            reference_count=int(work.get("referenced_works_count") or len(work.get("referenced_works") or [])),
             version_provenance=[
                 {
                     "source": "OPENALEX",
@@ -104,6 +117,45 @@ class OpenAlexSource(LiteratureSource):
 
     def resolve_doi(self, doi: str) -> SourceCandidate | None:
         return self.resolve_dois([doi]).get(normalize_doi(doi))
+
+    def resolve_openalex_ids(self, work_ids: Iterable[str]) -> list[SourceCandidate]:
+        """Resolve OpenAlex work IDs in gentle batches, preserving API cacheability."""
+        unique = list(dict.fromkeys(
+            str(value or "").strip().rsplit("/", 1)[-1].upper()
+            for value in work_ids
+            if str(value or "").strip()
+        ))
+        output: list[SourceCandidate] = []
+        for offset in range(0, len(unique), 50):
+            batch = unique[offset:offset + 50]
+            joined = "|".join(batch)
+            output.extend(self._works(
+                {"filter": f"openalex_id:{joined}", "per_page": 50},
+                cache_key=f"openalex_ids:{joined}",
+            ))
+        return output
+
+    def citing_works(self, work_ids: Iterable[str], *, limit: int = 100) -> list[SourceCandidate]:
+        """Return works citing any supplied seed, bounded to avoid graph explosion."""
+        unique = list(dict.fromkeys(
+            str(value or "").strip().rsplit("/", 1)[-1].upper()
+            for value in work_ids
+            if str(value or "").strip()
+        ))
+        output: list[SourceCandidate] = []
+        remaining = max(0, limit)
+        for offset in range(0, len(unique), 25):
+            if remaining <= 0:
+                break
+            batch = unique[offset:offset + 25]
+            joined = "|".join(batch)
+            page_size = min(100, remaining)
+            output.extend(self._works(
+                {"filter": f"cites:{joined}", "per_page": page_size},
+                cache_key=f"cites:{joined}:{page_size}",
+            ))
+            remaining = limit - len(output)
+        return output[:limit]
 
     def search(self, query: str, *, since: str = "", limit: int = 25) -> list[SourceCandidate]:
         normalized = normalize_doi(query)

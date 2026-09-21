@@ -32,6 +32,7 @@ class SourceCandidate:
     pdf_candidate_url: str = ""
     references: list[str] = field(default_factory=list)
     cited_by: list[str] = field(default_factory=list)
+    related_works: list[str] = field(default_factory=list)
     topic: list[str] = field(default_factory=list)
     tier_candidate: str = "UNASSIGNED"
     retrieval_score: float = 0.0
@@ -39,6 +40,18 @@ class SourceCandidate:
     source_record_ids: list[str] = field(default_factory=list)
     version_provenance: list[dict[str, str]] = field(default_factory=list)
     retrieval_provenance: list[dict[str, str]] = field(default_factory=list)
+    abstract: str = ""
+    arxiv_id: str = ""
+    submitted_date: str = ""
+    updated_date: str = ""
+    categories: list[str] = field(default_factory=list)
+    journal_reference: str = ""
+    publication_stage: str = ""
+    semantic_scholar_id: str = ""
+    openalex_id: str = ""
+    corpus_id: str = ""
+    publication_types: list[str] = field(default_factory=list)
+    reference_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -219,7 +232,6 @@ class LiteratureSource:
         if last_error:
             raise last_error
         raise RuntimeError(f"{self.name}_REQUEST_FAILED")
-
 
 class _RetryableHTTPError(requests.HTTPError):
     def __init__(self, status_code: int, retry_after: float | None = None) -> None:

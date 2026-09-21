@@ -5,5 +5,9 @@
     "TFC_PRIVATE_RAG_ROOT",
     "TFC_PRIVATE_RAG_BUNDLE_URL"
   ],
-  "fail_closed_when_unavailable": true
+  "fail_closed_when_unavailable": true,
+  "prefer_declared_private_bundle": true,
+  "private_bundle_api_url": "https://api.github.com/repos/ctwaurora/TitaniumFatigueChat-Private-RAG/releases/assets/578501820",
+  "private_bundle_sha256": "1535eb3601332c6cc596adfb9837ef5427ab5c38689fce3a0cd01950d037ce5d",
+  "private_bundle_contains_full_text": false
 }

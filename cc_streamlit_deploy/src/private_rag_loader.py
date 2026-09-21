@@ -9,6 +9,7 @@ ephemeral cache outside the application checkout.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import tempfile
@@ -132,7 +133,28 @@ def resolve_private_rag_root(
             raise PrivateRagLoadError("Configured private RAG root is invalid")
         return root
 
-    url = str(env.get(PRIVATE_URL_ENV) or "").strip()
+    # Public deployment code may declare the immutable API URL and checksum of
+    # the current asset.  These values are not credentials: the repository is
+    # private and still requires the bearer token stored in Streamlit secrets.
+    # Prefer the declared pair so an existing App can advance its active corpus
+    # without exposing data or depending on a stale URL/SHA secret.
+    deployment_metadata: dict[str, object] = {}
+    metadata_path = Path(project_root) / "data" / "PRIVATE_RAG_REQUIRED.json"
+    if metadata_path.is_file():
+        try:
+            value = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if isinstance(value, dict):
+                deployment_metadata = value
+        except (OSError, json.JSONDecodeError):
+            deployment_metadata = {}
+    prefer_declared = deployment_metadata.get("prefer_declared_private_bundle") is True
+    declared_url = str(deployment_metadata.get("private_bundle_api_url") or "").strip()
+    declared_sha = str(deployment_metadata.get("private_bundle_sha256") or "").strip()
+    url = (
+        declared_url
+        if prefer_declared and declared_url
+        else str(env.get(PRIVATE_URL_ENV) or "").strip()
+    )
     if url:
         cache_value = str(env.get("TFC_PRIVATE_RAG_CACHE_ROOT") or "").strip()
         cache_root = (
@@ -142,7 +164,11 @@ def resolve_private_rag_root(
         )
         return _download_private_artifact(
             url,
-            str(env.get(PRIVATE_SHA_ENV) or "").strip(),
+            (
+                declared_sha
+                if prefer_declared and declared_sha
+                else str(env.get(PRIVATE_SHA_ENV) or "").strip()
+            ),
             str(env.get(PRIVATE_TOKEN_ENV) or "").strip(),
             cache_root,
         )

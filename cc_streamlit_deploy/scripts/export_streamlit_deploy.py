@@ -15,6 +15,13 @@ from typing import Iterable, List, Sequence, Tuple
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PRIVATE_BUNDLE_API_URL = (
+    "https://api.github.com/repos/ctwaurora/"
+    "TitaniumFatigueChat-Private-RAG/releases/assets/578501820"
+)
+PRIVATE_BUNDLE_SHA256 = (
+    "1535eb3601332c6cc596adfb9837ef5427ab5c38689fce3a0cd01950d037ce5d"
+)
 DEFAULT_OUTPUT_DIR = (
     PROJECT_ROOT.parent
     / "TitaniumFatigueChat-Streamlit-GitHub"
@@ -282,6 +289,10 @@ def write_public_metadata_catalog(project_root: Path, output_dir: Path) -> Path:
                 "public_repository_contains_private_rag": False,
                 "runtime_sources": ["TFC_PRIVATE_RAG_ROOT", "TFC_PRIVATE_RAG_BUNDLE_URL"],
                 "fail_closed_when_unavailable": True,
+                "prefer_declared_private_bundle": True,
+                "private_bundle_api_url": PRIVATE_BUNDLE_API_URL,
+                "private_bundle_sha256": PRIVATE_BUNDLE_SHA256,
+                "private_bundle_contains_full_text": False,
             },
             ensure_ascii=False,
             indent=2,
