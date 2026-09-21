@@ -455,6 +455,7 @@ def _get_system_stats_cached(signature: str) -> Dict[str, Any]:
             ),
             "local_pdf_file_count": 0,
             "storage_mode": "CLOUD_READ_ONLY",
+            "product_version": str(active["product_version"]),
             "dataset_version": str(active["dataset_version"]),
             "dataset_hash": str(active["dataset_hash"]),
         }
@@ -476,6 +477,7 @@ def _get_system_stats_cached(signature: str) -> Dict[str, Any]:
         "formula_confirmed_count": int(active["formula_confirmed_count"]),
         "formula_rag_record_count": int(canonical["formula_record_count"]),
         "rag_chunk_count": int(active["chunk_count"]),
+        "product_version": str(active["product_version"]),
         "dataset_version": str(active["dataset_version"]),
         "dataset_hash": str(active["dataset_hash"]),
         "legacy_csv_row_count": 0,

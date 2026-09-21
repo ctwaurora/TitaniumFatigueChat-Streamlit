@@ -2788,8 +2788,8 @@ with st.sidebar:
             f"- 严格确认公式：{stats.get('formula_confirmed_count', 0)}\n"
             f"- {'可追溯文献' if _CLOUD_BUNDLE_STATUS['required'] else '本地有效 PDF'}："
             f"{stats.get('traceable_literature_count', 0) if _CLOUD_BUNDLE_STATUS['required'] else stats.get('local_pdf_file_count', 0)}\n"
-            f"- 产品：{stats.get('product_version') or 'TitaniumFatigueChat-v1.1'}\n"
-            f"- 数据集：{stats.get('dataset_version') or 'TitaniumFatigueChat-v1.1'}"
+            f"- 产品：{stats.get('product_version') or 'TitaniumFatigueChat'}\n"
+            f"- 数据集：{stats.get('dataset_version') or 'TitaniumFatigueChat-Active-Corpus'}"
         )
     st.caption("⚠️ 系统生成的是候选科学假设，不得声称已被证明。")
 

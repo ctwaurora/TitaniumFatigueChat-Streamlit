@@ -1,7 +1,7 @@
 {
   "source_commit": "800d80bf23275fe61f69b821a1608e3fdc2fd44c",
-  "export_time": "2026-09-21T07:39:58+00:00",
-  "deploy_manifest_hash": "c107f15c7b867278193aba28eca4d21f978bf9600413316004c98add22aa11f1",
+  "export_time": "2026-09-21T07:57:03+00:00",
+  "deploy_manifest_hash": "925c7a606dfc80a54d30b73883c164846e85f00cda6546289f2bff70d64cbea5",
   "application_version": "3.2.1-v1.1-consistency",
   "product_version": "TitaniumFatigueChat",
   "dataset_version": "TitaniumFatigueChat-Active-Corpus-273",
