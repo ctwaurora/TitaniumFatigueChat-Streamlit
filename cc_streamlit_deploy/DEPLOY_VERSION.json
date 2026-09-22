@@ -1,13 +1,13 @@
 {
   "source_commit": "800d80bf23275fe61f69b821a1608e3fdc2fd44c",
-  "export_time": "2026-09-21T07:57:03+00:00",
-  "deploy_manifest_hash": "925c7a606dfc80a54d30b73883c164846e85f00cda6546289f2bff70d64cbea5",
+  "export_time": "2026-09-22T05:21:02+00:00",
+  "deploy_manifest_hash": "166449ce24a08d2e52edfcfc05c47284f8dee73f1f7ef6f2b5476c5ba484ffd5",
   "application_version": "3.2.1-v1.1-consistency",
   "product_version": "TitaniumFatigueChat",
-  "dataset_version": "TitaniumFatigueChat-Active-Corpus-273",
-  "dataset_hash": "528370afca8feabc9f5af41f951fc90bc55c000670314a66f512eb6ad73452e3",
-  "private_rag_version": "TitaniumFatigueChat-Private-RAG-Active-273",
-  "paper_count": 273,
-  "rag_count": 273,
-  "chunk_count": 64694
+  "dataset_version": "TitaniumFatigueChat-Active-Corpus-323",
+  "dataset_hash": "01f70062ea65b83551494a2f1eb3ee28da931dbf44f7272d65c4a27f99261518",
+  "private_rag_version": "TitaniumFatigueChat-Private-RAG-Active-323",
+  "paper_count": 323,
+  "rag_count": 323,
+  "chunk_count": 73233
 }

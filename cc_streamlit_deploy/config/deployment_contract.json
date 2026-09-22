@@ -2,10 +2,10 @@
   "schema_version": "tfc-deployment-contract-1.0",
   "product_version": "TitaniumFatigueChat",
   "source_commit_policy": "RESOLVED_AT_EXPORT",
-  "expected_dataset_version": "TitaniumFatigueChat-Active-Corpus-273",
-  "expected_private_rag_version": "TitaniumFatigueChat-Private-RAG-Active-273",
-  "expected_paper_count": 273,
-  "expected_rag_count": 273,
-  "expected_chunk_count": 64694,
+  "expected_dataset_version": "TitaniumFatigueChat-Active-Corpus-323",
+  "expected_private_rag_version": "TitaniumFatigueChat-Private-RAG-Active-323",
+  "expected_paper_count": 323,
+  "expected_rag_count": 323,
+  "expected_chunk_count": 73233,
   "mismatch_policy": "FAIL_CLOSED_WITH_VERSION_MISMATCH"
 }

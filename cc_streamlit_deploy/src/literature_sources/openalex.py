@@ -166,3 +166,33 @@ class OpenAlexSource(LiteratureSource):
         if since:
             params["filter"] = f"from_publication_date:{since}"
         return self._works(params, cache_key=f"search:{query.casefold()}:{since}:{min(100, limit)}")
+
+    def search_page(
+        self,
+        query: str,
+        *,
+        page: int,
+        since: str = "",
+        limit: int = 100,
+        open_access_only: bool = False,
+    ) -> list[SourceCandidate]:
+        """Fetch one stable OpenAlex search page for deep candidate discovery."""
+        filters = []
+        if since:
+            filters.append(f"from_publication_date:{since}")
+        if open_access_only:
+            filters.append("open_access.is_oa:true")
+        params: dict[str, Any] = {
+            "search": query,
+            "per_page": min(100, max(1, limit)),
+            "page": max(1, page),
+        }
+        if filters:
+            params["filter"] = ",".join(filters)
+        return self._works(
+            params,
+            cache_key=(
+                f"search_page:{query.casefold()}:{since}:{params['per_page']}:"
+                f"{params['page']}:{int(open_access_only)}"
+            ),
+        )

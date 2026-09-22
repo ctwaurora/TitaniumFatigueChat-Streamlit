@@ -2,14 +2,14 @@
   "schema_version": "active-dataset-contract-1.0",
   "status": "ACTIVE",
   "product_version": "TitaniumFatigueChat",
-  "dataset_version": "TitaniumFatigueChat-Active-Corpus-273",
-  "dataset_hash": "528370afca8feabc9f5af41f951fc90bc55c000670314a66f512eb6ad73452e3",
-  "paper_count": 273,
-  "rag_count": 273,
-  "chunk_count": 64694,
-  "evidence_record_count": 35084,
-  "condition_evidence_record_count": 30950,
-  "formula_candidate_count": 3880,
+  "dataset_version": "TitaniumFatigueChat-Active-Corpus-323",
+  "dataset_hash": "01f70062ea65b83551494a2f1eb3ee28da931dbf44f7272d65c4a27f99261518",
+  "paper_count": 323,
+  "rag_count": 323,
+  "chunk_count": 73233,
+  "evidence_record_count": 39355,
+  "condition_evidence_record_count": 35780,
+  "formula_candidate_count": 4166,
   "formula_confirmed_count": 3,
-  "private_rag_version": "TitaniumFatigueChat-Private-RAG-Active-273"
+  "private_rag_version": "TitaniumFatigueChat-Private-RAG-Active-323"
 }

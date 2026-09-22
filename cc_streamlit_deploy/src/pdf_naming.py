@@ -5,9 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
+import sqlite3
 import uuid
 from pathlib import Path
 from typing import Any, Iterable
+
+import joblib
 
 from src.stage1_store import load_paper_manifest, load_pdf_file_records, stage1_paths
 
@@ -57,20 +61,50 @@ def safe_title_filename(title: str, *, max_length: int = 170) -> str:
 
 
 def _formal_rows(base_dir: Path) -> list[dict[str, Any]]:
-    rows = [
+    manifest_rows = [
         row
         for row in load_paper_manifest(base_dir)
         if row.get("library_status") == FORMAL_LIBRARY_STATUS
         and row.get("rag_status") == FORMAL_RAG_STATUS
         and row.get("pdf_valid") is True
     ]
-    return sorted(
-        rows,
-        key=lambda row: (
-            str(row.get("title") or "").casefold(),
-            str(row.get("paper_id") or ""),
-        ),
+    by_id = {str(row.get("paper_id") or ""): dict(row) for row in manifest_rows}
+    # The active registry is append-only and therefore provides the formal
+    # acceptance order.  Keep that order stable; only fall back to document_id
+    # for records absent from the registry.
+    registry = _read_jsonl(base_dir / "data" / "system" / "active_formal_registry.jsonl")
+    ordered: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for record in registry:
+        paper_id = str(record.get("document_id") or record.get("paper_id") or "")
+        row = by_id.get(paper_id)
+        if row is not None and paper_id not in seen:
+            # The Active Formal Registry is authoritative for the currently
+            # accepted binary.  A small number of historical Stage-1 rows keep
+            # a canonical_historical_sha while the active lock intentionally
+            # uses a verified alternate binary.
+            row.update(
+                {
+                    "paper_id": paper_id,
+                    "title": record.get("title") or row.get("title") or "",
+                    "doi": record.get("doi") or row.get("doi") or "",
+                    "canonical_pdf_path": record.get("local_file_path")
+                    or row.get("canonical_pdf_path")
+                    or "",
+                    "file_hash_sha256": record.get("sha256")
+                    or row.get("file_hash_sha256")
+                    or "",
+                }
+            )
+            ordered.append(row)
+            seen.add(paper_id)
+    ordered.extend(
+        sorted(
+            (row for paper_id, row in by_id.items() if paper_id not in seen),
+            key=lambda row: str(row.get("paper_id") or ""),
+        )
     )
+    return ordered
 
 
 def build_rename_plan(base_dir: Path, *, append_only: bool = False) -> list[dict[str, Any]]:
@@ -151,19 +185,145 @@ def validate_rename_plan(plan: list[dict[str, Any]]) -> dict[str, int]:
 
 def _replace_paths(value: Any, path_map: dict[str, str]) -> Any:
     if isinstance(value, dict):
-        return {key: _replace_paths(item, path_map) for key, item in value.items()}
+        return {
+            _replace_paths(key, path_map) if isinstance(key, str) else key: _replace_paths(item, path_map)
+            for key, item in value.items()
+        }
     if isinstance(value, list):
         return [_replace_paths(item, path_map) for item in value]
     if isinstance(value, str):
-        return path_map.get(value.casefold(), value)
+        exact = path_map.get(value.casefold())
+        if exact is not None:
+            return exact
+        # Some promoted papers were deep-read in an isolated gate workspace,
+        # so their runtime provenance retained a different directory with the
+        # same old PDF basename.  Once accepted into the single Active Corpus,
+        # source-path metadata must resolve to the canonical active PDF.
+        if "/" in value or "\\" in value:
+            canonical = path_map.get("@basename:" + Path(value).name.casefold())
+            if canonical is not None:
+                return canonical
+        return value
     return value
 
 
+def _path_replacements(base_dir: Path, plan: list[dict[str, Any]]) -> dict[str, str]:
+    replacements: dict[str, str] = {}
+    pdf_root = (base_dir / "paper" / "pdfs").resolve()
+    for item in plan:
+        old_path = Path(item["old_path"]).resolve()
+        new_path = Path(item["new_path"]).resolve()
+        variants = {
+            str(old_path): str(new_path),
+            old_path.name: new_path.name,
+            (Path("paper") / "pdfs" / old_path.name).as_posix(): (
+                Path("paper") / "pdfs" / new_path.name
+            ).as_posix(),
+            str(Path("paper") / "pdfs" / old_path.name): str(
+                Path("paper") / "pdfs" / new_path.name
+            ),
+        }
+        try:
+            variants[str(old_path.relative_to(pdf_root))] = str(new_path.relative_to(pdf_root))
+        except ValueError:
+            pass
+        replacements.update({old.casefold(): new for old, new in variants.items()})
+        replacements["@basename:" + old_path.name.casefold()] = str(new_path)
+    return replacements
+
+
+def _structured_reference_files(base_dir: Path) -> list[Path]:
+    files: set[Path] = set()
+    for relative in (
+        "data/deep_read",
+        "data/tasks",
+        "data/rag",
+        "data/evidence",
+        "data/stage3_5",
+        "data/oa",
+    ):
+        root = base_dir / relative
+        if root.exists():
+            files.update(root.rglob("*.json"))
+            files.update(root.rglob("*.jsonl"))
+    # Only active system contracts are mutable.  Historical v1.1 manifests
+    # intentionally keep their original filenames for audit reproducibility.
+    for name in (
+        "active_formal_dataset_manifest.json",
+        "active_formal_pdf_lock_manifest.json",
+        "active_formal_registry.jsonl",
+        "formal_rag_whitelist.json",
+        "pdf_watch_queue.json",
+        "corpus_statistics.json",
+    ):
+        path = base_dir / "data" / "system" / name
+        if path.is_file():
+            files.add(path)
+    return sorted(files)
+
+
+def _write_replaced_jsonl(path: Path, path_map: dict[str, str]) -> bool:
+    temporary = path.with_suffix(path.suffix + ".rename_tmp")
+    changed = False
+    with path.open("r", encoding="utf-8") as source, temporary.open(
+        "w", encoding="utf-8", newline="\n"
+    ) as target:
+        for line in source:
+            if not line.strip():
+                continue
+            value = json.loads(line)
+            replaced = _replace_paths(value, path_map)
+            changed = changed or replaced != value
+            target.write(json.dumps(replaced, ensure_ascii=False, sort_keys=True) + "\n")
+    if changed:
+        temporary.replace(path)
+    else:
+        temporary.unlink(missing_ok=True)
+    return changed
+
+
+def _refresh_binary_rag_metadata(base_dir: Path, path_map: dict[str, str]) -> int:
+    updates = 0
+    cache = base_dir / "data" / "rag" / "search_documents.joblib"
+    if cache.is_file():
+        documents = joblib.load(cache)
+        replaced = _replace_paths(documents, path_map)
+        if replaced != documents:
+            temporary = cache.with_suffix(cache.suffix + ".rename_tmp")
+            joblib.dump(replaced, temporary, compress=0)
+            temporary.replace(cache)
+            updates += 1
+
+    lookup = base_dir / "data" / "rag" / "search_documents.sqlite3"
+    if lookup.is_file():
+        temporary = lookup.with_suffix(lookup.suffix + ".rename_tmp")
+        temporary.unlink(missing_ok=True)
+        shutil.copy2(lookup, temporary)
+        changed = 0
+        connection = sqlite3.connect(temporary)
+        try:
+            for doc_id, payload in connection.execute("SELECT doc_id, payload FROM documents"):
+                value = json.loads(payload)
+                replaced = _replace_paths(value, path_map)
+                if replaced != value:
+                    connection.execute(
+                        "UPDATE documents SET payload = ? WHERE doc_id = ?",
+                        (json.dumps(replaced, ensure_ascii=False), doc_id),
+                    )
+                    changed += 1
+            connection.commit()
+        finally:
+            connection.close()
+        if changed:
+            temporary.replace(lookup)
+            updates += 1
+        else:
+            temporary.unlink(missing_ok=True)
+    return updates
+
+
 def _update_active_references(base_dir: Path, plan: list[dict[str, Any]]) -> dict[str, int]:
-    path_map = {
-        str(Path(item["old_path"]).resolve()).casefold(): str(Path(item["new_path"]).resolve())
-        for item in plan
-    }
+    path_map = _path_replacements(base_dir, plan)
     paths = stage1_paths(base_dir)
     manifest = load_paper_manifest(base_dir)
     manifest_updates = 0
@@ -191,39 +351,29 @@ def _update_active_references(base_dir: Path, plan: list[dict[str, Any]]) -> dic
     # references must move in the same transaction as the manifest and asset
     # rows, otherwise the next incremental RAG build rejects every renamed
     # formal paper as untrusted.
-    candidates = [
-        base_dir / "data" / "deep_read",
-        base_dir / "data" / "tasks",
-        base_dir / "data" / "system",
-    ]
-    for root in candidates:
-        if not root.exists():
+    for path in _structured_reference_files(base_dir):
+        try:
+            if path.suffix == ".jsonl":
+                structured_updates += int(_write_replaced_jsonl(path, path_map))
+            else:
+                value = json.loads(path.read_text(encoding="utf-8"))
+                replaced = _replace_paths(value, path_map)
+                if replaced != value:
+                    temp = path.with_suffix(path.suffix + ".rename_tmp")
+                    temp.write_text(
+                        json.dumps(replaced, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+                    temp.replace(path)
+                    structured_updates += 1
+        except (OSError, json.JSONDecodeError):
             continue
-        for path in [*root.rglob("*.json"), *root.rglob("*.jsonl")]:
-            try:
-                if path.suffix == ".jsonl":
-                    value = _read_jsonl(path)
-                    replaced = _replace_paths(value, path_map)
-                    if replaced != value:
-                        _write_jsonl(path, replaced)
-                        structured_updates += 1
-                else:
-                    value = json.loads(path.read_text(encoding="utf-8"))
-                    replaced = _replace_paths(value, path_map)
-                    if replaced != value:
-                        temp = path.with_suffix(path.suffix + ".tmp")
-                        temp.write_text(
-                            json.dumps(replaced, ensure_ascii=False, indent=2) + "\n",
-                            encoding="utf-8",
-                        )
-                        temp.replace(path)
-                        structured_updates += 1
-            except (OSError, json.JSONDecodeError):
-                continue
+    binary_updates = _refresh_binary_rag_metadata(base_dir, path_map)
     return {
         "manifest_updates": manifest_updates,
         "pdf_record_updates": pdf_updates,
         "structured_reference_updates": structured_updates,
+        "binary_rag_reference_updates": binary_updates,
     }
 
 

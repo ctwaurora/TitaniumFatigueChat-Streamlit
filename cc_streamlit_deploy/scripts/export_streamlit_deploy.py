@@ -17,10 +17,10 @@ from typing import Iterable, List, Sequence, Tuple
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 PRIVATE_BUNDLE_API_URL = (
     "https://api.github.com/repos/ctwaurora/"
-    "TitaniumFatigueChat-Private-RAG/releases/assets/578501820"
+    "TitaniumFatigueChat-Private-RAG/releases/assets/580621698"
 )
 PRIVATE_BUNDLE_SHA256 = (
-    "1535eb3601332c6cc596adfb9837ef5427ab5c38689fce3a0cd01950d037ce5d"
+    "be994aeaf33703891d66da1e728fee6975a53da46aa24c8588b3146ef7287c2c"
 )
 DEFAULT_OUTPUT_DIR = (
     PROJECT_ROOT.parent
